@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Baseball Limits</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://d3js.org/d3.v7.min.js" defer></script>
+    <script src="script.js" defer></script>
+</head>
+<body>
+    <div class="content">
+        <div class="panel left">
+            <div class="loading-indicator" id="loading-indicator">
+                <div class="spinner"></div>
+                <span>Loading...</span>
+            </div>
+            <svg id="scatter-plot">
+                <!-- D3.js chart will be rendered here -->
+            </svg>
+            <div class="tooltip" id="tooltip"></div>
+        </div>
+        
+        <div class="panel right">
+            <div class="section top">
+                <h3>Baseball Limits</h3>
+            </div>
+            <div class="section middle">
+                <h3>Options</h3>
+                <div class="form-group">
+                    <label for="x-axis-select">X Axis:</label>
+                    <select id="x-axis-select">
+                        <!-- x-axis options will be rendered here -->
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="y-axis-select">Y Axis:</label>
+                    <select id="y-axis-select">
+                        <!-- y-axis options will be rendered here -->
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="s-year-select">Start Year:</label>
+                    <select id="s-year-select">
+                        <!-- s-year options will be rendered here -->
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="e-year-select">End Year:</label>
+                    <select id="e-year-select">
+                        <!-- e-year options will be rendered here -->
+                    </select>
+                </div>
+            </div>
+            <div class="section bottom">
+                <!-- <h3>Instructions ...</h3> -->
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <p>Data sources: 
+            <strong><a href="http://seanlahman.com/" target="_blank">Lahman Baseball Database</a></strong> (1871 - 2023)
+            | <strong><a href="https://www.baseball-reference.com/" target="_blank">Baseball Reference</a></strong> (2024) 
+        </p>
+    </footer>
+</body>
+</html>
