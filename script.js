@@ -192,10 +192,29 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear) {
             return rhs.year - lhs.year
         });
 
+    console.log(`allPoint.length ${allPoints.length}`);
     console.log(allPoints);
     console.log("filter OK");
 
-    const filteredPoints = allPoints;
+    const MaxPointsOnSameCoordinates = 3;
+
+    let filteredPoints = [];
+    if (allPoints.length <= MaxPointsOnSameCoordinates) {
+        filteredPoints = allPoints;
+    } else {
+        filteredPoints = allPoints.slice(0, MaxPointsOnSameCoordinates);
+
+        // same coordinates are consecutive in allPoints since it is sorted sorted
+        allPoints.slice(MaxPointsOnSameCoordinates).forEach((point, index) => {
+            if (point.x !== allPoints[index].x || point.y !== allPoints[index].y) {
+                filteredPoints.push(point);
+            }
+        });
+    }
+
+    console.log(`filteredPoints.length ${filteredPoints.length}`);
+    console.log(filteredPoints);
+    
 
     console.log("special ...");
     const specialPoints = []
@@ -241,9 +260,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear) {
         .attr("class", d => specialPoints.includes(d) ? "special-point" : "regular-point")
         .attr("cx", d => xScale(d.x))
         .attr("cy", d => yScale(d.y))
-        .attr("r", 5)
+        .attr("r", 8)
         .on("mouseover", function(event, d) {
-            d3.select(this).attr("r", 8);
+            d3.select(this).attr("r", 16);
             const tooltip = d3.select("#tooltip");
 
             // TODO: make it faster ?
@@ -259,7 +278,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear) {
                 .style("top", (event.pageY - 28) + "px");
         })
         .on("mouseout", function(event, d) {
-            d3.select(this).attr("r", 5);
+            d3.select(this).attr("r", 8);
             d3.select("#tooltip").style("opacity", 0);
         });
 
