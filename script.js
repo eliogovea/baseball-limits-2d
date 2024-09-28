@@ -156,22 +156,22 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear) {
     svg.selectAll("*").remove(); // Clear existing plot
     console.log("remove OK")
 
-    const dataPoints = [];
+    const allPoints = [];
 
     console.log("copy ...");
     points.forEach((point) => {
-        dataPoints.push({
+        allPoints.push({
             x: point[xDim],
             y: point[yDim],
             year: point.yearID,
             details: `${point.playerID} ${point[xDim]}/${point[yDim]} (${point.teamID} ${point.lgID} ${point.yearID})`
         })
     });
-    console.log(dataPoints);
+    console.log(allPoints);
     console.log("copy OK");
 
     console.log("filter ...");
-    const allPoints = dataPoints
+    const filteredPoints = allPoints
         .filter((point) => {
             return !isNaN(point.x)
                 && !isNaN(point.y)
@@ -192,16 +192,19 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear) {
             return rhs.year - lhs.year
         });
 
-    console.log(`allPoint.length ${allPoints.length}`);
-    console.log(allPoints);
+    console.log(`filteredPoints.length ${filteredPoints.length}`);
+    console.log(filteredPoints);
 
-    const uniquePoints = 
-        allPoints.slice(0, 1)
-                 .concat(allPoints
-                    .slice(1)
-                    .filter((point, index) => {
-                        return (point.x !== allPoints[index].x || point.y !== allPoints[index].y);
-                    }));
+    const uniquePoints = filteredPoints
+        .slice(0, 1)
+        .concat(
+            filteredPoints
+                .slice(1)
+                .filter((point, index) => {
+                        return point.x !== filteredPoints[index].x 
+                            || point.y !== filteredPoints[index].y;
+                })
+        );
 
     console.log(`uniquePoints.length ${uniquePoints.length}`);
     console.log(uniquePoints);
@@ -258,7 +261,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear) {
             const tooltip = d3.select("#tooltip");
 
             // TODO: make it faster ?
-            const tooltipContent = allPoints
+            const tooltipContent = filteredPoints
                 .filter(point => point.x === d.x && point.y === d.y)
                 .map((point) => point.details)
                 .join("<br>");
