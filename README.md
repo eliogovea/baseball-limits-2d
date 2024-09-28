@@ -10,9 +10,15 @@ Baseball Limits Explorer aims to provide visualizations of players performance c
 ## Update data
  - Download latest batting stats from [Baseball Reference](https://www.baseball-reference.com/leagues/majors/2024-standard-batting.shtml) to `data/batting_bbref_2024.csv`
  - Run the following scripts:
-    ```sh
-    python3 scripts/convert_csv_bbref.py data/batting_bbref_2024.csv data/batting_limits_2024-2024.csv 2024
+    ```console
+    python3 scripts/convert_csv_bbref.py \
+      data/batting_bbref_2024.csv \
+      data/batting_limits_2024-2024.csv \
+      2024
     ```
-    ```sh
-    python3 scripts/combine_csv.py data/batting_limits_1871-2023.csv data/batting_limits_2024-2024.csv data/batting_limits_1871-2024.csv 
+    ```console
+    python3 scripts/combine_csv.py \
+      data/batting_limits_1871-2023.csv \
+      data/batting_limits_2024-2024.csv \
+      data/batting_limits_1871-2024.csv 
     ```
