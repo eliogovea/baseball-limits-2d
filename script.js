@@ -194,27 +194,21 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear) {
 
     console.log(`allPoint.length ${allPoints.length}`);
     console.log(allPoints);
-    console.log("filter OK");
 
-    const MaxPointsOnSameCoordinates = 3;
+    const MaxPointsOnSameCoordinates = 5;
 
-    let filteredPoints = [];
-    if (allPoints.length <= MaxPointsOnSameCoordinates) {
-        filteredPoints = allPoints;
-    } else {
-        filteredPoints = allPoints.slice(0, MaxPointsOnSameCoordinates);
-
-        // same coordinates are consecutive in allPoints since it is sorted sorted
-        allPoints.slice(MaxPointsOnSameCoordinates).forEach((point, index) => {
-            if (point.x !== allPoints[index].x || point.y !== allPoints[index].y) {
-                filteredPoints.push(point);
-            }
-        });
-    }
+    const filteredPoints = 
+        allPoints.slice(0, MaxPointsOnSameCoordinates)
+                 .concat(allPoints
+                    .slice(MaxPointsOnSameCoordinates)
+                    .filter((point, index) => {
+                        return (point.x !== allPoints[index].x || point.y !== allPoints[index].y);
+                    }));
 
     console.log(`filteredPoints.length ${filteredPoints.length}`);
     console.log(filteredPoints);
-    
+
+    console.log("filter OK");
 
     console.log("special ...");
     const specialPoints = []
@@ -268,7 +262,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear) {
             // TODO: make it faster ?
             const tooltipContent = filteredPoints
                 .filter(point => point.x === d.x && point.y === d.y)
-                .filter((_, index) => index < 5)
+                .filter((_, index) => index < MaxPointsOnSameCoordinates)
                 .map((point) => point.details)
                 .join("<br>");
             
