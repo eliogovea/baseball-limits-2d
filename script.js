@@ -257,12 +257,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear) {
             d3.select(this).attr("r", 16);
             const tooltip = d3.select("#tooltip");
 
-            const MaxPointsOnSameCoordinates = 5;
-
             // TODO: make it faster ?
             const tooltipContent = allPoints
                 .filter(point => point.x === d.x && point.y === d.y)
-                .filter((_, index) => index < MaxPointsOnSameCoordinates)
                 .map((point) => point.details)
                 .join("<br>");
             
