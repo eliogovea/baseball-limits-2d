@@ -203,6 +203,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear) {
         while (specialPoints.length > 0 && specialPoints[specialPoints.length - 1].y < point.y) {
             specialPoints.pop();
         }
+        if (specialPoints.length > 0 && specialPoints[specialPoints.length - 1].y == point.y && specialPoints[specialPoints.length - 1].x < point.x) {
+            specialPoints.pop();
+        }
         specialPoints.push(point);
     });
 
