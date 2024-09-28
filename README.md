@@ -1,7 +1,8 @@
-# Baseball Limits Explorer
+# Baseball Limits 2D
 
 ## Overview
-Baseball Limits Explorer aims to provide visualizations of players performance combining two parameters.
+
+**[Baseball Limits 2D](https://eliogovea.github.io/baseball-limits-2d/)** aims to provide visualizations of players performance combining two parameters.
 
 ## Data Sources
 - **[Lahman Database](http://seanlahman.com/)**: Statistics for MLB seasons up to 2023.
