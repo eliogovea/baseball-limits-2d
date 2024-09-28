@@ -195,24 +195,22 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear) {
     console.log(`allPoint.length ${allPoints.length}`);
     console.log(allPoints);
 
-    const MaxPointsOnSameCoordinates = 5;
-
-    const filteredPoints = 
-        allPoints.slice(0, MaxPointsOnSameCoordinates)
+    const uniquePoints = 
+        allPoints.slice(0, 1)
                  .concat(allPoints
-                    .slice(MaxPointsOnSameCoordinates)
+                    .slice(1)
                     .filter((point, index) => {
                         return (point.x !== allPoints[index].x || point.y !== allPoints[index].y);
                     }));
 
-    console.log(`filteredPoints.length ${filteredPoints.length}`);
-    console.log(filteredPoints);
+    console.log(`uniquePoints.length ${uniquePoints.length}`);
+    console.log(uniquePoints);
 
     console.log("filter OK");
 
     console.log("special ...");
     const specialPoints = []
-    filteredPoints.forEach(point => {
+    uniquePoints.forEach(point => {
         while (specialPoints.length > 0 && specialPoints[specialPoints.length - 1].y < point.y) {
             specialPoints.pop();
         }
@@ -234,21 +232,21 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear) {
     console.log(`svgElementHeight: ${svgElementHeight}`);
 
     const xScale = d3.scaleLinear()
-        .domain(d3.extent(filteredPoints, d => d.x))
+        .domain(d3.extent(uniquePoints, d => d.x))
         .nice()
         .range([50, svgElementWidth - 50]);
     
     console.log(`xScale.domain(): ${xScale.domain()}`);
 
     const yScale = d3.scaleLinear()
-        .domain(d3.extent(filteredPoints, d => d.y))
+        .domain(d3.extent(uniquePoints, d => d.y))
         .nice()
         .range([svgElementHeight, 50]);
 
     console.log(`yScale.domain(): ${yScale.domain()}`);
 
     svg.selectAll("circle")
-        .data(filteredPoints)
+        .data(uniquePoints)
         .enter()
         .append("circle")
         .attr("class", d => specialPoints.includes(d) ? "special-point" : "regular-point")
@@ -259,8 +257,10 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear) {
             d3.select(this).attr("r", 16);
             const tooltip = d3.select("#tooltip");
 
+            const MaxPointsOnSameCoordinates = 5;
+
             // TODO: make it faster ?
-            const tooltipContent = filteredPoints
+            const tooltipContent = allPoints
                 .filter(point => point.x === d.x && point.y === d.y)
                 .filter((_, index) => index < MaxPointsOnSameCoordinates)
                 .map((point) => point.details)
