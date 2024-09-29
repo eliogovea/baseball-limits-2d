@@ -36,10 +36,22 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
     return parsedPoints;
 })
 .then((points) => {
+    console.log("add ...");
+
+    points.forEach((point) => {
+        point["PA"] = point["AB"] + point["BB"] + point["HBP"] + point["SH"] + point["SF"];
+        point["TB"] = point["H"] + point["2B"] + 2 * point["3B"] + 3 * point["HR"];
+    });
+
+    console.log("add OK");
+
+    return points;
+})
+.then((points) => {
     console.log("main ...");
     console.log(points);
 
-    const dimensions = ["G","AB","R","H","2B","3B","HR","RBI","SB","CS","BB","SO","IBB","HBP","SH","SF","GIDP"]
+    const dimensions = ["PA", "G", "AB", "R", "H", "2B", "3B", "HR", "TB", "RBI", "SB", "CS", "BB", "SO", "IBB", "HBP", "SH", "SF", "GIDP", "TB"]
     populateSelectors(points, dimensions); 
 
     function refreshChart() {
