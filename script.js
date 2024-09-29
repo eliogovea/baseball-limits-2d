@@ -99,6 +99,12 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
         refreshChart();
         console.log("pa-min-select change OK");
     });
+
+    window.addEventListener("resize", () => {
+        console.log("window resize ...");
+        refreshChart();
+        console.log("window resize OK");
+    })
 });
 
 function populateSelectors(points, dimensions) {
