@@ -60,9 +60,10 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
         const yDim = d3.select("#y-axis-select").property("value");
         const sYear = d3.select("#s-year-select").property("value");
         const eYear = d3.select("#e-year-select").property("value");
+        const minPa = d3.select("#pa-min-select").property("value");
         const loadingIndicator = document.getElementById("loading-indicator");
         loadingIndicator.style.display = "flex";
-        drawScatterPlot(points, xDim, yDim, sYear, eYear);
+        drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa);
         loadingIndicator.style.display = "none";
         console.log("RefreshChart OK");
     }
@@ -91,6 +92,12 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
         console.log("e-year-select change ...");
         refreshChart();
         console.log("e-year-select change OK");
+    });
+
+    d3.select("#pa-min-select").on("change", function () {
+        console.log("pa-min-select change ...");
+        refreshChart();
+        console.log("pa-min-select change OK");
     });
 });
 
@@ -154,11 +161,20 @@ function populateSelectors(points, dimensions) {
     yAxisSelect.value = "SB";
 
     console.log("populateSelectors OK");
+
+    const paMinSelector = document.getElementById("pa-min-select");
+
+    for (var i = 0; i <= 600; i++) {
+        const option = document.createElement("option");
+        option.value = i;
+        option.text = `   ${i.toString()}`;
+        paMinSelector.appendChild(option);
+    }
 }
 
-function drawScatterPlot(points, xDim, yDim, sYear, eYear) {
-    console.log("drawScatterPlot ...")
-    console.log(`xDim=${xDim} yDim=${yDim}, sYear=${sYear}, eYear=${eYear}`)
+function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa) {
+    console.log("drawScatterPlot ...");
+    console.log(`xDim=${xDim} yDim=${yDim}, sYear=${sYear}, eYear=${eYear} minPA=${minPa}`);
 
     console.log("scatter-plot ...");
     const svg = d3.select("#scatter-plot");
@@ -176,7 +192,8 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear) {
             x: point[xDim],
             y: point[yDim],
             year: point.yearID,
-            details: `${point.playerID} ${point[xDim]}/${point[yDim]} (${point.teamID} ${point.lgID} ${point.yearID})`
+            PA: point.PA,
+            details: `${point.playerID} ${point[xDim]}/${point[yDim]} (${point.teamID} ${point.lgID} ${point.yearID}) (PA: ${point.PA})`
         })
     });
     console.log(allPoints);
@@ -189,7 +206,8 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear) {
                 && !isNaN(point.y)
                 && !isNaN(point.year)
                 && point.year >= sYear
-                && point.year <= eYear;
+                && point.year <= eYear
+                && minPa <= point.PA
         })
         .sort((lhs, rhs) => {
             if (lhs.x != rhs.x) {
