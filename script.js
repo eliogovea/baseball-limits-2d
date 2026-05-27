@@ -614,14 +614,19 @@ function setupZoomToolbar() {
             document.querySelectorAll("#chart-toolbar .chart-tool[data-zoom-mode]")
                 .forEach(b => b.classList.remove("active"));
             btn.classList.add("active");
+            // Switching to pan-zoom resets the view because d3.zoom uses a
+            // single scale factor for both axes and can't faithfully restart
+            // from a brush-selected aspect ratio. Switching to brush keeps
+            // the current view so the user can brush *into* a panned view.
+            if (btn.dataset.zoomMode === "pan") viewDomain = null;
             zoomMode = btn.dataset.zoomMode;
-            refreshChart();
+            document.dispatchEvent(new CustomEvent("bl2d:refresh"));
         });
     });
     document.getElementById("zoom-reset").addEventListener("click", () => {
         if (!viewDomain) return;
         viewDomain = null;
-        refreshChart();
+        document.dispatchEvent(new CustomEvent("bl2d:refresh"));
     });
 }
 
@@ -1196,6 +1201,45 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         g.append("g")
             .attr("class", "brush")
             .call(brush);
+    } else if (zoomMode === "pan") {
+        // Wheel zooms, drag pans. d3.zoom emits many events during a wheel
+        // tick or pan drag; coalesce via requestAnimationFrame to keep the
+        // ~5–50k filtered-point redraw responsive.
+        const baseX = d3.scaleLinear().domain(xExtent).nice().range([0, plotW]);
+        const baseY = d3.scaleLinear().domain(yExtent).nice().range([plotH, 0]);
+        let rafPending = false;
+        const zoom = d3.zoom()
+            .scaleExtent([1, 80])
+            .translateExtent([[0, 0], [plotW, plotH]])
+            .extent([[0, 0], [plotW, plotH]])
+            .filter((event) => {
+                // Allow wheel + primary-button drag; ignore right-click + ctrl-wheel
+                // (page zoom shortcut on Mac).
+                if (event.type === "wheel") return !event.ctrlKey;
+                return !event.button;
+            })
+            .on("zoom", (event) => {
+                const t = event.transform;
+                viewDomain = {
+                    x: t.rescaleX(baseX).domain(),
+                    y: t.rescaleY(baseY).domain(),
+                };
+                if (rafPending) return;
+                rafPending = true;
+                requestAnimationFrame(() => {
+                    rafPending = false;
+                    document.dispatchEvent(new CustomEvent("bl2d:refresh"));
+                });
+            });
+        g.append("rect")
+            .attr("class", "zoom-overlay")
+            .attr("width", plotW)
+            .attr("height", plotH)
+            .attr("fill", "transparent")
+            .style("cursor", "grab")
+            .call(zoom)
+            .on("mousedown.cursor", function() { this.style.cursor = "grabbing"; })
+            .on("mouseup.cursor",   function() { this.style.cursor = "grab"; });
     }
 
     g.append("g").selectAll("circle.hit")
