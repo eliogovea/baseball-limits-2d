@@ -165,6 +165,20 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     pointer-events: none;
 }
 
+.career-line {
+    stroke: #f59e0b;
+    stroke-width: 1.5;
+    fill: none;
+    opacity: 0.55;
+    pointer-events: none;
+}
+.career-point {
+    fill: #f59e0b;
+    stroke: #ffffff;
+    stroke-width: 1.5;
+    pointer-events: none;
+}
+
 .axis text {
     font-family: var(--font-sans);
     font-size: 11px;

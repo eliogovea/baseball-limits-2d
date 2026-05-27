@@ -12,6 +12,11 @@ function eraFor(year) {
     return null;
 }
 
+// Career-highlight state. Set when the user clicks a frontier point; cleared
+// on outside click, Escape, or any filter change.
+let playerIndex = null;       // Map<playerID, Point[]>  (all seasons per player)
+let careerHighlight = null;   // playerID being highlighted, or null
+
 
 d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
     const parsedPoints = [];
@@ -50,6 +55,13 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
         point["OBP"] = (point["H"] + point["BB"] + point["HBP"]) / (point["AB"] + point["BB"] + point["HBP"] + point["SF"]);
         point["SLG"] = point["TB"] / point["AB"];
     });
+    // Build the player index once for career-trail lookups (B3).
+    playerIndex = new Map();
+    for (const p of points) {
+        let arr = playerIndex.get(p.playerID);
+        if (!arr) { arr = []; playerIndex.set(p.playerID, arr); }
+        arr.push(p);
+    }
     return points;
 })
 .then((points) => {
@@ -90,11 +102,30 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
 
     refreshChart();
 
+    const filterChanged = () => {
+        // Any filter change resets the career-highlight pin so the visible
+        // trail doesn't outlive the view it was set in.
+        careerHighlight = null;
+        refreshChart();
+    };
     ["x-axis-select", "y-axis-select", "s-year-select", "e-year-select"].forEach((id) => {
-        document.getElementById(id).addEventListener("change", refreshChart);
+        document.getElementById(id).addEventListener("change", filterChanged);
     });
-    // Slider: live preview while dragging.
-    document.getElementById("pa-min-select").addEventListener("input", refreshChart);
+    document.getElementById("pa-min-select").addEventListener("input", filterChanged);
+
+    // Career-highlight clearing: click on empty chart area, or Escape.
+    document.querySelector(".chart-region").addEventListener("click", (e) => {
+        if (careerHighlight && !e.target.closest("circle")) {
+            careerHighlight = null;
+            refreshChart();
+        }
+    });
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && careerHighlight) {
+            careerHighlight = null;
+            refreshChart();
+        }
+    });
 
     // Re-render when the chart container changes size (window resize, mobile controls toggle).
     let resizeTimer;
@@ -294,6 +325,31 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat) {
         .attr("cy", d => yScale(d.y))
         .attr("r", pointRadius);
 
+    // Career-trail layer: rendered BEFORE the red frontier dots so the
+    // clicked-on frontier point keeps its red marker on top.
+    if (careerHighlight && playerIndex && playerIndex.has(careerHighlight)) {
+        const allSeasons = playerIndex.get(careerHighlight)
+            .map(p => ({ x: p[xDim], y: p[yDim], year: p.yearID }))
+            .filter(s => !isNaN(s.x) && !isNaN(s.y))
+            .sort((a, b) => a.year - b.year);
+        if (allSeasons.length > 0) {
+            const trailLine = d3.line().x(d => xScale(d.x)).y(d => yScale(d.y));
+            const careerG = g.append("g").attr("class", "career-trail");
+            if (allSeasons.length > 1) {
+                careerG.append("path")
+                    .attr("class", "career-line")
+                    .attr("d", trailLine(allSeasons));
+            }
+            careerG.selectAll("circle")
+                .data(allSeasons).enter()
+                .append("circle")
+                .attr("class", "career-point")
+                .attr("cx", d => xScale(d.x))
+                .attr("cy", d => yScale(d.y))
+                .attr("r", Math.max(pointRadius + 1, 4));
+        }
+    }
+
     g.append("g").selectAll("circle.special-point")
         .data(special).enter()
         .append("circle")
@@ -349,7 +405,22 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat) {
         .on("mouseover", showTooltip)
         .on("mousemove", (event) => positionTooltip(event, tooltip))
         .on("mouseout", hideTooltip)
-        .on("touchstart", showTooltip, { passive: true });
+        .on("touchstart", showTooltip, { passive: true })
+        .on("click", (event, d) => {
+            // Click a frontier point → highlight that player's whole career arc.
+            // (Click on a regular point is a no-op; tooltip already on hover.)
+            if (frontierSet.has(d)) {
+                // The tooltip lists every player at this (x, y) — pick the
+                // most recent season so collisions deterministically pick one.
+                const seasons = filtered
+                    .filter(p => p.x === d.x && p.y === d.y)
+                    .sort((a, b) => b.year - a.year);
+                const target = seasons[0] || d;
+                careerHighlight = target.playerID;
+                event.stopPropagation();
+                drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat);
+            }
+        });
 
     // Hide tooltip on any tap outside a point (mobile).
     document.addEventListener("touchstart", (event) => {
