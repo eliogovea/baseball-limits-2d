@@ -94,7 +94,10 @@ async function main() {
         await sleep(waitMs);
 
         if (evalJS) {
-            await send('Runtime.evaluate', { expression: evalJS });
+            // awaitPromise lets the caller use top-level `await` inside an
+            // async IIFE so we don't take the screenshot before the eval
+            // finishes its own work.
+            await send('Runtime.evaluate', { expression: evalJS, awaitPromise: true });
             await sleep(400);
         }
 
