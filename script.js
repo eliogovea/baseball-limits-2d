@@ -1168,8 +1168,13 @@ function escapeHtml(s) {
 }
 
 function lastNameOf(playerID) {
-    const m = String(playerID).match(/[^\s]+$/);
-    return m ? m[0] : String(playerID);
+    // Strip any disambiguator suffix like " (b.1969)" added for same-name
+    // players, then take the last whitespace-separated token. The sidebar
+    // cards and tooltip keep the full disambiguated name; only the compact
+    // on-chart label uses just the last name.
+    const stripped = String(playerID).replace(/\s*\([^)]*\)\s*$/, "");
+    const m = stripped.match(/[^\s]+$/);
+    return m ? m[0] : stripped;
 }
 
 function layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, pointR, isSmall) {
