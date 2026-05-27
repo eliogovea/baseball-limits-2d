@@ -64,6 +64,14 @@
 
             <div class="controls-panel collapsed" id="controls-panel">
                 <fieldset class="control-group">
+                    <legend>Stats</legend>
+                    <div class="mode-toggle" role="group" id="stats-toggle">
+                        <button type="button" class="mode-btn active" data-stats="batting">Batting</button>
+                        <button type="button" class="mode-btn" data-stats="pitching">Pitching</button>
+                    </div>
+                </fieldset>
+
+                <fieldset class="control-group">
                     <legend>Mode</legend>
                     <div class="mode-toggle" role="group" id="mode-toggle">
                         <button type="button" class="mode-btn active" data-mode="season">Per season</button>
@@ -154,17 +162,17 @@
 
                 <fieldset class="control-group">
                     <legend>
-                        <span>Min Plate Appearances</span>
+                        <span id="threshold-label">Min Plate Appearances</span>
                         <output id="pa-min-value" for="pa-min-select" class="legend-value">0</output>
                     </legend>
                     <input type="range" id="pa-min-select" class="slider" min="0" max="600" step="1" value="0">
-                    <div class="preset-row" role="group" aria-label="Plate appearance presets">
+                    <div class="preset-row" role="group" aria-label="Threshold presets">
                         <button type="button" class="preset" data-pa="0">All</button>
                         <button type="button" class="preset" data-pa="100">100</button>
                         <button type="button" class="preset" data-pa="300">300</button>
                         <button type="button" class="preset" data-pa="502">502</button>
                     </div>
-                    <p class="control-hint">502 PA qualifies for the batting title.</p>
+                    <p class="control-hint" id="threshold-hint">502 PA qualifies for the batting title.</p>
                 </fieldset>
 
                 <section class="frontier-section" aria-label="Frontier seasons">

@@ -61,31 +61,77 @@ const URL_DEFAULTS = {
     cb: "era", sb: "none", hl: "",
 };
 
-// PA slider config differs by mode: per-season values cluster under ~700, but
-// career totals span 0 to ~16,000. Adjusting max + step + presets keeps the
-// slider usable in both modes.
-const PA_MODE_CONFIG = {
-    season: {
-        max: 600, step: 1,
-        presets: [
-            { val: 0,   label: "All" },
-            { val: 100, label: "100" },
-            { val: 300, label: "300" },
-            { val: 502, label: "502" },
-        ],
-        hint: "502 PA qualifies for the batting title.",
+// Per-dataset metadata. The Stats toggle in the UI switches `activeDataset`;
+// every read of selectors / threshold field / dimensions goes through here.
+const DATASETS = {
+    batting: {
+        label: "Batting",
+        dimensions: ["PA","G","AB","R","H","2B","3B","HR","TB","RBI","SB","CS","BB","SO","IBB","HBP","SH","SF","GIDP","AVG","OBP","SLG"],
+        defaultX: "HR",
+        defaultY: "SB",
+        thresholdField: "PA",
+        thresholdLabel: "Min Plate Appearances",
+        rateStats: new Set(["AVG", "OBP", "SLG"]),
+        thresholdConfig: {
+            season: {
+                max: 600, step: 1,
+                presets: [
+                    { val: 0,   label: "All" },
+                    { val: 100, label: "100" },
+                    { val: 300, label: "300" },
+                    { val: 502, label: "502" },
+                ],
+                hint: "502 PA qualifies for the batting title.",
+            },
+            career: {
+                max: 16000, step: 100,
+                presets: [
+                    { val: 0,     label: "All" },
+                    { val: 1000,  label: "1k" },
+                    { val: 5000,  label: "5k" },
+                    { val: 10000, label: "10k" },
+                ],
+                hint: "10,000+ PA marks a long full career.",
+            },
+        },
     },
-    career: {
-        max: 16000, step: 100,
-        presets: [
-            { val: 0,     label: "All" },
-            { val: 1000,  label: "1k" },
-            { val: 5000,  label: "5k" },
-            { val: 10000, label: "10k" },
-        ],
-        hint: "10,000+ PA marks a long full career.",
+    pitching: {
+        label: "Pitching",
+        dimensions: ["IP","G","GS","W","L","CG","SHO","SV","H","ER","HR","BB","SO","BFP","ERA","WHIP","K/9","BB/9","K/BB","H/9"],
+        defaultX: "IP",
+        defaultY: "SO",
+        thresholdField: "IP",
+        thresholdLabel: "Min Innings Pitched",
+        rateStats: new Set(["ERA", "WHIP", "K/9", "BB/9", "K/BB", "H/9"]),
+        thresholdConfig: {
+            season: {
+                max: 400, step: 1,
+                presets: [
+                    { val: 0,   label: "All" },
+                    { val: 50,  label: "50" },
+                    { val: 100, label: "100" },
+                    { val: 162, label: "162" },
+                ],
+                hint: "162 IP qualifies for the ERA title.",
+            },
+            career: {
+                max: 6000, step: 10,
+                presets: [
+                    { val: 0,    label: "All" },
+                    { val: 500,  label: "500" },
+                    { val: 1500, label: "1.5k" },
+                    { val: 3000, label: "3k" },
+                ],
+                hint: "3,000+ IP marks a long pitching career.",
+            },
+        },
     },
 };
+let activeDatasetKey = "batting";
+// Loaded after both datasets resolve; keyed by dataset key.
+const datasetState = {};
+const activeDataset = () => DATASETS[activeDatasetKey];
+const activeData    = () => datasetState[activeDatasetKey];
 
 
 // People CSV is loaded in parallel for the multi-file site (the bundle's
@@ -93,82 +139,104 @@ const PA_MODE_CONFIG = {
 // short-circuits this fetch to a Promise.resolve(null)).
 const peoplePromise = d3.csv("data/people_lahman_1871-2025.csv").catch(() => null);
 
-// Pitching is loaded in parallel too. F4 wires it into the UI; for now it's
-// only fetched + cached. In the bundle, the same call gets swapped for
-// decodePitching() by the bundler.
-const pitchingPromise = d3.csv("data/pitching_limits_1871-2025.csv").catch(() => null);
+const BATTING_COUNT_COLS = ["G","AB","R","H","2B","3B","HR","RBI","SB","CS","BB","SO","IBB","HBP","SH","SF","GIDP"];
+const PITCHING_COUNT_COLS = ["W","L","G","GS","CG","SHO","SV","IPouts","H","ER","HR","BB","SO","IBB","WP","HBP","BK","BFP","GF","R","SH","SF","GIDP"];
 
-d3.csv("data/batting_limits_1871-2025.csv").then(async (points) => {
-    if (typeof points.metaFor === "function") {
-        metaFor = points.metaFor;
-    } else {
+function parseBattingRows(rawPoints) {
+    const out = [];
+    for (const r of rawPoints) {
+        const p = {
+            playerID: r.playerID,
+            yearID: parseInt(r.yearID),
+            teamID: r.teamID,
+            lgID: r.lgID,
+        };
+        for (const c of BATTING_COUNT_COLS) p[c] = parseInt(r[c]);
+        p.PA = p.AB + p.BB + p.HBP + p.SH + p.SF;
+        p.TB = p.H + p["2B"] + 2 * p["3B"] + 3 * p.HR;
+        p.AVG = p.AB > 0 ? p.H / p.AB : NaN;
+        const obpDen = p.AB + p.BB + p.HBP + p.SF;
+        p.OBP = obpDen > 0 ? (p.H + p.BB + p.HBP) / obpDen : NaN;
+        p.SLG = p.AB > 0 ? p.TB / p.AB : NaN;
+        out.push(p);
+    }
+    return out;
+}
+
+function parsePitchingRows(rawPoints) {
+    const out = [];
+    for (const r of rawPoints) {
+        const p = {
+            playerID: r.playerID,
+            yearID: parseInt(r.yearID),
+            teamID: r.teamID,
+            lgID: r.lgID,
+        };
+        for (const c of PITCHING_COUNT_COLS) p[c] = parseInt(r[c]);
+        // Lahman stores IPouts (innings * 3). IP as a decimal is simpler for
+        // charting than the .1/.2 "outs-as-fractions" baseball convention.
+        p.IP    = isNaN(p.IPouts) ? NaN : p.IPouts / 3;
+        p.ERA   = p.IPouts > 0 ? (9 * p.ER) / (p.IPouts / 3) : NaN;
+        p.WHIP  = p.IPouts > 0 ? (p.BB + p.H) / (p.IPouts / 3) : NaN;
+        p["K/9"]  = p.IPouts > 0 ? (9 * p.SO) / (p.IPouts / 3) : NaN;
+        p["BB/9"] = p.IPouts > 0 ? (9 * p.BB) / (p.IPouts / 3) : NaN;
+        p["H/9"]  = p.IPouts > 0 ? (9 * p.H)  / (p.IPouts / 3) : NaN;
+        p["K/BB"] = p.BB > 0 ? p.SO / p.BB : NaN;
+        out.push(p);
+    }
+    return out;
+}
+
+function buildPlayerIndex(points) {
+    const idx = new Map();
+    for (const p of points) {
+        let arr = idx.get(p.playerID);
+        if (!arr) { arr = []; idx.set(p.playerID, arr); }
+        arr.push(p);
+    }
+    return idx;
+}
+
+async function loadDataset(key) {
+    // The bundler swaps these two d3.csv() calls for the inline decoders.
+    const rawPoints = key === "pitching"
+        ? await d3.csv("data/pitching_limits_1871-2025.csv")
+        : await d3.csv("data/batting_limits_1871-2025.csv");
+    if (typeof rawPoints.metaFor === "function") metaFor = rawPoints.metaFor;
+    const points = key === "pitching" ? parsePitchingRows(rawPoints) : parseBattingRows(rawPoints);
+    return { points, playerIndex: buildPlayerIndex(points) };
+}
+
+Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batting, pitching]) => {
+    datasetState.batting = batting;
+    datasetState.pitching = pitching;
+
+    if (!metaFor || metaFor("Barry Bonds") === null) {
+        // Multi-file mode: bundle's metaFor wasn't attached; build from CSV.
         const people = await peoplePromise;
         if (people) metaFor = buildMetaFromPeopleCsv(people);
     }
-    const parsedPoints = [];
-    points.forEach((point) => {
-        parsedPoints.push({
-            playerID: point["playerID"],
-            yearID: parseInt(point["yearID"]),
-            teamID: point["teamID"],
-            lgID: point["lgID"],
-            G: parseInt(point["G"]),
-            AB: parseInt(point["AB"]),
-            R: parseInt(point["R"]),
-            H: parseInt(point["H"]),
-            "2B": parseInt(point["2B"]),
-            "3B": parseInt(point["3B"]),
-            HR: parseInt(point["HR"]),
-            RBI: parseInt(point["RBI"]),
-            SB: parseInt(point["SB"]),
-            CS: parseInt(point["CS"]),
-            BB: parseInt(point["BB"]),
-            SO: parseInt(point["SO"]),
-            IBB: parseInt(point["IBB"]),
-            HBP: parseInt(point["HBP"]),
-            SH: parseInt(point["SH"]),
-            SF: parseInt(point["SF"]),
-            GIDP: parseInt(point["GIDP"]),
-        });
-    });
-    return parsedPoints;
-})
-.then((points) => {
-    points.forEach((point) => {
-        point["PA"] = point["AB"] + point["BB"] + point["HBP"] + point["SH"] + point["SF"];
-        point["TB"] = point["H"] + point["2B"] + 2 * point["3B"] + 3 * point["HR"];
-        point["AVG"] = point["H"] / point["AB"];
-        point["OBP"] = (point["H"] + point["BB"] + point["HBP"]) / (point["AB"] + point["BB"] + point["HBP"] + point["SF"]);
-        point["SLG"] = point["TB"] / point["AB"];
-    });
-    // Build the player index once for career-trail lookups (B3).
-    playerIndex = new Map();
-    for (const p of points) {
-        let arr = playerIndex.get(p.playerID);
-        if (!arr) { arr = []; playerIndex.set(p.playerID, arr); }
-        arr.push(p);
-    }
-    return points;
-})
-.then((points) => {
-    const dimensions = ["PA", "G", "AB", "R", "H", "2B", "3B", "HR", "TB", "RBI", "SB", "CS", "BB", "SO", "IBB", "HBP", "SH", "SF", "GIDP", "AVG", "OBP", "SLG"];
-    const rateStats = new Set(["AVG", "OBP", "SLG"]);
+
+    // Backward-compat alias for the rest of the file (career-trail uses it).
+    playerIndex = datasetState[activeDatasetKey].playerIndex;
 
     const formatStat = (dim, value) => {
         if (typeof value !== "number" || isNaN(value)) return "—";
-        if (rateStats.has(dim)) return value.toFixed(3);
+        const rate = activeDataset().rateStats;
+        if (rate.has(dim)) return value.toFixed(dim === "ERA" || dim === "WHIP" || dim.includes("/") ? 2 : 3);
+        if (dim === "IP") return value.toFixed(1);
         return value.toLocaleString();
     };
 
-    populateSelectors(points, dimensions);
-    populateCountrySelect(playerIndex);
+    populateSelectorsForActive();
+    populateCountrySelect(datasetState.batting.playerIndex);
     setupControlsToggle();
     setupPaPresets();
     populateEraLegend();
     setupExplainer();
     setupGlossary();
     applyModeConfig("season");
-    setupModeToggle(() => {
+    setupModeToggle("mode-toggle", () => {
         const mode = getCurrentMode();
         applyModeConfig(mode);
         careerHighlight = null;
@@ -176,6 +244,16 @@ d3.csv("data/batting_limits_1871-2025.csv").then(async (points) => {
             mode === "career"
                 ? "Each dot is one player's career totals over the year window."
                 : "Each dot is one player-season.";
+        refreshChart();
+    });
+    setupModeToggle("stats-toggle", () => {
+        // Switching datasets resets axes, threshold config, dimension selectors,
+        // and clears the career highlight (different players).
+        activeDatasetKey = getActiveModeBtnData("stats-toggle", "stats") || "batting";
+        playerIndex = datasetState[activeDatasetKey].playerIndex;
+        careerHighlight = null;
+        populateSelectorsForActive();
+        applyModeConfig(getCurrentMode());
         refreshChart();
     });
     setupSegGroup("league-seg", () => { careerHighlight = null; refreshChart(); });
@@ -195,26 +273,28 @@ d3.csv("data/batting_limits_1871-2025.csv").then(async (points) => {
         const yDim = document.getElementById("y-axis-select").value;
         const sYear = parseInt(document.getElementById("s-year-select").value);
         const eYear = parseInt(document.getElementById("e-year-select").value);
-        const minPa = parseInt(document.getElementById("pa-min-select").value);
+        const minThreshold = parseInt(document.getElementById("pa-min-select").value);
         const mode = getCurrentMode();
         const league = getSegValue("league-seg", "league") || "all";
         const bats = getSegValue("bats-seg", "bats") || "all";
         const country = document.getElementById("country-select").value || "all";
         const colorBy = document.getElementById("color-by-select").value;
         const sizeBy = document.getElementById("size-by-select").value;
+        const def = activeDataset();
+        const data = activeData();
 
         updateColorLegend(colorBy);
 
-        document.getElementById("pa-min-value").textContent = minPa.toLocaleString();
-        syncPresetActive(minPa);
+        document.getElementById("pa-min-value").textContent = minThreshold.toLocaleString();
+        syncPresetActive(minThreshold);
 
         loadingIndicator.classList.add("active");
         cancelAnimationFrame(pendingRender);
         pendingRender = requestAnimationFrame(() => {
-            drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode,
-                { league, bats, country, colorBy, sizeBy });
+            drawScatterPlot(data.points, xDim, yDim, sYear, eYear, minThreshold, formatStat, mode,
+                { league, bats, country, colorBy, sizeBy, thresholdField: def.thresholdField, dataset: activeDatasetKey });
             loadingIndicator.classList.remove("active");
-            writeUrlState({ xDim, yDim, sYear, eYear, minPa, mode, league, bats, country, colorBy, sizeBy });
+            writeUrlState({ xDim, yDim, sYear, eYear, minPa: minThreshold, mode, league, bats, country, colorBy, sizeBy });
         });
     }
 
@@ -323,7 +403,9 @@ function populateCountrySelect(playerIdx) {
 }
 
 
-function populateSelectors(points, dimensions) {
+function populateSelectorsForActive() {
+    const def = activeDataset();
+    const points = activeData().points;
     const years = [...new Set(points.map(p => p.yearID))].sort((a, b) => a - b);
     const minYear = years[0];
     const maxYear = years[years.length - 1];
@@ -331,7 +413,7 @@ function populateSelectors(points, dimensions) {
     const sYear = document.getElementById("s-year-select");
     sYear.min = minYear;
     sYear.max = maxYear;
-    sYear.value = Math.max(1920, minYear); // start of live-ball era
+    sYear.value = Math.max(1920, minYear);
 
     const eYear = document.getElementById("e-year-select");
     eYear.min = minYear;
@@ -342,20 +424,17 @@ function populateSelectors(points, dimensions) {
     const ySelect = document.getElementById("y-axis-select");
     [xSelect, ySelect].forEach((sel) => {
         sel.innerHTML = "";
-        dimensions.forEach((dim) => {
+        def.dimensions.forEach((dim) => {
             const opt = document.createElement("option");
             opt.value = dim;
             opt.textContent = dim;
             sel.appendChild(opt);
         });
     });
-    xSelect.value = "HR";
-    ySelect.value = "SB";
+    xSelect.value = def.defaultX;
+    ySelect.value = def.defaultY;
 
-    const pa = document.getElementById("pa-min-select");
-    pa.min = 0;
-    pa.max = 600;
-    pa.value = 0;
+    document.getElementById("threshold-label").textContent = def.thresholdLabel;
 }
 
 function parseUrlHash() {
@@ -439,8 +518,7 @@ function writeUrlState(state) {
 }
 
 function getCurrentMode() {
-    const active = document.querySelector(".mode-btn.active");
-    return active ? active.dataset.mode : "season";
+    return getActiveModeBtnData("mode-toggle", "mode") || "season";
 }
 
 function getSegValue(groupId, dataKey) {
@@ -461,19 +539,26 @@ function setupSegGroup(groupId, onChange) {
     });
 }
 
-function setupModeToggle(onChange) {
-    document.querySelectorAll(".mode-btn").forEach(btn => {
+function setupModeToggle(containerId, onChange) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    container.querySelectorAll(".mode-btn").forEach(btn => {
         btn.addEventListener("click", () => {
             if (btn.classList.contains("active")) return;
-            document.querySelectorAll(".mode-btn").forEach(b => b.classList.remove("active"));
+            container.querySelectorAll(".mode-btn").forEach(b => b.classList.remove("active"));
             btn.classList.add("active");
             onChange();
         });
     });
 }
 
+function getActiveModeBtnData(containerId, attr) {
+    const active = document.querySelector(`#${containerId} .mode-btn.active`);
+    return active ? active.dataset[attr] : null;
+}
+
 function applyModeConfig(mode) {
-    const cfg = PA_MODE_CONFIG[mode];
+    const cfg = activeDataset().thresholdConfig[mode];
     if (!cfg) return;
     const slider = document.getElementById("pa-min-select");
     slider.max = cfg.max;
@@ -489,17 +574,15 @@ function applyModeConfig(mode) {
     setupPaPresets(); // rewire fresh buttons
     syncPresetActive(parseInt(slider.value));
 
-    const hintEl = document.querySelector("#mode-toggle + .control-hint");
-    // The preset section's own hint sits below the preset row.
-    const presetHint = document.querySelectorAll(".control-group .control-hint");
-    // Update the PA-section hint (the second one — first is the mode hint).
-    if (presetHint.length >= 2) presetHint[1].textContent = cfg.hint;
+    const hintEl = document.getElementById("threshold-hint");
+    if (hintEl) hintEl.textContent = cfg.hint;
 }
 
 // Aggregate one player's selected seasons into a single career-totals row.
-// Counting stats sum; rate stats (AVG/OBP/SLG) are recomputed from the summed
-// components — averaging the season AVGs would over-weight short seasons.
-function aggregateCareer(seasons) {
+// Counting stats sum; rate stats (AVG/OBP/SLG for batting, ERA/WHIP/K9 for
+// pitching) are recomputed from the summed components — averaging the season
+// rates would over-weight short seasons.
+function aggregateCareer(seasons, dataset = "batting") {
     const out = {
         playerID: seasons[0].playerID,
         teamID: "—",
@@ -508,8 +591,12 @@ function aggregateCareer(seasons) {
         yearLast: seasons[seasons.length - 1].yearID,
         seasonsCount: seasons.length,
     };
-    const sumKeys = ["G", "AB", "R", "H", "2B", "3B", "HR", "RBI", "SB", "CS",
-                     "BB", "SO", "IBB", "HBP", "SH", "SF", "GIDP", "PA", "TB"];
+    const sumKeys = dataset === "pitching"
+        ? ["W", "L", "G", "GS", "CG", "SHO", "SV", "IPouts",
+           "H", "ER", "HR", "BB", "SO", "IBB", "WP", "HBP", "BK",
+           "BFP", "GF", "R", "SH", "SF", "GIDP"]
+        : ["G", "AB", "R", "H", "2B", "3B", "HR", "RBI", "SB", "CS",
+           "BB", "SO", "IBB", "HBP", "SH", "SF", "GIDP", "PA", "TB"];
     for (const k of sumKeys) {
         let s = 0;
         for (const sn of seasons) {
@@ -518,13 +605,21 @@ function aggregateCareer(seasons) {
         }
         out[k] = s;
     }
-    // Recompute rate stats from career-aggregate components.
-    out.AVG = out.AB > 0 ? out.H / out.AB : NaN;
-    const obpDen = out.AB + out.BB + out.HBP + out.SF;
-    out.OBP = obpDen > 0 ? (out.H + out.BB + out.HBP) / obpDen : NaN;
-    out.SLG = out.AB > 0 ? out.TB / out.AB : NaN;
-    // yearID kept for code that touches a single year (era classification,
-    // sort, label). Use debut year as the career's "anchor" era.
+    if (dataset === "pitching") {
+        const ip = out.IPouts / 3;
+        out.IP    = out.IPouts > 0 ? ip : NaN;
+        out.ERA   = out.IPouts > 0 ? (9 * out.ER) / ip : NaN;
+        out.WHIP  = out.IPouts > 0 ? (out.BB + out.H) / ip : NaN;
+        out["K/9"]  = out.IPouts > 0 ? (9 * out.SO) / ip : NaN;
+        out["BB/9"] = out.IPouts > 0 ? (9 * out.BB) / ip : NaN;
+        out["H/9"]  = out.IPouts > 0 ? (9 * out.H)  / ip : NaN;
+        out["K/BB"] = out.BB > 0 ? out.SO / out.BB : NaN;
+    } else {
+        out.AVG = out.AB > 0 ? out.H / out.AB : NaN;
+        const obpDen = out.AB + out.BB + out.HBP + out.SF;
+        out.OBP = obpDen > 0 ? (out.H + out.BB + out.HBP) / obpDen : NaN;
+        out.SLG = out.AB > 0 ? out.TB / out.AB : NaN;
+    }
     out.yearID = out.yearFirst;
     return out;
 }
@@ -562,6 +657,25 @@ const GLOSSARY = {
     AVG:  { name: "Batting Average",       formula: "H ÷ AB" },
     OBP:  { name: "On-Base Percentage",    formula: "(H + BB + HBP) ÷ (AB + BB + HBP + SF)" },
     SLG:  { name: "Slugging Percentage",   formula: "TB ÷ AB" },
+
+    // Pitching dimensions (some share names with batting: G, BB, SO, HR, etc.
+    // — those entries above already cover them, so we don't redeclare.)
+    W:      { name: "Wins (pitcher)",       formula: "Decisions credited to the pitcher when their team wins" },
+    L:      { name: "Losses (pitcher)",     formula: "Decisions credited to the pitcher when their team loses" },
+    GS:     { name: "Games Started",        formula: "Games started by the pitcher" },
+    CG:     { name: "Complete Games",       formula: "Games pitched fully by one pitcher" },
+    SHO:    { name: "Shutouts",             formula: "Complete games with zero earned runs allowed" },
+    SV:     { name: "Saves",                formula: "Late-inning leads preserved by the relief pitcher" },
+    IPouts: { name: "Outs Recorded",        formula: "IP × 3 (Lahman's raw storage)" },
+    IP:     { name: "Innings Pitched",      formula: "IPouts ÷ 3" },
+    ER:     { name: "Earned Runs",          formula: "Runs allowed not due to fielding errors" },
+    BFP:    { name: "Batters Faced",        formula: "Plate appearances against this pitcher" },
+    ERA:    { name: "Earned Run Average",   formula: "9 × ER ÷ IP — lower is better" },
+    WHIP:   { name: "Walks + Hits per IP",  formula: "(BB + H) ÷ IP — lower is better" },
+    "K/9":  { name: "Strikeouts per 9 IP",  formula: "9 × SO ÷ IP" },
+    "BB/9": { name: "Walks per 9 IP",       formula: "9 × BB ÷ IP — lower is better" },
+    "K/BB": { name: "Strikeout-to-Walk",    formula: "SO ÷ BB" },
+    "H/9":  { name: "Hits per 9 IP",        formula: "9 × H ÷ IP — lower is better" },
 };
 
 const EXPLAINER_KEY = "bl2d_intro_seen";
@@ -741,6 +855,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         return true;
     };
 
+    const thresholdField = filters.thresholdField || "PA";
+    const datasetKey = filters.dataset || "batting";
+
     let workingPoints;
     if (mode === "career") {
         const byPlayer = new Map();
@@ -753,7 +870,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         workingPoints = [];
         for (const seasons of byPlayer.values()) {
             seasons.sort((a, b) => a.yearID - b.yearID);
-            workingPoints.push(aggregateCareer(seasons));
+            workingPoints.push(aggregateCareer(seasons, datasetKey));
         }
     } else {
         workingPoints = points.filter(seasonMatches);
@@ -764,13 +881,13 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         const x = p[xDim];
         const y = p[yDim];
         if (isNaN(x) || isNaN(y)) continue;
-        if (p.PA < minPa) continue;
+        if (p[thresholdField] < minPa) continue;
         filtered.push({
             x, y,
             year: p.yearID,
             yearLast: p.yearLast || p.yearID,
             seasonsCount: p.seasonsCount || 1,
-            PA: p.PA,
+            PA: p[thresholdField],
             playerID: p.playerID,
             teamID: p.teamID,
             lgID: p.lgID,
