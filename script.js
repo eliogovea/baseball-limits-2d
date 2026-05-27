@@ -117,6 +117,7 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
                 : "Each dot is one player-season.";
         refreshChart();
     });
+    setupSegGroup("league-seg", () => { careerHighlight = null; refreshChart(); });
 
     const loadingIndicator = document.getElementById("loading-indicator");
     let pendingRender = null;
@@ -128,15 +129,15 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
         const eYear = parseInt(document.getElementById("e-year-select").value);
         const minPa = parseInt(document.getElementById("pa-min-select").value);
         const mode = getCurrentMode();
+        const league = getSegValue("league-seg", "league") || "all";
 
         document.getElementById("pa-min-value").textContent = minPa.toLocaleString();
         syncPresetActive(minPa);
 
         loadingIndicator.classList.add("active");
-        // Yield so the spinner can paint before the (synchronous) D3 work.
         cancelAnimationFrame(pendingRender);
         pendingRender = requestAnimationFrame(() => {
-            drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode);
+            drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode, { league });
             loadingIndicator.classList.remove("active");
         });
     }
@@ -217,6 +218,24 @@ function populateSelectors(points, dimensions) {
 function getCurrentMode() {
     const active = document.querySelector(".mode-btn.active");
     return active ? active.dataset.mode : "season";
+}
+
+function getSegValue(groupId, dataKey) {
+    const active = document.querySelector(`#${groupId} .seg-btn.active`);
+    return active ? active.dataset[dataKey] : null;
+}
+
+function setupSegGroup(groupId, onChange) {
+    const group = document.getElementById(groupId);
+    if (!group) return;
+    group.querySelectorAll(".seg-btn").forEach(btn => {
+        btn.addEventListener("click", () => {
+            if (btn.classList.contains("active")) return;
+            group.querySelectorAll(".seg-btn").forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+            onChange();
+        });
+    });
 }
 
 function setupModeToggle(onChange) {
@@ -447,20 +466,27 @@ function syncPresetActive(value) {
 }
 
 
-function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode = "season") {
+function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode = "season", filters = {}) {
     const svg = d3.select("#scatter-plot");
     svg.selectAll("*").remove();
     d3.select("#tooltip").attr("data-visible", "false");
 
-    // Apply the year filter first regardless of mode. In Career mode we then
-    // group those filtered seasons per player and aggregate; the PA filter
-    // and the (x, y) read come after aggregation so they operate on career
-    // totals, not individual stints.
+    const league = filters.league || "all";
+
+    // Row-level predicate, applied before any aggregation. In Career mode
+    // this also gates which seasons contribute to the aggregate — so
+    // "League: AL + Career" yields each player's AL-only career totals.
+    const seasonMatches = (p) => {
+        if (p.yearID < sYear || p.yearID > eYear) return false;
+        if (league !== "all" && p.lgID !== league) return false;
+        return true;
+    };
+
     let workingPoints;
     if (mode === "career") {
         const byPlayer = new Map();
         for (const p of points) {
-            if (p.yearID < sYear || p.yearID > eYear) continue;
+            if (!seasonMatches(p)) continue;
             let arr = byPlayer.get(p.playerID);
             if (!arr) { arr = []; byPlayer.set(p.playerID, arr); }
             arr.push(p);
@@ -471,7 +497,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             workingPoints.push(aggregateCareer(seasons));
         }
     } else {
-        workingPoints = points.filter(p => p.yearID >= sYear && p.yearID <= eYear);
+        workingPoints = points.filter(seasonMatches);
     }
 
     const filtered = [];
@@ -694,7 +720,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                 const target = seasons[0] || d;
                 careerHighlight = target.playerID;
                 event.stopPropagation();
-                drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode);
+                drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode, filters);
             }
         });
 

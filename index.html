@@ -105,6 +105,18 @@
                 </fieldset>
 
                 <fieldset class="control-group">
+                    <legend>Filters</legend>
+                    <div class="filter-row">
+                        <span class="filter-label">League</span>
+                        <div class="seg-group" role="group" id="league-seg" aria-label="League">
+                            <button type="button" class="seg-btn active" data-league="all">All</button>
+                            <button type="button" class="seg-btn" data-league="AL">AL</button>
+                            <button type="button" class="seg-btn" data-league="NL">NL</button>
+                        </div>
+                    </div>
+                </fieldset>
+
+                <fieldset class="control-group">
                     <legend>
                         <span>Min Plate Appearances</span>
                         <output id="pa-min-value" for="pa-min-select" class="legend-value">0</output>
