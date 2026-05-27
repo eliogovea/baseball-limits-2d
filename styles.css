@@ -76,7 +76,34 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
 }
 .app-header > * { min-width: 0; }
 .brand { flex: 1 1 auto; overflow: hidden; }
+.header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: 0 1 auto;
+    min-width: 0;
+}
 .attribution { flex: 0 1 auto; }
+
+.help-btn {
+    flex: 0 0 auto;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 1px solid var(--border-strong);
+    background: var(--panel);
+    color: var(--text-muted);
+    font-weight: 700;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0;
+    transition: all var(--transition);
+}
+.help-btn:hover {
+    color: var(--mlb-blue);
+    border-color: var(--mlb-blue);
+    background: var(--bg);
+}
 
 .brand h1 {
     margin: 0;
@@ -324,6 +351,70 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     font-size: 11px;
     color: var(--text-muted);
     font-style: italic;
+}
+
+.explainer-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    z-index: 100;
+    animation: explainer-fade 0.18s ease-out;
+}
+.explainer-backdrop[hidden] { display: none; }
+@keyframes explainer-fade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+.explainer {
+    background: var(--panel);
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    box-shadow: 0 20px 50px rgba(15, 23, 42, 0.25);
+    max-width: 460px;
+    width: 100%;
+    padding: 24px;
+    animation: explainer-pop 0.22s cubic-bezier(0.34, 1.4, 0.56, 1);
+}
+@keyframes explainer-pop {
+    from { transform: scale(0.95); opacity: 0; }
+    to   { transform: scale(1); opacity: 1; }
+}
+.explainer h2 {
+    margin: 0 0 14px;
+    font-size: 18px;
+    color: var(--mlb-blue);
+    letter-spacing: -0.01em;
+}
+.explainer p {
+    margin: 0 0 12px;
+    color: var(--text);
+    line-height: 1.55;
+}
+.explainer p:last-of-type {
+    margin-bottom: 18px;
+}
+.explainer-red { color: var(--mlb-red); }
+.explainer-gold { color: #f59e0b; }
+.explainer-dismiss {
+    display: block;
+    width: 100%;
+    padding: 10px 16px;
+    background: var(--mlb-blue);
+    color: #ffffff;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-weight: 600;
+    font-size: 14px;
+    transition: background var(--transition);
+}
+.explainer-dismiss:hover {
+    background: var(--mlb-blue-hover);
 }
 
 /* -------- Controls -------- */

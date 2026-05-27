@@ -78,6 +78,7 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
     setupControlsToggle();
     setupPaPresets();
     populateEraLegend();
+    setupExplainer();
 
     const loadingIndicator = document.getElementById("loading-indicator");
     let pendingRender = null;
@@ -181,6 +182,35 @@ function setupControlsToggle() {
         const expanded = toggle.getAttribute("aria-expanded") === "true";
         toggle.setAttribute("aria-expanded", String(!expanded));
         panel.classList.toggle("collapsed", expanded);
+    });
+}
+
+const EXPLAINER_KEY = "bl2d_intro_seen";
+
+function setupExplainer() {
+    const backdrop = document.getElementById("explainer-backdrop");
+    const dismiss = document.getElementById("explainer-dismiss");
+    const helpBtn = document.getElementById("help-btn");
+    if (!backdrop || !dismiss || !helpBtn) return;
+
+    const show = () => { backdrop.hidden = false; dismiss.focus(); };
+    const hide = () => {
+        backdrop.hidden = true;
+        try { localStorage.setItem(EXPLAINER_KEY, "1"); } catch (_) { /* private mode */ }
+    };
+
+    let seen = false;
+    try { seen = localStorage.getItem(EXPLAINER_KEY) === "1"; } catch (_) { /* ignore */ }
+    if (!seen) show();
+
+    dismiss.addEventListener("click", hide);
+    helpBtn.addEventListener("click", show);
+    backdrop.addEventListener("click", (e) => {
+        // Click on the dimmed area (not the card) closes too.
+        if (e.target === backdrop) hide();
+    });
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && !backdrop.hidden) hide();
     });
 }
 
