@@ -38,6 +38,7 @@ HTML_PATH = ROOT / "index.html"
 CSS_PATH = ROOT / "styles.css"
 JS_PATH = ROOT / "script.js"
 D3_PATH = ROOT / "vendor" / "d3.v7.min.js"
+PEOPLE_PATH = ROOT / "data" / "people_lahman_1871-2023.csv"
 OUT_DIR = ROOT / "dist"
 OUT_PATH = OUT_DIR / "index.html"
 
@@ -46,6 +47,11 @@ WIDE_COLS = ["G", "AB", "R", "H", "BB", "SO", "RBI"]
 NARROW_COLS = ["2B", "3B", "HR", "SB", "CS", "IBB", "HBP", "SH", "SF", "GIDP"]
 W16_BLANK = 0xFFFF
 W8_BLANK = 0xFF
+
+# Maps for the people section. 0 = unknown so blank cells round-trip cleanly.
+BATS_MAP = {"": 0, "L": 1, "R": 2, "B": 3, "S": 3}
+THROWS_MAP = {"": 0, "L": 1, "R": 2, "B": 3, "S": 3}
+COUNTRY_UNKNOWN = 0xFF
 
 
 def parse_int(s, blank_sentinel):
@@ -59,6 +65,96 @@ ALL_STATS = WIDE_COLS + NARROW_COLS
 
 
 _SUMMARY_TEAM_RE = re.compile(r"^\d+TM$")
+
+
+def _safe_int(s, default=0):
+    s = (s or "").strip()
+    if not s or not s.lstrip("-").isdigit():
+        return default
+    return int(s)
+
+
+def _year_from_date(s):
+    s = (s or "").strip()
+    if len(s) < 4 or not s[:4].isdigit():
+        return 0
+    return int(s[:4])
+
+
+def load_people(csv_path):
+    """Map '{nameFirst} {nameLast}' -> chosen people-row dict.
+
+    Lahman's playerID is unique, but the visible "{first} {last}" key collides
+    for ~568 names (e.g. 5 Luis Garcias). On collision, prefer the player with
+    the latest debut date — they're the one a present-day visitor is more
+    likely to be looking up. This is the same data limitation that already
+    affects tooltips, just made explicit here.
+    """
+    chosen = {}
+    chosen_debut = {}
+    with csv_path.open(encoding="utf-8") as f:
+        for p in csv.DictReader(f):
+            key = "{} {}".format(p["nameFirst"], p["nameLast"])
+            debut = _year_from_date(p["debut"])
+            if key not in chosen or debut > chosen_debut[key]:
+                chosen[key] = p
+                chosen_debut[key] = debut
+    return chosen
+
+
+def build_people_section(name_to_idx, people_by_name):
+    """Return (bytes, stats) for the people section of binary v2.
+
+    Country dictionary first (u8 count + entries), then a u32 record count
+    followed by 12-byte fixed-width records sorted by name_idx for cache-friendly
+    decode. Records carry: name_idx(u16), birthYear(u16), debutYear(u16),
+    countryIdx(u8, 0xFF=unknown), bats(u8), throws(u8), heightInches(u8),
+    weightLbs(u16). Zero = unknown for the numeric fields.
+    """
+    records = []
+    for name, idx in name_to_idx.items():
+        p = people_by_name.get(name)
+        if p is None:
+            continue
+        records.append((idx, p))
+    records.sort(key=lambda r: r[0])
+
+    countries = sorted({p["birthCountry"] for _, p in records if p["birthCountry"].strip()})
+    if len(countries) > 254:
+        sys.exit(f"too many countries ({len(countries)}); widen countryIdx to u16")
+    country_to_idx = {c: i for i, c in enumerate(countries)}
+
+    buf = io.BytesIO()
+    buf.write(struct.pack("<B", len(countries)))
+    for c in countries:
+        cb = c.encode("utf-8")
+        if len(cb) > 255:
+            sys.exit(f"country name >255 bytes: {c!r}")
+        buf.write(struct.pack("<B", len(cb)))
+        buf.write(cb)
+
+    buf.write(struct.pack("<I", len(records)))
+    for idx, p in records:
+        birth = _safe_int(p["birthYear"])
+        debut = _year_from_date(p["debut"])
+        country_idx = country_to_idx.get(p["birthCountry"].strip(), COUNTRY_UNKNOWN)
+        bats = BATS_MAP.get(p["bats"].strip(), 0)
+        throws = THROWS_MAP.get(p["throws"].strip(), 0)
+        height = _safe_int(p["height"])
+        weight = _safe_int(p["weight"])
+        if birth > 0xFFFF or birth < 0: birth = 0
+        if debut > 0xFFFF or debut < 0: debut = 0
+        if height > 0xFF or height < 0: height = 0
+        if weight > 0xFFFF or weight < 0: weight = 0
+        buf.write(struct.pack("<HHHBBBBH",
+            idx, birth, debut, country_idx, bats, throws, height, weight))
+
+    stats = {
+        "people_emitted": len(records),
+        "people_total": len(people_by_name),
+        "countries": len(countries),
+    }
+    return buf.getvalue(), stats
 
 
 def aggregate_stints(rows):
@@ -143,7 +239,7 @@ def build_binary(csv_path: Path) -> tuple[bytes, dict]:
 
     buf = io.BytesIO()
     buf.write(b"BL2D")
-    buf.write(struct.pack("<BB", 1, 0))
+    buf.write(struct.pack("<BB", 2, 0))
     buf.write(struct.pack("<HI", YEAR_BASE, n))
 
     buf.write(struct.pack("<I", len(names)))
@@ -160,6 +256,10 @@ def build_binary(csv_path: Path) -> tuple[bytes, dict]:
         buf.write(lgb)
         buf.write(struct.pack("<B", len(tmb)))
         buf.write(tmb)
+
+    people_by_name = load_people(PEOPLE_PATH)
+    people_bytes, people_stats = build_people_section(name_to_idx, people_by_name)
+    buf.write(people_bytes)
 
     name_arr = array.array("H", (name_to_idx[r["playerID"]] for r in rows))
     year_arr = array.array("B", (int(r["yearID"]) - YEAR_BASE for r in rows))
@@ -199,6 +299,7 @@ def build_binary(csv_path: Path) -> tuple[bytes, dict]:
         "names": len(names),
         "teams": len(teams),
         "year_range": (min_year, max_year),
+        **people_stats,
     }
     return buf.getvalue(), stats
 
@@ -221,7 +322,7 @@ async function decodeBL() {
     const magic = dec.decode(buf.subarray(off, off + 4)); off += 4;
     if (magic !== 'BL2D') throw new Error('decodeBL: bad magic ' + magic);
     const major = buf[off++]; const minor = buf[off++];
-    if (major !== 1) throw new Error('decodeBL: unsupported version ' + major + '.' + minor);
+    if (major !== 2) throw new Error('decodeBL: unsupported version ' + major + '.' + minor);
     const yearBase = dv.getUint16(off, true); off += 2;
     const N = dv.getUint32(off, true); off += 4;
 
@@ -240,6 +341,38 @@ async function decodeBL() {
         const tmlen = buf[off++];
         const tm = dec.decode(buf.subarray(off, off + tmlen)); off += tmlen;
         teams[i] = { lgID: lg, teamID: tm };
+    }
+
+    // People section (v2): country dict, then fixed-width per-player records.
+    const countryCount = buf[off++];
+    const countries = new Array(countryCount);
+    for (let i = 0; i < countryCount; i++) {
+        const len = buf[off++];
+        countries[i] = dec.decode(buf.subarray(off, off + len));
+        off += len;
+    }
+    const peopleCount = dv.getUint32(off, true); off += 4;
+    const BL_BATS = [null, 'L', 'R', 'S'];
+    const BL_THROWS = [null, 'L', 'R', 'S'];
+    const peopleByName = new Map();
+    for (let i = 0; i < peopleCount; i++) {
+        const nameIdxP = dv.getUint16(off, true); off += 2;
+        const birthYear = dv.getUint16(off, true); off += 2;
+        const debutYear = dv.getUint16(off, true); off += 2;
+        const cIdx = buf[off++];
+        const bats = buf[off++];
+        const throws_ = buf[off++];
+        const heightIn = buf[off++];
+        const weightLb = dv.getUint16(off, true); off += 2;
+        peopleByName.set(names[nameIdxP], {
+            birthYear: birthYear || null,
+            debutYear: debutYear || null,
+            country: cIdx === 0xFF ? null : countries[cIdx],
+            bats: BL_BATS[bats] || null,
+            throws: BL_THROWS[throws_] || null,
+            heightIn: heightIn || null,
+            weightLb: weightLb || null,
+        });
     }
 
     // Use .slice() because byte offsets aren't guaranteed aligned for Uint16Array.
@@ -280,6 +413,10 @@ async function decodeBL() {
         }
         points[i] = p;
     }
+    Object.defineProperty(points, 'metaFor', {
+        value: (playerID) => peopleByName.get(playerID) || null,
+        enumerable: false,
+    });
     return points;
 }
 """
@@ -333,6 +470,8 @@ def build_bundle():
     print(f"rows={stats['rows']:,} (aggregated from {stats['raw_rows']:,} stints)  "
           f"names={stats['names']:,}  teams={stats['teams']}  "
           f"years={stats['year_range'][0]}-{stats['year_range'][1]}")
+    print(f"people: {stats['people_emitted']:,} matched of {stats['names']:,} batting names  "
+          f"(pool {stats['people_total']:,}, {stats['countries']} countries)")
     print(f"binary raw:   {len(binary):>10,} bytes")
     print(f"binary gzip:  {len(compressed):>10,} bytes  ({len(compressed)/csv_size:.1%} of CSV)")
     print(f"b64 inline:   {len(b64):>10,} bytes")
