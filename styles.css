@@ -667,6 +667,10 @@ input[type="number"].field::-webkit-outer-spin-button {
     font-weight: 500;
     min-width: 70px;
 }
+.filter-row > select.field {
+    flex: 1;
+    min-width: 0;
+}
 
 .seg-group {
     flex: 1;

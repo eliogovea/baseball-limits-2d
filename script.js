@@ -16,6 +16,7 @@ function eraFor(year) {
 // on outside click, Escape, or any filter change.
 let playerIndex = null;       // Map<playerID, Point[]>  (all seasons per player)
 let careerHighlight = null;   // playerID being highlighted, or null
+let metaFor = () => null;     // populated after decode: (playerID) -> {bats, throws, country, ...} | null
 
 // PA slider config differs by mode: per-season values cluster under ~700, but
 // career totals span 0 to ~16,000. Adjusting max + step + presets keeps the
@@ -45,6 +46,7 @@ const PA_MODE_CONFIG = {
 
 
 d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
+    if (typeof points.metaFor === "function") metaFor = points.metaFor;
     const parsedPoints = [];
     points.forEach((point) => {
         parsedPoints.push({
@@ -101,6 +103,7 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
     };
 
     populateSelectors(points, dimensions);
+    populateCountrySelect(playerIndex);
     setupControlsToggle();
     setupPaPresets();
     populateEraLegend();
@@ -118,6 +121,11 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
         refreshChart();
     });
     setupSegGroup("league-seg", () => { careerHighlight = null; refreshChart(); });
+    setupSegGroup("bats-seg",   () => { careerHighlight = null; refreshChart(); });
+    document.getElementById("country-select").addEventListener("change", () => {
+        careerHighlight = null;
+        refreshChart();
+    });
 
     const loadingIndicator = document.getElementById("loading-indicator");
     let pendingRender = null;
@@ -130,6 +138,8 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
         const minPa = parseInt(document.getElementById("pa-min-select").value);
         const mode = getCurrentMode();
         const league = getSegValue("league-seg", "league") || "all";
+        const bats = getSegValue("bats-seg", "bats") || "all";
+        const country = document.getElementById("country-select").value || "all";
 
         document.getElementById("pa-min-value").textContent = minPa.toLocaleString();
         syncPresetActive(minPa);
@@ -137,7 +147,7 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
         loadingIndicator.classList.add("active");
         cancelAnimationFrame(pendingRender);
         pendingRender = requestAnimationFrame(() => {
-            drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode, { league });
+            drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode, { league, bats, country });
             loadingIndicator.classList.remove("active");
         });
     }
@@ -178,6 +188,26 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
     });
     resizeObserver.observe(chartRegion);
 });
+
+
+function populateCountrySelect(playerIdx) {
+    const sel = document.getElementById("country-select");
+    if (!sel) return;
+    const counts = new Map();
+    for (const playerID of playerIdx.keys()) {
+        const m = metaFor(playerID);
+        if (!m || !m.country) continue;
+        counts.set(m.country, (counts.get(m.country) || 0) + 1);
+    }
+    // Show "All" first, then countries with at least 5 players, sorted alphabetically.
+    const list = [...counts.entries()]
+        .filter(([, n]) => n >= 5)
+        .map(([c, n]) => ({ c, n }))
+        .sort((a, b) => a.c.localeCompare(b.c));
+    sel.innerHTML = `<option value="all">All countries</option>` +
+        list.map(({ c, n }) => `<option value="${escapeHtml(c)}">${escapeHtml(c)} (${n.toLocaleString()})</option>`).join("");
+    sel.value = "all";
+}
 
 
 function populateSelectors(points, dimensions) {
@@ -472,13 +502,34 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     d3.select("#tooltip").attr("data-visible", "false");
 
     const league = filters.league || "all";
+    const bats = filters.bats || "all";
+    const country = filters.country || "all";
+
+    // Cache meta lookups per playerID across the filter pass.
+    const metaCache = new Map();
+    const getMeta = (id) => {
+        if (metaCache.has(id)) return metaCache.get(id);
+        const m = metaFor(id);
+        metaCache.set(id, m);
+        return m;
+    };
 
     // Row-level predicate, applied before any aggregation. In Career mode
     // this also gates which seasons contribute to the aggregate — so
-    // "League: AL + Career" yields each player's AL-only career totals.
+    // "League: AL + Bats: L + Career" yields each player's AL lefty-only
+    // career totals (Bonds' regular-season AL totals would be empty; his NL
+    // career sums alone in NL/L mode).
     const seasonMatches = (p) => {
         if (p.yearID < sYear || p.yearID > eYear) return false;
         if (league !== "all" && p.lgID !== league) return false;
+        if (bats !== "all" || country !== "all") {
+            const m = getMeta(p.playerID);
+            // Strict: rows for players with no Lahman metadata (mostly 2024
+            // BBRef entries with handedness suffixes) are dropped here.
+            if (!m) return false;
+            if (bats !== "all" && m.bats !== bats) return false;
+            if (country !== "all" && m.country !== country) return false;
+        }
         return true;
     };
 
