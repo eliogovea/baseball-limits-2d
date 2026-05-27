@@ -64,22 +64,23 @@
 
             <div class="controls-panel collapsed" id="controls-panel">
                 <div class="controls-inputs">
-                <fieldset class="control-group">
-                    <legend>Stats</legend>
-                    <div class="mode-toggle" role="group" id="stats-toggle">
-                        <button type="button" class="mode-btn active" data-stats="batting">Batting</button>
-                        <button type="button" class="mode-btn" data-stats="pitching">Pitching</button>
+                <div class="quick-toggles">
+                    <div class="toggle-cell">
+                        <span class="toggle-cell-label">Stats</span>
+                        <div class="mode-toggle compact" role="group" id="stats-toggle">
+                            <button type="button" class="mode-btn active" data-stats="batting">Batting</button>
+                            <button type="button" class="mode-btn" data-stats="pitching">Pitching</button>
+                        </div>
                     </div>
-                </fieldset>
-
-                <fieldset class="control-group">
-                    <legend>Mode</legend>
-                    <div class="mode-toggle" role="group" id="mode-toggle">
-                        <button type="button" class="mode-btn active" data-mode="season">Per season</button>
-                        <button type="button" class="mode-btn" data-mode="career">Career totals</button>
+                    <div class="toggle-cell">
+                        <span class="toggle-cell-label">Mode</span>
+                        <div class="mode-toggle compact" role="group" id="mode-toggle" title="Each dot is one player-season">
+                            <button type="button" class="mode-btn active" data-mode="season">Season</button>
+                            <button type="button" class="mode-btn" data-mode="career">Career</button>
+                        </div>
                     </div>
-                    <p class="control-hint" id="mode-hint">Each dot is one player-season.</p>
-                </fieldset>
+                </div>
+                <p class="control-hint" id="mode-hint" hidden>Each dot is one player-season.</p>
 
                 <fieldset class="control-group">
                     <legend>Axes</legend>
@@ -124,15 +125,10 @@
 
                 <fieldset class="control-group">
                     <legend>Year Range</legend>
-                    <div class="field-row">
-                        <label class="field-label">
-                            <span>From</span>
-                            <input type="number" id="s-year-select" class="field" inputmode="numeric">
-                        </label>
-                        <label class="field-label">
-                            <span>To</span>
-                            <input type="number" id="e-year-select" class="field" inputmode="numeric">
-                        </label>
+                    <div class="year-range">
+                        <input type="number" id="s-year-select" class="field" inputmode="numeric" aria-label="Start year">
+                        <span class="year-range-sep">–</span>
+                        <input type="number" id="e-year-select" class="field" inputmode="numeric" aria-label="End year">
                     </div>
                 </fieldset>
 

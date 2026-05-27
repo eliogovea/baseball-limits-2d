@@ -467,7 +467,8 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     display: flex;
     flex-direction: column;
     gap: 18px;
-    min-height: 0;
+    /* min-height: 0 lives in the desktop block — on mobile we want this
+       wrapper to keep its natural height so the panel scrolls properly. */
 }
 
 .control-group {
@@ -915,24 +916,70 @@ input[type="number"].field::-webkit-outer-spin-button {
     .controls-panel.collapsed { display: flex; }
     .controls-inputs {
         flex: 0 1 auto;
+        min-height: 0;
         overflow-y: auto;
-        gap: 14px;
+        gap: 10px;
         padding-right: 4px;
     }
     .frontier-section {
-        flex: 1 1 220px;           /* take remaining space, at least ~3 cards' worth */
-        min-height: 220px;
+        flex: 1 1 180px;           /* take remaining space; at least ~3 cards' worth */
+        min-height: 180px;
         overflow: hidden;
     }
     .frontier-cards {
         flex: 1 1 0;
         min-height: 0;
     }
+
+    /* --- Compact controls (desktop) so the inputs fit without scrolling --- */
+    .control-group legend { margin-bottom: 4px; font-size: 10px; }
+    .control-hint { font-size: 10px; margin-top: 4px; }
+    .field-row { gap: 8px; }
+    .field-label { gap: 3px; }
+    .field { padding: 6px 9px; font-size: 13px; }
+    select.field { padding-right: 26px; background-position: right 9px center; }
+    .mode-toggle { padding: 2px; gap: 2px; }
+    .mode-btn { padding: 5px 6px; font-size: 12px; }
+    .mode-toggle.compact .mode-btn { padding: 4px 4px; font-size: 11px; }
+    .filter-row { gap: 8px; margin-bottom: 6px; }
+    .filter-label { min-width: 56px; font-size: 10px; }
+    .seg-btn { padding: 4px 5px; font-size: 11px; }
+    .slider { height: 20px; }
+    .preset-row { gap: 4px; margin-top: 6px; }
+    .preset { padding: 4px 4px; font-size: 11px; }
+
+    /* The preset row's button labels (502, 162, etc.) already convey what
+       the threshold hint says in prose. Drop the prose to recover a row. */
+    #threshold-hint { display: none; }
+
+    /* Stats + Mode in one row at the top of the sidebar */
+    .quick-toggles {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+    }
+    .toggle-cell { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+    .toggle-cell-label {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-muted);
+    }
+
+    /* Year range inline with separator */
+    .year-range {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .year-range .field { flex: 1; min-width: 0; text-align: center; }
+    .year-range-sep { color: var(--text-muted); font-weight: 600; }
 }
 
 @media (min-width: 1200px) {
     :root { --sidebar-w: 320px; }
-    .controls-panel { padding: 24px; }
+    .controls-panel { padding: 18px; }
 }
 
 /* -------- Small phone tweaks -------- */
