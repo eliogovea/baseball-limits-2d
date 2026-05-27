@@ -17,6 +17,32 @@ function eraFor(year) {
 let playerIndex = null;       // Map<playerID, Point[]>  (all seasons per player)
 let careerHighlight = null;   // playerID being highlighted, or null
 
+// PA slider config differs by mode: per-season values cluster under ~700, but
+// career totals span 0 to ~16,000. Adjusting max + step + presets keeps the
+// slider usable in both modes.
+const PA_MODE_CONFIG = {
+    season: {
+        max: 600, step: 1,
+        presets: [
+            { val: 0,   label: "All" },
+            { val: 100, label: "100" },
+            { val: 300, label: "300" },
+            { val: 502, label: "502" },
+        ],
+        hint: "502 PA qualifies for the batting title.",
+    },
+    career: {
+        max: 16000, step: 100,
+        presets: [
+            { val: 0,     label: "All" },
+            { val: 1000,  label: "1k" },
+            { val: 5000,  label: "5k" },
+            { val: 10000, label: "10k" },
+        ],
+        hint: "10,000+ PA marks a long full career.",
+    },
+};
+
 
 d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
     const parsedPoints = [];
@@ -80,6 +106,17 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
     populateEraLegend();
     setupExplainer();
     setupGlossary();
+    applyModeConfig("season");
+    setupModeToggle(() => {
+        const mode = getCurrentMode();
+        applyModeConfig(mode);
+        careerHighlight = null;
+        document.getElementById("mode-hint").textContent =
+            mode === "career"
+                ? "Each dot is one player's career totals over the year window."
+                : "Each dot is one player-season.";
+        refreshChart();
+    });
 
     const loadingIndicator = document.getElementById("loading-indicator");
     let pendingRender = null;
@@ -90,6 +127,7 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
         const sYear = parseInt(document.getElementById("s-year-select").value);
         const eYear = parseInt(document.getElementById("e-year-select").value);
         const minPa = parseInt(document.getElementById("pa-min-select").value);
+        const mode = getCurrentMode();
 
         document.getElementById("pa-min-value").textContent = minPa.toLocaleString();
         syncPresetActive(minPa);
@@ -98,7 +136,7 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
         // Yield so the spinner can paint before the (synchronous) D3 work.
         cancelAnimationFrame(pendingRender);
         pendingRender = requestAnimationFrame(() => {
-            drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat);
+            drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode);
             loadingIndicator.classList.remove("active");
         });
     }
@@ -174,6 +212,79 @@ function populateSelectors(points, dimensions) {
     pa.min = 0;
     pa.max = 600;
     pa.value = 0;
+}
+
+function getCurrentMode() {
+    const active = document.querySelector(".mode-btn.active");
+    return active ? active.dataset.mode : "season";
+}
+
+function setupModeToggle(onChange) {
+    document.querySelectorAll(".mode-btn").forEach(btn => {
+        btn.addEventListener("click", () => {
+            if (btn.classList.contains("active")) return;
+            document.querySelectorAll(".mode-btn").forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+            onChange();
+        });
+    });
+}
+
+function applyModeConfig(mode) {
+    const cfg = PA_MODE_CONFIG[mode];
+    if (!cfg) return;
+    const slider = document.getElementById("pa-min-select");
+    slider.max = cfg.max;
+    slider.step = cfg.step;
+    // Snap value if it now exceeds the new max.
+    if (parseInt(slider.value) > cfg.max) slider.value = 0;
+    document.getElementById("pa-min-value").textContent = parseInt(slider.value).toLocaleString();
+
+    const row = document.querySelector(".preset-row");
+    row.innerHTML = cfg.presets
+        .map(p => `<button type="button" class="preset" data-pa="${p.val}">${p.label}</button>`)
+        .join("");
+    setupPaPresets(); // rewire fresh buttons
+    syncPresetActive(parseInt(slider.value));
+
+    const hintEl = document.querySelector("#mode-toggle + .control-hint");
+    // The preset section's own hint sits below the preset row.
+    const presetHint = document.querySelectorAll(".control-group .control-hint");
+    // Update the PA-section hint (the second one — first is the mode hint).
+    if (presetHint.length >= 2) presetHint[1].textContent = cfg.hint;
+}
+
+// Aggregate one player's selected seasons into a single career-totals row.
+// Counting stats sum; rate stats (AVG/OBP/SLG) are recomputed from the summed
+// components — averaging the season AVGs would over-weight short seasons.
+function aggregateCareer(seasons) {
+    const out = {
+        playerID: seasons[0].playerID,
+        teamID: "—",
+        lgID: "—",
+        yearFirst: seasons[0].yearID,
+        yearLast: seasons[seasons.length - 1].yearID,
+        seasonsCount: seasons.length,
+    };
+    const sumKeys = ["G", "AB", "R", "H", "2B", "3B", "HR", "RBI", "SB", "CS",
+                     "BB", "SO", "IBB", "HBP", "SH", "SF", "GIDP", "PA", "TB"];
+    for (const k of sumKeys) {
+        let s = 0;
+        for (const sn of seasons) {
+            const v = sn[k];
+            if (!isNaN(v)) s += v;
+        }
+        out[k] = s;
+    }
+    // Recompute rate stats from career-aggregate components.
+    out.AVG = out.AB > 0 ? out.H / out.AB : NaN;
+    const obpDen = out.AB + out.BB + out.HBP + out.SF;
+    out.OBP = obpDen > 0 ? (out.H + out.BB + out.HBP) / obpDen : NaN;
+    out.SLG = out.AB > 0 ? out.TB / out.AB : NaN;
+    // yearID kept for code that touches a single year (era classification,
+    // sort, label). Use debut year as the career's "anchor" era.
+    out.yearID = out.yearFirst;
+    return out;
 }
 
 function setupControlsToggle() {
@@ -336,21 +447,44 @@ function syncPresetActive(value) {
 }
 
 
-function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat) {
+function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode = "season") {
     const svg = d3.select("#scatter-plot");
     svg.selectAll("*").remove();
     d3.select("#tooltip").attr("data-visible", "false");
 
+    // Apply the year filter first regardless of mode. In Career mode we then
+    // group those filtered seasons per player and aggregate; the PA filter
+    // and the (x, y) read come after aggregation so they operate on career
+    // totals, not individual stints.
+    let workingPoints;
+    if (mode === "career") {
+        const byPlayer = new Map();
+        for (const p of points) {
+            if (p.yearID < sYear || p.yearID > eYear) continue;
+            let arr = byPlayer.get(p.playerID);
+            if (!arr) { arr = []; byPlayer.set(p.playerID, arr); }
+            arr.push(p);
+        }
+        workingPoints = [];
+        for (const seasons of byPlayer.values()) {
+            seasons.sort((a, b) => a.yearID - b.yearID);
+            workingPoints.push(aggregateCareer(seasons));
+        }
+    } else {
+        workingPoints = points.filter(p => p.yearID >= sYear && p.yearID <= eYear);
+    }
+
     const filtered = [];
-    for (const p of points) {
+    for (const p of workingPoints) {
         const x = p[xDim];
         const y = p[yDim];
         if (isNaN(x) || isNaN(y)) continue;
-        if (p.yearID < sYear || p.yearID > eYear) continue;
         if (p.PA < minPa) continue;
         filtered.push({
             x, y,
             year: p.yearID,
+            yearLast: p.yearLast || p.yearID,
+            seasonsCount: p.seasonsCount || 1,
             PA: p.PA,
             playerID: p.playerID,
             teamID: p.teamID,
@@ -384,7 +518,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat) {
     }
     const frontierSet = new Set(frontier);
 
-    renderFrontierCards(frontier, xDim, yDim, formatStat, filtered.length);
+    renderFrontierCards(frontier, xDim, yDim, formatStat, filtered.length, mode);
 
     if (unique.length === 0) {
         svg.append("text")
@@ -515,12 +649,17 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat) {
         const seasons = filtered.filter(p => p.x === d.x && p.y === d.y);
         const head = `<div class="tooltip-header">${xDim} ${formatStat(xDim, d.x)} · ${yDim} ${formatStat(yDim, d.y)}</div>`;
         const visible = seasons.slice(0, 6);
-        const body = visible.map(s => `
-            <div class="tooltip-row">
-                <span class="tooltip-name">${escapeHtml(s.playerID)}</span>
-                <span class="tooltip-meta">${escapeHtml(s.teamID)} ${escapeHtml(s.lgID)} ${s.year}</span>
-            </div>
-        `).join("");
+        const body = visible.map(s => {
+            const meta = mode === "career"
+                ? `${s.year}–${s.yearLast} (${s.seasonsCount})`
+                : `${escapeHtml(s.teamID)} ${escapeHtml(s.lgID)} ${s.year}`;
+            return `
+                <div class="tooltip-row">
+                    <span class="tooltip-name">${escapeHtml(s.playerID)}</span>
+                    <span class="tooltip-meta">${meta}</span>
+                </div>
+            `;
+        }).join("");
         const more = seasons.length > visible.length
             ? `<div class="tooltip-more">+${seasons.length - visible.length} more season${seasons.length - visible.length === 1 ? "" : "s"}</div>`
             : "";
@@ -545,17 +684,17 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat) {
         .on("touchstart", showTooltip, { passive: true })
         .on("click", (event, d) => {
             // Click a frontier point → highlight that player's whole career arc.
-            // (Click on a regular point is a no-op; tooltip already on hover.)
+            // Disabled in career mode: each dot IS already the career, so an
+            // overlay trail of season-level points doesn't add information.
+            if (mode !== "season") return;
             if (frontierSet.has(d)) {
-                // The tooltip lists every player at this (x, y) — pick the
-                // most recent season so collisions deterministically pick one.
                 const seasons = filtered
                     .filter(p => p.x === d.x && p.y === d.y)
                     .sort((a, b) => b.year - a.year);
                 const target = seasons[0] || d;
                 careerHighlight = target.playerID;
                 event.stopPropagation();
-                drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat);
+                drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode);
             }
         });
 
@@ -667,29 +806,35 @@ function layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, pointR, is
 }
 
 
-function renderFrontierCards(frontier, xDim, yDim, formatStat, totalSeasons) {
+function renderFrontierCards(frontier, xDim, yDim, formatStat, totalUnits, mode = "season") {
     const countEl = document.getElementById("frontier-count");
     const cardsEl = document.getElementById("frontier-cards");
     if (!countEl || !cardsEl) return;
 
-    countEl.textContent = `${frontier.length} of ${totalSeasons.toLocaleString()} seasons`;
+    const unit = mode === "career" ? "careers" : "seasons";
+    countEl.textContent = `${frontier.length} of ${totalUnits.toLocaleString()} ${unit}`;
 
     if (frontier.length === 0) {
-        cardsEl.innerHTML = `<div class="frontier-empty">No seasons match the current filters.</div>`;
+        cardsEl.innerHTML = `<div class="frontier-empty">No ${unit} match the current filters.</div>`;
         return;
     }
 
-    // Order so the highest-X (rightmost extreme) appears first — that's
-    // usually the more famous record for "X-leaning" axes like HR.
     const ordered = [...frontier].sort((a, b) => b.x - a.x);
 
     cardsEl.innerHTML = ordered.map(p => {
         const era = eraFor(p.year);
+        const isCareer = mode === "career";
+        const yearLabel = isCareer
+            ? `${p.year}–${p.yearLast}`
+            : String(p.year);
+        const subLine = isCareer
+            ? `${p.seasonsCount} season${p.seasonsCount === 1 ? "" : "s"}`
+            : `${escapeHtml(p.teamID)} · ${escapeHtml(p.lgID)}`;
         return `
             <article class="frontier-card">
                 <div class="frontier-card-name">${escapeHtml(p.playerID)}</div>
-                <div class="frontier-card-year">${p.year}</div>
-                <div class="frontier-card-team">${escapeHtml(p.teamID)} · ${escapeHtml(p.lgID)}</div>
+                <div class="frontier-card-year">${yearLabel}</div>
+                <div class="frontier-card-team">${subLine}</div>
                 <div class="frontier-card-stats">${xDim} ${formatStat(xDim, p.x)} · ${yDim} ${formatStat(yDim, p.y)}</div>
                 <div class="frontier-card-era">${era ? era.name : "—"}</div>
             </article>

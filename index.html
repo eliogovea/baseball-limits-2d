@@ -64,6 +64,15 @@
 
             <div class="controls-panel collapsed" id="controls-panel">
                 <fieldset class="control-group">
+                    <legend>Mode</legend>
+                    <div class="mode-toggle" role="group" id="mode-toggle">
+                        <button type="button" class="mode-btn active" data-mode="season">Per season</button>
+                        <button type="button" class="mode-btn" data-mode="career">Career totals</button>
+                    </div>
+                    <p class="control-hint" id="mode-hint">Each dot is one player-season.</p>
+                </fieldset>
+
+                <fieldset class="control-group">
                     <legend>Axes</legend>
                     <div class="field-row">
                         <label class="field-label">
