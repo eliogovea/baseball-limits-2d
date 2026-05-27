@@ -12,6 +12,37 @@ function eraFor(year) {
     return null;
 }
 
+// Color palettes per encoding mode. Keep deliberate — Red/Blue echo MLB.
+const COLOR_PALETTES = {
+    bats: {
+        L: { color: "#c8102e", name: "Left" },
+        R: { color: "#002d72", name: "Right" },
+        S: { color: "#7a3f5f", name: "Switch" },
+        unknown: { color: "#94a3b8", name: "Unknown" },
+    },
+    league: {
+        AL: { color: "#c8102e", name: "American" },
+        NL: { color: "#002d72", name: "National" },
+        unknown: { color: "#94a3b8", name: "Other" },
+    },
+};
+
+function colorOf(p, colorBy, getMeta) {
+    if (colorBy === "era") {
+        return (eraFor(p.year ?? p.yearID) || { color: "#4a6fa5" }).color;
+    }
+    if (colorBy === "bats") {
+        const m = getMeta(p.playerID);
+        const k = m && m.bats;
+        return (COLOR_PALETTES.bats[k] || COLOR_PALETTES.bats.unknown).color;
+    }
+    if (colorBy === "league") {
+        const k = p.lgID;
+        return (COLOR_PALETTES.league[k] || COLOR_PALETTES.league.unknown).color;
+    }
+    return "#4a6fa5";
+}
+
 // Career-highlight state. Set when the user clicks a frontier point; cleared
 // on outside click, Escape, or any filter change.
 let playerIndex = null;       // Map<playerID, Point[]>  (all seasons per player)
@@ -122,9 +153,11 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
     });
     setupSegGroup("league-seg", () => { careerHighlight = null; refreshChart(); });
     setupSegGroup("bats-seg",   () => { careerHighlight = null; refreshChart(); });
-    document.getElementById("country-select").addEventListener("change", () => {
-        careerHighlight = null;
-        refreshChart();
+    ["country-select", "color-by-select", "size-by-select"].forEach((id) => {
+        document.getElementById(id).addEventListener("change", () => {
+            careerHighlight = null;
+            refreshChart();
+        });
     });
 
     const loadingIndicator = document.getElementById("loading-indicator");
@@ -140,6 +173,10 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
         const league = getSegValue("league-seg", "league") || "all";
         const bats = getSegValue("bats-seg", "bats") || "all";
         const country = document.getElementById("country-select").value || "all";
+        const colorBy = document.getElementById("color-by-select").value;
+        const sizeBy = document.getElementById("size-by-select").value;
+
+        updateColorLegend(colorBy);
 
         document.getElementById("pa-min-value").textContent = minPa.toLocaleString();
         syncPresetActive(minPa);
@@ -147,7 +184,8 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
         loadingIndicator.classList.add("active");
         cancelAnimationFrame(pendingRender);
         pendingRender = requestAnimationFrame(() => {
-            drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode, { league, bats, country });
+            drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode,
+                { league, bats, country, colorBy, sizeBy });
             loadingIndicator.classList.remove("active");
         });
     }
@@ -472,11 +510,26 @@ function setupGlossary() {
 
 
 function populateEraLegend() {
+    updateColorLegend("era");
+}
+
+function updateColorLegend(colorBy) {
     const el = document.getElementById("legend-eras");
     if (!el) return;
-    el.innerHTML = ERAS.map(e =>
-        `<span class="legend-era" style="background:${e.color}" title="${e.name} (${e.start}–${e.end === 2099 ? "present" : e.end})"></span>`
-    ).join("");
+    if (colorBy === "era") {
+        el.innerHTML = ERAS.map(e =>
+            `<span class="legend-era" style="background:${e.color}" title="${e.name} (${e.start}–${e.end === 2099 ? "present" : e.end})"></span>`
+        ).join("");
+    } else if (colorBy === "bats" || colorBy === "league") {
+        const palette = COLOR_PALETTES[colorBy];
+        const keys = colorBy === "bats" ? ["L", "R", "S"] : ["AL", "NL"];
+        el.innerHTML = keys.map(k => {
+            const e = palette[k];
+            return `<span class="legend-era" style="background:${e.color}" title="${escapeHtml(e.name)}"></span>`;
+        }).join("");
+    } else {
+        el.innerHTML = "";
+    }
 }
 
 function setupPaPresets() {
@@ -566,6 +619,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             playerID: p.playerID,
             teamID: p.teamID,
             lgID: p.lgID,
+            orig: p,  // for size-by lookups (PA / G / AB)
         });
     }
 
@@ -664,14 +718,33 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const regular = unique.filter(d => !frontierSet.has(d));
     const special = unique.filter(d => frontierSet.has(d));
 
+    const colorBy = filters.colorBy || "era";
+    const sizeBy = filters.sizeBy || "none";
+    // Build a size scale only if needed — radius range chosen to keep frontier
+    // (r=6) visually dominant; size-by tops out near it but never larger.
+    let sizeScale = null;
+    if (sizeBy !== "none") {
+        const vals = regular.map(d => d.orig && !isNaN(d.orig[sizeBy]) ? d.orig[sizeBy] : NaN)
+            .filter(v => !isNaN(v));
+        if (vals.length > 0) {
+            const lo = d3.min(vals);
+            const hi = d3.max(vals);
+            sizeScale = d3.scaleSqrt().domain([lo, hi]).range([2, Math.max(pointRadius + 1, 5)]);
+        }
+    }
+
     g.append("g").selectAll("circle.regular-point")
         .data(regular).enter()
         .append("circle")
         .attr("class", "regular-point")
         .attr("cx", d => xScale(d.x))
         .attr("cy", d => yScale(d.y))
-        .attr("r", pointRadius)
-        .attr("fill", d => (eraFor(d.year) || { color: "#4a6fa5" }).color);
+        .attr("r", d => {
+            if (!sizeScale) return pointRadius;
+            const v = d.orig && d.orig[sizeBy];
+            return isNaN(v) ? 2 : sizeScale(v);
+        })
+        .attr("fill", d => colorOf(d, colorBy, getMeta));
 
     // Career-trail layer: rendered BEFORE the red frontier dots so the
     // clicked-on frontier point keeps its red marker on top.
