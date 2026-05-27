@@ -26,8 +26,11 @@
     <main class="app-main">
         <section class="chart-region" aria-label="Scatter plot">
             <div class="legend" aria-hidden="true">
-                <span class="legend-item"><span class="legend-dot legend-dot--frontier"></span>Frontier</span>
-                <span class="legend-item"><span class="legend-dot legend-dot--season"></span>Season</span>
+                <div class="legend-row">
+                    <span class="legend-item"><span class="legend-dot legend-dot--frontier"></span>Frontier</span>
+                    <span class="legend-item"><span class="legend-dot legend-dot--season"></span>Season</span>
+                </div>
+                <div class="legend-eras" id="legend-eras"></div>
             </div>
             <div class="loading-indicator" id="loading-indicator" role="status" aria-live="polite">
                 <span class="spinner" aria-hidden="true"></span>

@@ -148,7 +148,9 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
 }
 
 .regular-point {
-    fill: var(--mlb-blue-light);
+    /* Fill set inline per dot from the era color; opacity here keeps the
+       cloud subtle so frontier red and career gold still dominate. */
+    fill-opacity: 0.4;
     transition: r var(--transition);
 }
 .special-point {
@@ -214,7 +216,8 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     top: 12px;
     right: 12px;
     display: flex;
-    gap: 12px;
+    flex-direction: column;
+    gap: 4px;
     padding: 6px 10px;
     background: rgba(255, 255, 255, 0.92);
     border: 1px solid var(--border);
@@ -223,10 +226,25 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     color: var(--text-muted);
     backdrop-filter: blur(6px);
     -webkit-backdrop-filter: blur(6px);
-    pointer-events: none;
+    pointer-events: auto;
     z-index: 2;
 }
+.legend-row {
+    display: flex;
+    gap: 12px;
+}
 .legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.legend-eras {
+    display: flex;
+    gap: 2px;
+    height: 6px;
+}
+.legend-era {
+    flex: 1;
+    border-radius: 1px;
+    cursor: help;
+    min-width: 14px;
+}
 .legend-dot {
     width: 8px;
     height: 8px;

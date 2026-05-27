@@ -77,6 +77,7 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
     populateSelectors(points, dimensions);
     setupControlsToggle();
     setupPaPresets();
+    populateEraLegend();
 
     const loadingIndicator = document.getElementById("loading-indicator");
     let pendingRender = null;
@@ -181,6 +182,14 @@ function setupControlsToggle() {
         toggle.setAttribute("aria-expanded", String(!expanded));
         panel.classList.toggle("collapsed", expanded);
     });
+}
+
+function populateEraLegend() {
+    const el = document.getElementById("legend-eras");
+    if (!el) return;
+    el.innerHTML = ERAS.map(e =>
+        `<span class="legend-era" style="background:${e.color}" title="${e.name} (${e.start}–${e.end === 2099 ? "present" : e.end})"></span>`
+    ).join("");
 }
 
 function setupPaPresets() {
@@ -323,7 +332,8 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat) {
         .attr("class", "regular-point")
         .attr("cx", d => xScale(d.x))
         .attr("cy", d => yScale(d.y))
-        .attr("r", pointRadius);
+        .attr("r", pointRadius)
+        .attr("fill", d => (eraFor(d.year) || { color: "#4a6fa5" }).color);
 
     // Career-trail layer: rendered BEFORE the red frontier dots so the
     // clicked-on frontier point keeps its red marker on top.
