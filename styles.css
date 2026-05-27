@@ -507,6 +507,65 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     font-weight: 500;
     min-width: 0;
 }
+.field-label > span {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.glossary-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    border: 1px solid var(--border-strong);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 9px;
+    font-weight: 700;
+    padding: 0;
+    line-height: 1;
+    text-transform: none;
+    cursor: help;
+    transition: all var(--transition);
+}
+.glossary-btn:hover, .glossary-btn[aria-expanded="true"] {
+    color: var(--mlb-blue);
+    border-color: var(--mlb-blue);
+}
+
+.glossary-popover {
+    position: fixed;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-md);
+    padding: 10px 12px;
+    font-size: 12px;
+    max-width: 280px;
+    z-index: 50;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--transition);
+    text-transform: none;
+    letter-spacing: 0;
+}
+.glossary-popover[data-visible="true"] {
+    opacity: 1;
+    pointer-events: auto;
+}
+.glossary-popover-name {
+    font-weight: 600;
+    color: var(--mlb-blue);
+    margin-bottom: 4px;
+    font-size: 13px;
+}
+.glossary-popover-formula {
+    color: var(--text-muted);
+    line-height: 1.4;
+}
 
 .field {
     width: 100%;

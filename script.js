@@ -79,6 +79,7 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
     setupPaPresets();
     populateEraLegend();
     setupExplainer();
+    setupGlossary();
 
     const loadingIndicator = document.getElementById("loading-indicator");
     let pendingRender = null;
@@ -185,6 +186,31 @@ function setupControlsToggle() {
     });
 }
 
+const GLOSSARY = {
+    PA:   { name: "Plate Appearances",     formula: "AB + BB + HBP + SH + SF" },
+    G:    { name: "Games Played",          formula: "Games in which the player appeared" },
+    AB:   { name: "At Bats",               formula: "PA minus walks, HBP, and sacrifices" },
+    R:    { name: "Runs Scored",           formula: "Times the batter crossed home plate" },
+    H:    { name: "Hits",                  formula: "Singles + doubles + triples + home runs" },
+    "2B": { name: "Doubles",               formula: "Two-base hits" },
+    "3B": { name: "Triples",               formula: "Three-base hits" },
+    HR:   { name: "Home Runs",             formula: "Four-base hits" },
+    TB:   { name: "Total Bases",           formula: "H + 2B + 2·3B + 3·HR" },
+    RBI:  { name: "Runs Batted In",        formula: "Runners scored on the batter's plate appearances" },
+    SB:   { name: "Stolen Bases",          formula: "Bases stolen successfully" },
+    CS:   { name: "Caught Stealing",       formula: "Failed stolen-base attempts" },
+    BB:   { name: "Walks (Bases on Balls)", formula: "Times awarded first base on 4 balls" },
+    SO:   { name: "Strikeouts",            formula: "Times struck out at the plate" },
+    IBB:  { name: "Intentional Walks",     formula: "Walks deliberately issued by the pitcher" },
+    HBP:  { name: "Hit By Pitch",          formula: "Times hit by a pitched ball, awarded first base" },
+    SH:   { name: "Sacrifice Hits",        formula: "Sacrifice bunts that advanced a runner" },
+    SF:   { name: "Sacrifice Flies",       formula: "Fly balls deep enough to score a runner from third" },
+    GIDP: { name: "Grounded Into Double Play", formula: "Ground balls that became a double play" },
+    AVG:  { name: "Batting Average",       formula: "H ÷ AB" },
+    OBP:  { name: "On-Base Percentage",    formula: "(H + BB + HBP) ÷ (AB + BB + HBP + SF)" },
+    SLG:  { name: "Slugging Percentage",   formula: "TB ÷ AB" },
+};
+
 const EXPLAINER_KEY = "bl2d_intro_seen";
 
 function setupExplainer() {
@@ -213,6 +239,77 @@ function setupExplainer() {
         if (e.key === "Escape" && !backdrop.hidden) hide();
     });
 }
+
+function setupGlossary() {
+    const popover = document.createElement("div");
+    popover.className = "glossary-popover";
+    popover.setAttribute("data-visible", "false");
+    document.body.appendChild(popover);
+
+    let activeBtn = null;
+
+    const positionNear = (btn) => {
+        const r = btn.getBoundingClientRect();
+        const popW = popover.offsetWidth;
+        const popH = popover.offsetHeight;
+        let left = r.left;
+        if (left + popW > window.innerWidth - 8) left = window.innerWidth - popW - 8;
+        if (left < 8) left = 8;
+        let top = r.bottom + 6;
+        if (top + popH > window.innerHeight - 8) top = r.top - popH - 6;
+        popover.style.left = left + "px";
+        popover.style.top = top + "px";
+    };
+
+    const show = (btn, dim) => {
+        const def = GLOSSARY[dim];
+        if (!def) return hide();
+        popover.innerHTML = `
+            <div class="glossary-popover-name">${escapeHtml(dim)} — ${escapeHtml(def.name)}</div>
+            <div class="glossary-popover-formula">${escapeHtml(def.formula)}</div>
+        `;
+        popover.setAttribute("data-visible", "true");
+        if (activeBtn && activeBtn !== btn) activeBtn.setAttribute("aria-expanded", "false");
+        btn.setAttribute("aria-expanded", "true");
+        activeBtn = btn;
+        // Two-pass position: render first so we know the popover's size, then place it.
+        requestAnimationFrame(() => positionNear(btn));
+    };
+    const hide = () => {
+        popover.setAttribute("data-visible", "false");
+        if (activeBtn) activeBtn.setAttribute("aria-expanded", "false");
+        activeBtn = null;
+    };
+
+    document.querySelectorAll(".glossary-btn").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const selectId = btn.dataset.target;
+            const dim = document.getElementById(selectId).value;
+            if (activeBtn === btn) hide(); else show(btn, dim);
+        });
+    });
+
+    // Click anywhere outside the popover or trigger closes it.
+    document.addEventListener("click", (e) => {
+        if (!e.target.closest(".glossary-popover, .glossary-btn")) hide();
+    });
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && activeBtn) hide();
+    });
+
+    // If the user changes the selection while a popover is open for that
+    // axis, refresh it to the new dimension's definition.
+    ["x-axis-select", "y-axis-select"].forEach(id => {
+        document.getElementById(id).addEventListener("change", () => {
+            if (activeBtn && activeBtn.dataset.target === id) {
+                show(activeBtn, document.getElementById(id).value);
+            }
+        });
+    });
+}
+
 
 function populateEraLegend() {
     const el = document.getElementById("legend-eras");
