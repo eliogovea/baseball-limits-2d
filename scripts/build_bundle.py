@@ -55,9 +55,67 @@ def parse_int(s, blank_sentinel):
     return int(s)
 
 
+ALL_STATS = WIDE_COLS + NARROW_COLS
+
+
+_SUMMARY_TEAM_RE = re.compile(r"^\d+TM$")
+
+
+def aggregate_stints(rows):
+    """Collapse traded-mid-season rows into one row per (playerID, yearID).
+
+    Each stat is summed across stints; if every stint left it blank, the result
+    is blank too. The primary team for the year is the stint with the most G
+    (games), ties broken by first occurrence.
+
+    BBRef 2024 includes pre-computed summary rows for traded players (teamID
+    like "2TM" or "3TM"), which would double-count if summed alongside the
+    per-team stint rows. Those summary rows are dropped before aggregation.
+
+    Note: playerID here is the human name string, so same-name-same-year
+    players (rare) would also be merged — pre-existing data limitation, not
+    introduced here.
+    """
+    groups = {}  # (playerID, yearID) -> list of stint rows (insertion order)
+    for r in rows:
+        if _SUMMARY_TEAM_RE.match(r["teamID"]):
+            continue
+        key = (r["playerID"], r["yearID"])
+        groups.setdefault(key, []).append(r)
+
+    def g_of(row):
+        s = row["G"].strip()
+        return int(s) if s.lstrip("-").isdigit() else 0
+
+    out = []
+    for (player_id, year_id), stints in groups.items():
+        if len(stints) == 1:
+            out.append(stints[0])
+            continue
+        primary = max(stints, key=g_of)
+        agg = {
+            "playerID": player_id,
+            "yearID": year_id,
+            "teamID": primary["teamID"],
+            "lgID": primary["lgID"],
+        }
+        for col in ALL_STATS:
+            total = 0
+            any_present = False
+            for s in stints:
+                v = s[col].strip()
+                if v and v.lstrip("-").isdigit():
+                    total += int(v)
+                    any_present = True
+            agg[col] = str(total) if any_present else ""
+        out.append(agg)
+    return out
+
+
 def build_binary(csv_path: Path) -> tuple[bytes, dict]:
     with csv_path.open(encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
+        raw_rows = list(csv.DictReader(f))
+    rows = aggregate_stints(raw_rows)
     n = len(rows)
 
     names = sorted({r["playerID"] for r in rows})
@@ -136,6 +194,7 @@ def build_binary(csv_path: Path) -> tuple[bytes, dict]:
         buf.write(narrow_arrays[col].tobytes())
 
     stats = {
+        "raw_rows": len(raw_rows),
         "rows": n,
         "names": len(names),
         "teams": len(teams),
@@ -271,7 +330,8 @@ def build_bundle():
 
     csv_size = CSV_PATH.stat().st_size
     out_size = OUT_PATH.stat().st_size
-    print(f"rows={stats['rows']:,}  names={stats['names']:,}  teams={stats['teams']}  "
+    print(f"rows={stats['rows']:,} (aggregated from {stats['raw_rows']:,} stints)  "
+          f"names={stats['names']:,}  teams={stats['teams']}  "
           f"years={stats['year_range'][0]}-{stats['year_range'][1]}")
     print(f"binary raw:   {len(binary):>10,} bytes")
     print(f"binary gzip:  {len(compressed):>10,} bytes  ({len(compressed)/csv_size:.1%} of CSV)")
