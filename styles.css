@@ -456,11 +456,19 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
 .controls-panel {
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 16px;
     padding: 0 16px 16px;
     overflow-y: auto;
+    min-height: 0;
 }
 .controls-panel.collapsed { display: none; }
+
+.controls-inputs {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    min-height: 0;
+}
 
 .control-group {
     border: none;
@@ -893,16 +901,33 @@ input[type="number"].field::-webkit-outer-spin-button {
         max-height: none;
         border-top: none;
         border-left: 1px solid var(--border);
-        overflow-y: auto;
+        overflow: hidden;          /* panel handles vertical layout below */
     }
     .controls-toggle {
         display: none;
     }
     .controls-panel {
-        padding: 20px;
-        gap: 22px;
+        padding: 16px 16px 12px;
+        gap: 12px;
+        height: 100%;
+        overflow: hidden;          /* split into two regions, each scrolls */
     }
     .controls-panel.collapsed { display: flex; }
+    .controls-inputs {
+        flex: 0 1 auto;
+        overflow-y: auto;
+        gap: 14px;
+        padding-right: 4px;
+    }
+    .frontier-section {
+        flex: 1 1 220px;           /* take remaining space, at least ~3 cards' worth */
+        min-height: 220px;
+        overflow: hidden;
+    }
+    .frontier-cards {
+        flex: 1 1 0;
+        min-height: 0;
+    }
 }
 
 @media (min-width: 1200px) {
