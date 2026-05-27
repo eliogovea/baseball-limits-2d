@@ -447,6 +447,17 @@ def build_bundle():
     if n_subs != 1:
         sys.exit(f"build_bundle: expected exactly one d3.csv() call to patch, found {n_subs}")
 
+    # The bundle's decoder already builds metaFor; the people CSV is only needed
+    # by the multi-file site. Short-circuit the fetch in bundle mode so it doesn't
+    # 404 against a path the bundle doesn't ship.
+    js_patched, n_subs_people = re.subn(
+        r'd3\.csv\("data/people_lahman_1871-2023\.csv"\)',
+        "Promise.resolve(null)",
+        js_patched,
+    )
+    if n_subs_people != 1:
+        sys.exit(f"build_bundle: expected exactly one people-CSV call to patch, found {n_subs_people}")
+
     decoder_js = DECODER_JS_TEMPLATE.replace("__BL_DATA_B64__", b64)
     combined_js = decoder_js + "\n" + js_patched
 

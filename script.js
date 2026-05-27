@@ -88,8 +88,18 @@ const PA_MODE_CONFIG = {
 };
 
 
-d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
-    if (typeof points.metaFor === "function") metaFor = points.metaFor;
+// People CSV is loaded in parallel for the multi-file site (the bundle's
+// decoder already attaches metaFor to the points array and the bundler
+// short-circuits this fetch to a Promise.resolve(null)).
+const peoplePromise = d3.csv("data/people_lahman_1871-2023.csv").catch(() => null);
+
+d3.csv("data/batting_limits_1871-2024.csv").then(async (points) => {
+    if (typeof points.metaFor === "function") {
+        metaFor = points.metaFor;
+    } else {
+        const people = await peoplePromise;
+        if (people) metaFor = buildMetaFromPeopleCsv(people);
+    }
     const parsedPoints = [];
     points.forEach((point) => {
         parsedPoints.push({
@@ -253,6 +263,39 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
     });
     resizeObserver.observe(chartRegion);
 });
+
+
+// Mirrors the bundle decoder's people-record shape so the rest of the app
+// can call metaFor() identically in either deployment. Maps B (both) → S
+// since the existing rendering / filter code uses "S" for switch hitters.
+function buildMetaFromPeopleCsv(rows) {
+    const HAND_MAP = { L: "L", R: "R", B: "S", S: "S" };
+    const debutYear = (p) => parseInt((p.debut || "").slice(0, 4)) || 0;
+
+    // Latest-debut wins on name collisions ("Luis Garcia" x5 etc.), matching
+    // the bundle's tie-break in build_bundle.py:load_people.
+    const peopleMap = new Map();
+    for (const p of rows) {
+        const key = `${p.nameFirst} ${p.nameLast}`;
+        const prior = peopleMap.get(key);
+        if (prior && debutYear(prior) >= debutYear(p)) continue;
+        peopleMap.set(key, p);
+    }
+
+    return (playerID) => {
+        const p = peopleMap.get(playerID);
+        if (!p) return null;
+        return {
+            birthYear: parseInt(p.birthYear) || null,
+            debutYear: debutYear(p) || null,
+            country: (p.birthCountry || "").trim() || null,
+            bats: HAND_MAP[p.bats] || null,
+            throws: HAND_MAP[p.throws] || null,
+            heightIn: parseInt(p.height) || null,
+            weightLb: parseInt(p.weight) || null,
+        };
+    };
+}
 
 
 function populateCountrySelect(playerIdx) {
