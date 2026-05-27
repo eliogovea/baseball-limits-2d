@@ -357,14 +357,24 @@ function buildMetaFromPeopleCsv(rows) {
     const HAND_MAP = { L: "L", R: "R", B: "S", S: "S" };
     const debutYear = (p) => parseInt((p.debut || "").slice(0, 4)) || 0;
 
-    // Latest-debut wins on name collisions ("Luis Garcia" x5 etc.), matching
-    // the bundle's tie-break in build_bundle.py:load_people.
+    // Mirror build_display_name_map (Python) so the key used here matches the
+    // disambiguated playerID stored in the limits CSVs.
+    const plainCounts = new Map();
+    for (const p of rows) {
+        const plain = `${p.nameFirst} ${p.nameLast}`;
+        plainCounts.set(plain, (plainCounts.get(plain) || 0) + 1);
+    }
+    const displayKey = (p) => {
+        const plain = `${p.nameFirst} ${p.nameLast}`;
+        if ((plainCounts.get(plain) || 0) <= 1) return plain;
+        const birth = (p.birthYear || "").trim();
+        const tag = /^\d+$/.test(birth) ? `b.${birth}` : p.playerID;
+        return `${plain} (${tag})`;
+    };
+
     const peopleMap = new Map();
     for (const p of rows) {
-        const key = `${p.nameFirst} ${p.nameLast}`;
-        const prior = peopleMap.get(key);
-        if (prior && debutYear(prior) >= debutYear(p)) continue;
-        peopleMap.set(key, p);
+        peopleMap.set(displayKey(p), p);
     }
 
     return (playerID) => {

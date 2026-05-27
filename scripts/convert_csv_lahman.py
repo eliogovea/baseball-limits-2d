@@ -1,19 +1,19 @@
 import csv
 import argparse
+from _display_name import build_display_name_map
 
 def convert_csv_lahman(csv_people, csv_batting, csv_output):
-    csv_people_data = {}
-    with open(csv_people, mode='r', encoding='utf-8') as csv_file:
-        csv_reader = csv.DictReader(csv_file)
-        for row in csv_reader:
-            csv_people_data[row["playerID"]] = row
+    # Disambiguate same-name players (Frank Thomas, Ken Griffey, etc.) by
+    # appending a birth-year tag — otherwise the "{first} {last}" key would
+    # collapse multiple real players into one phantom in career-mode totals.
+    display_name = build_display_name_map(csv_people)
 
     csv_batting_rows = []
-    with open(csv_batting, mode='r', encoding='utf-8') as csv_file:
+    with open(csv_batting, mode='r', encoding='utf-8-sig') as csv_file:
         csv_reader = csv.DictReader(csv_file)
         for row in csv_reader:
             csv_batting_rows.append({
-                "playerID": "{} {}".format(csv_people_data[row["playerID"]]["nameFirst"], csv_people_data[row["playerID"]]["nameLast"]),
+                "playerID": display_name[row["playerID"]],
                 "yearID": row["yearID"],
                 "teamID": row["teamID"],
                 "lgID": row["lgID"],

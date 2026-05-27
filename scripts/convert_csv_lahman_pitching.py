@@ -15,6 +15,7 @@ Usage:
 
 import csv
 import argparse
+from _display_name import build_display_name_map
 
 
 PITCHING_FIELDS = [
@@ -28,24 +29,18 @@ PITCHING_FIELDS = [
 
 
 def convert(csv_people, csv_pitching, csv_output):
-    people = {}
-    # utf-8-sig handles the BOM on the People.csv header in the 2025 release.
-    with open(csv_people, mode="r", encoding="utf-8-sig") as f:
-        for row in csv.DictReader(f):
-            people[row["playerID"]] = row
+    # Disambiguate same-name players (e.g. the two Pedro Martinezes) — see
+    # _display_name.py and the batting converter for rationale.
+    display_name = build_display_name_map(csv_people)
 
     rows_out = []
     with open(csv_pitching, mode="r", encoding="utf-8") as f:
         for row in csv.DictReader(f):
-            person = people.get(row["playerID"])
-            if person is None:
-                # Skip the rare pitching row whose playerID has no people
-                # entry — same defensive behavior as the batting converter
-                # (those rows would have an unjoinable name anyway).
+            name = display_name.get(row["playerID"])
+            if name is None:
                 continue
-            display_name = "{} {}".format(person["nameFirst"], person["nameLast"])
             out = {f: row.get(f, "") for f in PITCHING_FIELDS}
-            out["playerID"] = display_name
+            out["playerID"] = name
             rows_out.append(out)
 
     with open(csv_output, "w", newline="") as f:

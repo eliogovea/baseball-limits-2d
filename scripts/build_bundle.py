@@ -102,23 +102,25 @@ def _year_from_date(s):
 
 
 def load_people(csv_path):
-    """Map '{nameFirst} {nameLast}' -> chosen people-row dict.
+    """Map display-name -> people-row dict.
 
-    Lahman's playerID is unique, but the visible "{first} {last}" key collides
-    for ~568 names (e.g. 5 Luis Garcias). On collision, prefer the player with
-    the latest debut date — they're the one a present-day visitor is more
-    likely to be looking up. This is the same data limitation that already
-    affects tooltips, just made explicit here.
+    Uses the same display-name disambiguation as the converters
+    (_display_name.build_display_name_map), so the people lookup key
+    matches the playerID stored in the *_limits CSVs and the bundle's
+    name dict. Same-name players ("Frank Thomas", "Ken Griffey") get a
+    "(b.YYYY)" suffix so they're addressable individually.
     """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _display_name import build_display_name_map
+    display = build_display_name_map(str(csv_path))
+
     chosen = {}
-    chosen_debut = {}
-    with csv_path.open(encoding="utf-8") as f:
+    with csv_path.open(encoding="utf-8-sig") as f:
         for p in csv.DictReader(f):
-            key = "{} {}".format(p["nameFirst"], p["nameLast"])
-            debut = _year_from_date(p["debut"])
-            if key not in chosen or debut > chosen_debut[key]:
-                chosen[key] = p
-                chosen_debut[key] = debut
+            name = display.get(p["playerID"])
+            if name is None:
+                continue
+            chosen[name] = p
     return chosen
 
 
