@@ -1054,28 +1054,23 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         })
         .attr("fill", d => colorOf(d, colorBy, getMeta));
 
-    // Career-trail layer: rendered BEFORE the red frontier dots so the
+    // Career-highlight layer: dots only (no connecting line — the
+    // year-order trail tended to add zigzag noise more than it clarified
+    // the trajectory). Rendered BEFORE the red frontier dots so the
     // clicked-on frontier point keeps its red marker on top.
     if (careerHighlight && playerIndex && playerIndex.has(careerHighlight)) {
         const allSeasons = playerIndex.get(careerHighlight)
             .map(p => ({ x: p[xDim], y: p[yDim], year: p.yearID }))
-            .filter(s => !isNaN(s.x) && !isNaN(s.y))
-            .sort((a, b) => a.year - b.year);
+            .filter(s => !isNaN(s.x) && !isNaN(s.y));
         if (allSeasons.length > 0) {
-            const trailLine = d3.line().x(d => xScale(d.x)).y(d => yScale(d.y));
             const careerG = g.append("g").attr("class", "career-trail");
-            if (allSeasons.length > 1) {
-                careerG.append("path")
-                    .attr("class", "career-line")
-                    .attr("d", trailLine(allSeasons));
-            }
             careerG.selectAll("circle")
                 .data(allSeasons).enter()
                 .append("circle")
                 .attr("class", "career-point")
                 .attr("cx", d => xScale(d.x))
                 .attr("cy", d => yScale(d.y))
-                .attr("r", Math.max(pointRadius + 1, 4));
+                .attr("r", Math.max(pointRadius + 3, 6));
         }
     }
 
