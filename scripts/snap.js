@@ -55,7 +55,22 @@ async function main() {
             ws.send(JSON.stringify({ id, method, params }));
         });
 
+        // Forward console messages from the page to our stderr. Register the
+        // listener BEFORE Runtime.enable so we don't miss messages emitted
+        // during the burst right after navigate.
+        ws.onMessage((data) => {
+            const msg = JSON.parse(data);
+            if (msg.method === 'Runtime.consoleAPICalled') {
+                const args = (msg.params.args || []).map(a =>
+                    a.value !== undefined ? a.value : (a.description || '[?]'));
+                process.stderr.write(`[page ${msg.params.type}] ${args.join(' ')}\n`);
+            }
+            if (process.env.SNAP_DEBUG && msg.method) {
+                process.stderr.write(`[cdp event] ${msg.method}\n`);
+            }
+        });
         await send('Page.enable');
+        await send('Runtime.enable');
         await send('Emulation.setDeviceMetricsOverride', {
             width, height,
             deviceScaleFactor: 1,
