@@ -274,9 +274,57 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
 .legend-dot--frontier { background: var(--mlb-red); }
 .legend-dot--season   { background: var(--mlb-blue-light); }
 
-.loading-indicator {
+.chart-toolbar {
     position: absolute;
     top: 12px;
+    left: 12px;
+    display: flex;
+    gap: 4px;
+    z-index: 3;
+}
+.chart-tool {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.92);
+    color: var(--text-muted);
+    padding: 0;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: all var(--transition);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+}
+.chart-tool:hover:not(:disabled) {
+    color: var(--mlb-blue);
+    border-color: var(--mlb-blue);
+}
+.chart-tool.active {
+    background: var(--mlb-blue);
+    color: #ffffff;
+    border-color: var(--mlb-blue);
+}
+.chart-tool.active:hover { color: #ffffff; }
+.chart-tool:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* d3.brush styling: tight selection rectangle, subtle handles */
+.brush .selection {
+    fill: var(--mlb-blue);
+    fill-opacity: 0.08;
+    stroke: var(--mlb-blue);
+    stroke-width: 1;
+    stroke-dasharray: 3 2;
+}
+.brush .overlay {
+    cursor: crosshair;
+}
+
+.loading-indicator {
+    position: absolute;
+    top: 48px;             /* below the zoom toolbar */
     left: 12px;
     display: none;
     align-items: center;

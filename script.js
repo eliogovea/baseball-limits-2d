@@ -53,6 +53,13 @@ let metaFor = () => null;     // populated after decode: (playerID) -> {bats, th
 // highlight, which IS in the URL, plays the role of "sharable focus").
 let tooltipPinned = false;
 
+// Zoom state. viewDomain overrides the chart's x/y scale domains when set.
+// zoomMode is "brush" (drag a rectangle to zoom in) or "pan" (drag to pan,
+// wheel to zoom). Reset on axis/dataset/mode change since the domain values
+// no longer make sense across dimension changes.
+let viewDomain = null;          // {x: [a,b], y: [c,d]} | null
+let zoomMode = "brush";
+
 // URL state defaults — params at their default value are omitted from the
 // hash to keep it short.
 const URL_DEFAULTS = {
@@ -256,6 +263,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         const mode = getCurrentMode();
         applyModeConfig(mode);
         careerHighlight = null;
+        viewDomain = null;        // mode changes the dataset shape too
         document.getElementById("mode-hint").textContent =
             mode === "career"
                 ? "Each dot is one player's career totals over the year window."
@@ -264,11 +272,12 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     });
     setupModeToggle("stats-toggle", () => {
         // Switching datasets resets axes, threshold config, dimension selectors,
-        // the slider (units changed — PA vs IP), and clears the career highlight
-        // (different players).
+        // the slider (units changed — PA vs IP), the career highlight (different
+        // players), and any zoom rectangle (units changed too).
         activeDatasetKey = getActiveModeBtnData("stats-toggle", "stats") || "batting";
         playerIndex = datasetState[activeDatasetKey].playerIndex;
         careerHighlight = null;
+        viewDomain = null;
         populateSelectorsForActive();
         resetThresholdToDefault();
         applyModeConfig(getCurrentMode());
@@ -333,10 +342,21 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         careerHighlight = null;
         refreshChart();
     };
-    ["x-axis-select", "y-axis-select", "s-year-select", "e-year-select"].forEach((id) => {
+    const axisOrViewChanged = () => {
+        // Axis dimension changes invalidate any zoom rectangle (the domain
+        // values are in the old dimension's units).
+        viewDomain = null;
+        filterChanged();
+    };
+    ["x-axis-select", "y-axis-select"].forEach((id) => {
+        document.getElementById(id).addEventListener("change", axisOrViewChanged);
+    });
+    ["s-year-select", "e-year-select"].forEach((id) => {
         document.getElementById(id).addEventListener("change", filterChanged);
     });
     document.getElementById("pa-min-select").addEventListener("input", filterChanged);
+
+    setupZoomToolbar();
 
     // Click on empty chart area, or Escape, clears both the tooltip pin and
     // the career highlight in one motion.
@@ -585,6 +605,29 @@ function setupModeToggle(containerId, onChange) {
 function getActiveModeBtnData(containerId, attr) {
     const active = document.querySelector(`#${containerId} .mode-btn.active`);
     return active ? active.dataset[attr] : null;
+}
+
+function setupZoomToolbar() {
+    document.querySelectorAll("#chart-toolbar .chart-tool[data-zoom-mode]").forEach(btn => {
+        btn.addEventListener("click", () => {
+            if (btn.classList.contains("active")) return;
+            document.querySelectorAll("#chart-toolbar .chart-tool[data-zoom-mode]")
+                .forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+            zoomMode = btn.dataset.zoomMode;
+            refreshChart();
+        });
+    });
+    document.getElementById("zoom-reset").addEventListener("click", () => {
+        if (!viewDomain) return;
+        viewDomain = null;
+        refreshChart();
+    });
+}
+
+function updateZoomResetEnabled() {
+    const btn = document.getElementById("zoom-reset");
+    if (btn) btn.disabled = !viewDomain;
 }
 
 function resetThresholdToDefault() {
@@ -979,10 +1022,16 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const plotW = Math.max(40, width - margin.left - margin.right);
     const plotH = Math.max(40, height - margin.top - margin.bottom);
 
+    // Data extents are computed up front so brush coordinates always resolve
+    // against the full universe. The visible scale domain is either the
+    // current viewDomain (brush result) or the data extent.
     const xExtent = d3.extent(unique, d => d.x);
     const yExtent = d3.extent(unique, d => d.y);
-    const xScale = d3.scaleLinear().domain(xExtent).nice().range([0, plotW]);
-    const yScale = d3.scaleLinear().domain(yExtent).nice().range([plotH, 0]);
+    const xDomain = (viewDomain && viewDomain.x) || xExtent;
+    const yDomain = (viewDomain && viewDomain.y) || yExtent;
+    const xScale = d3.scaleLinear().domain(xDomain).nice().range([0, plotW]);
+    const yScale = d3.scaleLinear().domain(yDomain).nice().range([plotH, 0]);
+    updateZoomResetEnabled();
 
     const g = svg.append("g")
         .attr("transform", `translate(${margin.left}, ${margin.top})`);
@@ -1124,6 +1173,30 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         if (tooltipPinned && !force) return;
         tooltip.setAttribute("data-visible", "false");
     };
+
+    // Brush layer: drag a rectangle on empty chart area to zoom in. Mounted
+    // BEFORE the hit circles so dot clicks still go to their handlers
+    // (hit circles cover the dot area; the brush only sees mousedown on
+    // empty space). Brush is only active in "brush" zoom mode.
+    if (zoomMode === "brush") {
+        const brush = d3.brush()
+            .extent([[0, 0], [plotW, plotH]])
+            .on("end", (event) => {
+                if (!event.selection) return;
+                const [[x0, y0], [x1, y1]] = event.selection;
+                const dx = [xScale.invert(x0), xScale.invert(x1)];
+                const dy = [yScale.invert(y1), yScale.invert(y0)];
+                if (dx[0] >= dx[1] || dy[0] >= dy[1]) return;
+                viewDomain = { x: dx, y: dy };
+                // Clear the brush selection rectangle before redrawing so it
+                // doesn't visually persist on top of the new view.
+                d3.select(event.sourceEvent.currentTarget).call(brush.move, null);
+                document.dispatchEvent(new CustomEvent("bl2d:refresh"));
+            });
+        g.append("g")
+            .attr("class", "brush")
+            .call(brush);
+    }
 
     g.append("g").selectAll("circle.hit")
         .data(unique).enter()

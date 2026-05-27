@@ -49,6 +49,17 @@
                 <span class="spinner" aria-hidden="true"></span>
                 <span>Loading…</span>
             </div>
+            <div class="chart-toolbar" id="chart-toolbar">
+                <button class="chart-tool active" id="zoom-mode-brush" data-zoom-mode="brush" title="Brush: drag a rectangle to zoom in" aria-label="Brush zoom mode">
+                    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><rect x="2.5" y="3.5" width="9" height="7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="2 1.5"/></svg>
+                </button>
+                <button class="chart-tool" id="zoom-mode-pan" data-zoom-mode="pan" title="Pan: drag to move, wheel to zoom" aria-label="Pan zoom mode">
+                    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 2v10M2 7h10M5 4l2-2 2 2M5 10l2 2 2-2M4 5l-2 2 2 2M10 5l2 2-2 2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+                </button>
+                <button class="chart-tool" id="zoom-reset" title="Reset zoom" aria-label="Reset zoom" disabled>
+                    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 7a4 4 0 1 1 1.2 2.8M3 4v3h3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+            </div>
             <svg id="scatter-plot" role="img" aria-label="Scatter plot of batting statistics with Pareto frontier highlighted">
             </svg>
             <div class="tooltip" id="tooltip" role="tooltip" aria-hidden="true"></div>
