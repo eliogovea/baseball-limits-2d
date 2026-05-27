@@ -33,12 +33,12 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CSV_PATH = ROOT / "data" / "batting_limits_1871-2024.csv"
+CSV_PATH = ROOT / "data" / "batting_limits_1871-2025.csv"
 HTML_PATH = ROOT / "index.html"
 CSS_PATH = ROOT / "styles.css"
 JS_PATH = ROOT / "script.js"
 D3_PATH = ROOT / "vendor" / "d3.v7.min.js"
-PEOPLE_PATH = ROOT / "data" / "people_lahman_1871-2023.csv"
+PEOPLE_PATH = ROOT / "data" / "people_lahman_1871-2025.csv"
 OUT_DIR = ROOT / "dist"
 OUT_PATH = OUT_DIR / "index.html"
 
@@ -239,7 +239,7 @@ def build_binary(csv_path: Path) -> tuple[bytes, dict]:
 
     buf = io.BytesIO()
     buf.write(b"BL2D")
-    buf.write(struct.pack("<BB", 2, 0))
+    buf.write(struct.pack("<BB", 3, 0))
     buf.write(struct.pack("<HI", YEAR_BASE, n))
 
     buf.write(struct.pack("<I", len(names)))
@@ -263,7 +263,9 @@ def build_binary(csv_path: Path) -> tuple[bytes, dict]:
 
     name_arr = array.array("H", (name_to_idx[r["playerID"]] for r in rows))
     year_arr = array.array("B", (int(r["yearID"]) - YEAR_BASE for r in rows))
-    team_arr = array.array("B", (team_to_idx[(r["lgID"], r["teamID"])] for r in rows))
+    # team_idx widened to u16 in v3 — Negro Leagues addition pushed team count
+    # past 256.
+    team_arr = array.array("H", (team_to_idx[(r["lgID"], r["teamID"])] for r in rows))
 
     wide_arrays = {}
     for col in WIDE_COLS:
@@ -322,7 +324,7 @@ async function decodeBL() {
     const magic = dec.decode(buf.subarray(off, off + 4)); off += 4;
     if (magic !== 'BL2D') throw new Error('decodeBL: bad magic ' + magic);
     const major = buf[off++]; const minor = buf[off++];
-    if (major !== 2) throw new Error('decodeBL: unsupported version ' + major + '.' + minor);
+    if (major !== 3) throw new Error('decodeBL: unsupported version ' + major + '.' + minor);
     const yearBase = dv.getUint16(off, true); off += 2;
     const N = dv.getUint32(off, true); off += 4;
 
@@ -389,7 +391,7 @@ async function decodeBL() {
 
     const nameIdx = sliceU16();
     const yearOff = sliceU8();
-    const teamIdx = sliceU8();
+    const teamIdx = sliceU16();
     const wide = {}; for (const c of BL_WIDE_COLS) wide[c] = sliceU16();
     const narrow = {}; for (const c of BL_NARROW_COLS) narrow[c] = sliceU8();
 
@@ -440,7 +442,7 @@ def build_bundle():
     # Swap the single d3.csv() call for our decoder. Keep the rest of script.js intact —
     # downstream parseInt() works equally well on the string values we emit.
     js_patched, n_subs = re.subn(
-        r'd3\.csv\("data/batting_limits_1871-2024\.csv"\)',
+        r'd3\.csv\("data/batting_limits_1871-2025\.csv"\)',
         "decodeBL()",
         js,
     )
@@ -451,7 +453,7 @@ def build_bundle():
     # by the multi-file site. Short-circuit the fetch in bundle mode so it doesn't
     # 404 against a path the bundle doesn't ship.
     js_patched, n_subs_people = re.subn(
-        r'd3\.csv\("data/people_lahman_1871-2023\.csv"\)',
+        r'd3\.csv\("data/people_lahman_1871-2025\.csv"\)',
         "Promise.resolve(null)",
         js_patched,
     )

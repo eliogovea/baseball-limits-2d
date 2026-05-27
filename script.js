@@ -91,9 +91,9 @@ const PA_MODE_CONFIG = {
 // People CSV is loaded in parallel for the multi-file site (the bundle's
 // decoder already attaches metaFor to the points array and the bundler
 // short-circuits this fetch to a Promise.resolve(null)).
-const peoplePromise = d3.csv("data/people_lahman_1871-2023.csv").catch(() => null);
+const peoplePromise = d3.csv("data/people_lahman_1871-2025.csv").catch(() => null);
 
-d3.csv("data/batting_limits_1871-2024.csv").then(async (points) => {
+d3.csv("data/batting_limits_1871-2025.csv").then(async (points) => {
     if (typeof points.metaFor === "function") {
         metaFor = points.metaFor;
     } else {
