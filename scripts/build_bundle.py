@@ -1,0 +1,285 @@
+"""Build a single-file dist/index.html with the dataset packed as inline base64.
+
+Output is fully self-contained — opens with file:// without any network access. D3 is vendored
+from vendor/d3.v7.min.js (fetch once with: curl -sL https://d3js.org/d3.v7.min.js -o vendor/d3.v7.min.js).
+
+Binary format (all little-endian):
+  Header (12 bytes):
+    'BL2D' magic | u8 major | u8 minor | u16 year_base | u32 row_count
+  Name dictionary:
+    u32 count, then for each: u8 len + utf8 bytes
+  Team dictionary (lgID, teamID pairs):
+    u16 count, then for each: u8 lg_len + utf8 + u8 tm_len + utf8
+  Columnar payload, in this fixed order:
+    name_idx: u16 * N
+    year_off: u8  * N   (offset from year_base)
+    team_idx: u8  * N
+    wide stats (u16 * N), in order: G, AB, R, H, BB, SO, RBI
+    narrow stats (u8 * N), in order: 2B, 3B, HR, SB, CS, IBB, HBP, SH, SF, GIDP
+
+Blank values use sentinels 0xFFFF (u16) / 0xFF (u8). Sentinels are mapped back to "" at
+decode time so the downstream parseInt() in script.js produces NaN, matching d3.csv behavior.
+"""
+
+import argparse
+import array
+import base64
+import csv
+import gzip
+import io
+import re
+import struct
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+CSV_PATH = ROOT / "data" / "batting_limits_1871-2024.csv"
+HTML_PATH = ROOT / "index.html"
+CSS_PATH = ROOT / "styles.css"
+JS_PATH = ROOT / "script.js"
+D3_PATH = ROOT / "vendor" / "d3.v7.min.js"
+OUT_DIR = ROOT / "dist"
+OUT_PATH = OUT_DIR / "index.html"
+
+YEAR_BASE = 1871
+WIDE_COLS = ["G", "AB", "R", "H", "BB", "SO", "RBI"]
+NARROW_COLS = ["2B", "3B", "HR", "SB", "CS", "IBB", "HBP", "SH", "SF", "GIDP"]
+W16_BLANK = 0xFFFF
+W8_BLANK = 0xFF
+
+
+def parse_int(s, blank_sentinel):
+    s = s.strip()
+    if not s or not s.lstrip("-").isdigit():
+        return blank_sentinel
+    return int(s)
+
+
+def build_binary(csv_path: Path) -> tuple[bytes, dict]:
+    with csv_path.open(encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    n = len(rows)
+
+    names = sorted({r["playerID"] for r in rows})
+    name_to_idx = {name: i for i, name in enumerate(names)}
+    teams = sorted({(r["lgID"], r["teamID"]) for r in rows})
+    team_to_idx = {t: i for i, t in enumerate(teams)}
+
+    if len(names) > 0xFFFFFFFF:
+        sys.exit(f"name dict overflow: {len(names)}")
+    if len(teams) > 0xFFFF:
+        sys.exit(f"team dict overflow: {len(teams)}")
+    for name in names:
+        if len(name.encode("utf-8")) > 255:
+            sys.exit(f"player name >255 bytes: {name!r}")
+    for lg, tm in teams:
+        if len(lg.encode("utf-8")) > 255 or len(tm.encode("utf-8")) > 255:
+            sys.exit(f"team string >255 bytes: {lg!r}/{tm!r}")
+
+    min_year = min(int(r["yearID"]) for r in rows)
+    max_year = max(int(r["yearID"]) for r in rows)
+    if min_year < YEAR_BASE:
+        sys.exit(f"min year {min_year} < YEAR_BASE {YEAR_BASE}")
+    if max_year - YEAR_BASE > 0xFF:
+        sys.exit(f"year span > 255 ({min_year}..{max_year}); widen year_off to u16")
+
+    buf = io.BytesIO()
+    buf.write(b"BL2D")
+    buf.write(struct.pack("<BB", 1, 0))
+    buf.write(struct.pack("<HI", YEAR_BASE, n))
+
+    buf.write(struct.pack("<I", len(names)))
+    for name in names:
+        nb = name.encode("utf-8")
+        buf.write(struct.pack("<B", len(nb)))
+        buf.write(nb)
+
+    buf.write(struct.pack("<H", len(teams)))
+    for lg, tm in teams:
+        lgb = lg.encode("utf-8")
+        tmb = tm.encode("utf-8")
+        buf.write(struct.pack("<B", len(lgb)))
+        buf.write(lgb)
+        buf.write(struct.pack("<B", len(tmb)))
+        buf.write(tmb)
+
+    name_arr = array.array("H", (name_to_idx[r["playerID"]] for r in rows))
+    year_arr = array.array("B", (int(r["yearID"]) - YEAR_BASE for r in rows))
+    team_arr = array.array("B", (team_to_idx[(r["lgID"], r["teamID"])] for r in rows))
+
+    wide_arrays = {}
+    for col in WIDE_COLS:
+        a = array.array("H", [0] * n)
+        for i, r in enumerate(rows):
+            v = parse_int(r[col], W16_BLANK)
+            if v != W16_BLANK and (v < 0 or v > 0xFFFE):
+                sys.exit(f"{col}[row {i}] value {v} out of u16 range")
+            a[i] = v
+        wide_arrays[col] = a
+
+    narrow_arrays = {}
+    for col in NARROW_COLS:
+        a = array.array("B", [0] * n)
+        for i, r in enumerate(rows):
+            v = parse_int(r[col], W8_BLANK)
+            if v != W8_BLANK and (v < 0 or v > 0xFE):
+                sys.exit(f"{col}[row {i}] value {v} out of u8 range")
+            a[i] = v
+        narrow_arrays[col] = a
+
+    buf.write(name_arr.tobytes())
+    buf.write(year_arr.tobytes())
+    buf.write(team_arr.tobytes())
+    for col in WIDE_COLS:
+        buf.write(wide_arrays[col].tobytes())
+    for col in NARROW_COLS:
+        buf.write(narrow_arrays[col].tobytes())
+
+    stats = {
+        "rows": n,
+        "names": len(names),
+        "teams": len(teams),
+        "year_range": (min_year, max_year),
+    }
+    return buf.getvalue(), stats
+
+
+DECODER_JS_TEMPLATE = r"""
+// --- BL2D inline decoder (generated by scripts/build_bundle.py) ---
+const BL_DATA_B64 = "__BL_DATA_B64__";
+const BL_WIDE_COLS = ['G','AB','R','H','BB','SO','RBI'];
+const BL_NARROW_COLS = ['2B','3B','HR','SB','CS','IBB','HBP','SH','SF','GIDP'];
+
+async function decodeBL() {
+    const bin = atob(BL_DATA_B64);
+    const compressed = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) compressed[i] = bin.charCodeAt(i);
+    const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream('gzip'));
+    const buf = new Uint8Array(await new Response(stream).arrayBuffer());
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const dec = new TextDecoder();
+    let off = 0;
+    const magic = dec.decode(buf.subarray(off, off + 4)); off += 4;
+    if (magic !== 'BL2D') throw new Error('decodeBL: bad magic ' + magic);
+    const major = buf[off++]; const minor = buf[off++];
+    if (major !== 1) throw new Error('decodeBL: unsupported version ' + major + '.' + minor);
+    const yearBase = dv.getUint16(off, true); off += 2;
+    const N = dv.getUint32(off, true); off += 4;
+
+    const nameCount = dv.getUint32(off, true); off += 4;
+    const names = new Array(nameCount);
+    for (let i = 0; i < nameCount; i++) {
+        const len = buf[off++];
+        names[i] = dec.decode(buf.subarray(off, off + len));
+        off += len;
+    }
+    const teamCount = dv.getUint16(off, true); off += 2;
+    const teams = new Array(teamCount);
+    for (let i = 0; i < teamCount; i++) {
+        const lglen = buf[off++];
+        const lg = dec.decode(buf.subarray(off, off + lglen)); off += lglen;
+        const tmlen = buf[off++];
+        const tm = dec.decode(buf.subarray(off, off + tmlen)); off += tmlen;
+        teams[i] = { lgID: lg, teamID: tm };
+    }
+
+    // Use .slice() because byte offsets aren't guaranteed aligned for Uint16Array.
+    const sliceU16 = () => {
+        const view = new Uint16Array(buf.buffer.slice(buf.byteOffset + off, buf.byteOffset + off + N * 2));
+        off += N * 2;
+        return view;
+    };
+    const sliceU8 = () => {
+        const view = new Uint8Array(buf.buffer, buf.byteOffset + off, N);
+        off += N;
+        return view;
+    };
+
+    const nameIdx = sliceU16();
+    const yearOff = sliceU8();
+    const teamIdx = sliceU8();
+    const wide = {}; for (const c of BL_WIDE_COLS) wide[c] = sliceU16();
+    const narrow = {}; for (const c of BL_NARROW_COLS) narrow[c] = sliceU8();
+
+    const W16 = 0xFFFF, W8 = 0xFF;
+    const points = new Array(N);
+    for (let i = 0; i < N; i++) {
+        const t = teams[teamIdx[i]];
+        const p = {
+            playerID: names[nameIdx[i]],
+            yearID: String(yearBase + yearOff[i]),
+            teamID: t.teamID,
+            lgID: t.lgID,
+        };
+        for (const c of BL_WIDE_COLS) {
+            const v = wide[c][i];
+            p[c] = v === W16 ? '' : String(v);
+        }
+        for (const c of BL_NARROW_COLS) {
+            const v = narrow[c][i];
+            p[c] = v === W8 ? '' : String(v);
+        }
+        points[i] = p;
+    }
+    return points;
+}
+"""
+
+
+def build_bundle():
+    OUT_DIR.mkdir(exist_ok=True)
+
+    binary, stats = build_binary(CSV_PATH)
+    compressed = gzip.compress(binary, compresslevel=9)
+    b64 = base64.b64encode(compressed).decode("ascii")
+
+    html = HTML_PATH.read_text(encoding="utf-8")
+    css = CSS_PATH.read_text(encoding="utf-8")
+    js = JS_PATH.read_text(encoding="utf-8")
+    if not D3_PATH.exists():
+        sys.exit(f"missing {D3_PATH.relative_to(ROOT)} — run: "
+                 f"curl -sL https://d3js.org/d3.v7.min.js -o vendor/d3.v7.min.js")
+    d3_js = D3_PATH.read_text(encoding="utf-8")
+
+    # Swap the single d3.csv() call for our decoder. Keep the rest of script.js intact —
+    # downstream parseInt() works equally well on the string values we emit.
+    js_patched, n_subs = re.subn(
+        r'd3\.csv\("data/batting_limits_1871-2024\.csv"\)',
+        "decodeBL()",
+        js,
+    )
+    if n_subs != 1:
+        sys.exit(f"build_bundle: expected exactly one d3.csv() call to patch, found {n_subs}")
+
+    decoder_js = DECODER_JS_TEMPLATE.replace("__BL_DATA_B64__", b64)
+    combined_js = decoder_js + "\n" + js_patched
+
+    html = html.replace(
+        '<link rel="stylesheet" href="styles.css">',
+        f"<style>\n{css}\n</style>",
+    )
+    html = html.replace(
+        '<script src="https://d3js.org/d3.v7.min.js" defer></script>',
+        f"<script defer>\n{d3_js}\n</script>",
+    )
+    html = html.replace(
+        '<script src="script.js" defer></script>',
+        f"<script defer>\n{combined_js}\n</script>",
+    )
+
+    OUT_PATH.write_text(html, encoding="utf-8")
+
+    csv_size = CSV_PATH.stat().st_size
+    out_size = OUT_PATH.stat().st_size
+    print(f"rows={stats['rows']:,}  names={stats['names']:,}  teams={stats['teams']}  "
+          f"years={stats['year_range'][0]}-{stats['year_range'][1]}")
+    print(f"binary raw:   {len(binary):>10,} bytes")
+    print(f"binary gzip:  {len(compressed):>10,} bytes  ({len(compressed)/csv_size:.1%} of CSV)")
+    print(f"b64 inline:   {len(b64):>10,} bytes")
+    print(f"dist HTML:    {out_size:>10,} bytes -> {OUT_PATH.relative_to(ROOT)}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.parse_args()
+    build_bundle()

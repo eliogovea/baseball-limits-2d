@@ -2,72 +2,97 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#002d72">
     <title>Baseball Limits 2D</title>
     <link rel="stylesheet" href="styles.css">
     <script src="https://d3js.org/d3.v7.min.js" defer></script>
     <script src="script.js" defer></script>
 </head>
 <body>
-    <div class="content">
-        <div class="panel left">
-            <div class="loading-indicator" id="loading-indicator">
-                <div class="spinner"></div>
-                <span>Loading...</span>
-            </div>
-            <svg id="scatter-plot">
-                <!-- D3.js chart will be rendered here -->
-            </svg>
-            <div class="tooltip" id="tooltip"></div>
+    <header class="app-header">
+        <div class="brand">
+            <h1>Baseball Limits <span class="brand-accent">2D</span></h1>
+            <p class="tagline">The Pareto frontier of MLB batting</p>
         </div>
-        
-        <div class="panel right">
-            <div class="section top">
-                <h3>Baseball Limits 2D</h3>
-            </div>
-            <div class="section middle">
-                <div class="form-group">
-                    <label for="x-axis-select">X Axis:</label>
-                    <select id="x-axis-select">
-                        <!-- x-axis options will be rendered here -->
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label for="y-axis-select">Y Axis:</label>
-                    <select id="y-axis-select">
-                        <!-- y-axis options will be rendered here -->
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label for="s-year-select">Start Year:</label>
-                    <select id="s-year-select">
-                        <!-- s-year options will be rendered here -->
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label for="e-year-select">End Year:</label>
-                    <select id="e-year-select">
-                        <!-- e-year options will be rendered here -->
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label for="pa-min-select">Min PA:</label>
-                    <select id="pa-min-select">
-                        <!-- pa-min options will be rendered here -->
-                    </select>
-                </div>
-            </div>
-            <div class="section bottom">
-                <!-- <h3>Instructions ...</h3> -->
-            </div>
-        </div>
-    </div>
+        <nav class="attribution" aria-label="Data sources">
+            <span class="attribution-label">Data</span>
+            <a href="http://seanlahman.com/" target="_blank" rel="noopener">Lahman</a>
+            <span class="attribution-sep">·</span>
+            <a href="https://www.baseball-reference.com/" target="_blank" rel="noopener">Baseball Reference</a>
+        </nav>
+    </header>
 
-    <footer>
-        <p>Data sources: 
-            <strong><a href="http://seanlahman.com/" target="_blank">Lahman Baseball Database</a></strong> (1871 - 2023)
-            | <strong><a href="https://www.baseball-reference.com/" target="_blank">Baseball Reference</a></strong> (2024) 
-        </p>
-    </footer>
+    <main class="app-main">
+        <section class="chart-region" aria-label="Scatter plot">
+            <div class="legend" aria-hidden="true">
+                <span class="legend-item"><span class="legend-dot legend-dot--frontier"></span>Frontier</span>
+                <span class="legend-item"><span class="legend-dot legend-dot--season"></span>Season</span>
+            </div>
+            <div class="loading-indicator" id="loading-indicator" role="status" aria-live="polite">
+                <span class="spinner" aria-hidden="true"></span>
+                <span>Loading…</span>
+            </div>
+            <svg id="scatter-plot" role="img" aria-label="Scatter plot of batting statistics with Pareto frontier highlighted">
+            </svg>
+            <div class="tooltip" id="tooltip" role="tooltip" aria-hidden="true"></div>
+        </section>
+
+        <aside class="controls-region" aria-label="Filters">
+            <button class="controls-toggle" id="controls-toggle" type="button" aria-expanded="false" aria-controls="controls-panel">
+                <span>Filters</span>
+                <svg class="chevron" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+            </button>
+
+            <div class="controls-panel collapsed" id="controls-panel">
+                <fieldset class="control-group">
+                    <legend>Axes</legend>
+                    <div class="field-row">
+                        <label class="field-label">
+                            <span>X-Axis</span>
+                            <select id="x-axis-select" class="field"></select>
+                        </label>
+                        <label class="field-label">
+                            <span>Y-Axis</span>
+                            <select id="y-axis-select" class="field"></select>
+                        </label>
+                    </div>
+                </fieldset>
+
+                <fieldset class="control-group">
+                    <legend>Year Range</legend>
+                    <div class="field-row">
+                        <label class="field-label">
+                            <span>From</span>
+                            <input type="number" id="s-year-select" class="field" inputmode="numeric">
+                        </label>
+                        <label class="field-label">
+                            <span>To</span>
+                            <input type="number" id="e-year-select" class="field" inputmode="numeric">
+                        </label>
+                    </div>
+                </fieldset>
+
+                <fieldset class="control-group">
+                    <legend>
+                        <span>Min Plate Appearances</span>
+                        <output id="pa-min-value" for="pa-min-select" class="legend-value">0</output>
+                    </legend>
+                    <input type="range" id="pa-min-select" class="slider" min="0" max="600" step="1" value="0">
+                    <div class="preset-row" role="group" aria-label="Plate appearance presets">
+                        <button type="button" class="preset" data-pa="0">All</button>
+                        <button type="button" class="preset" data-pa="100">100</button>
+                        <button type="button" class="preset" data-pa="300">300</button>
+                        <button type="button" class="preset" data-pa="502">502</button>
+                    </div>
+                    <p class="control-hint">502 PA qualifies for the batting title.</p>
+                </fieldset>
+
+                <div class="result-summary" id="result-summary" aria-live="polite"></div>
+            </div>
+        </aside>
+    </main>
 </body>
 </html>
