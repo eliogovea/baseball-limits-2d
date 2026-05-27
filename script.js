@@ -1,3 +1,18 @@
+const ERAS = [
+    { start: 1871, end: 1899, name: "Pre-modern",   color: "#a89a7e" },
+    { start: 1900, end: 1919, name: "Dead Ball",    color: "#8a7456" },
+    { start: 1920, end: 1941, name: "Live Ball",    color: "#4a6fa5" },
+    { start: 1942, end: 1968, name: "Integration",  color: "#2f5b8a" },
+    { start: 1969, end: 1992, name: "Free Agency",  color: "#1f4570" },
+    { start: 1993, end: 2005, name: "Steroid",      color: "#7a3f5f" },
+    { start: 2006, end: 2099, name: "Modern",       color: "#005a8a" },
+];
+function eraFor(year) {
+    for (const e of ERAS) if (year >= e.start && year <= e.end) return e;
+    return null;
+}
+
+
 d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
     const parsedPoints = [];
     points.forEach((point) => {
@@ -202,7 +217,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat) {
     }
     const frontierSet = new Set(frontier);
 
-    updateResultSummary(filtered.length, unique.length, frontier.length);
+    renderFrontierCards(frontier, xDim, yDim, formatStat, filtered.length);
 
     if (unique.length === 0) {
         svg.append("text")
@@ -350,8 +365,32 @@ function escapeHtml(s) {
     })[c]);
 }
 
-function updateResultSummary(filteredCount, uniqueCount, frontierCount) {
-    const el = document.getElementById("result-summary");
-    if (!el) return;
-    el.innerHTML = `<strong>${filteredCount.toLocaleString()}</strong> seasons · <strong>${frontierCount}</strong> on the frontier`;
+function renderFrontierCards(frontier, xDim, yDim, formatStat, totalSeasons) {
+    const countEl = document.getElementById("frontier-count");
+    const cardsEl = document.getElementById("frontier-cards");
+    if (!countEl || !cardsEl) return;
+
+    countEl.textContent = `${frontier.length} of ${totalSeasons.toLocaleString()} seasons`;
+
+    if (frontier.length === 0) {
+        cardsEl.innerHTML = `<div class="frontier-empty">No seasons match the current filters.</div>`;
+        return;
+    }
+
+    // Order so the highest-X (rightmost extreme) appears first — that's
+    // usually the more famous record for "X-leaning" axes like HR.
+    const ordered = [...frontier].sort((a, b) => b.x - a.x);
+
+    cardsEl.innerHTML = ordered.map(p => {
+        const era = eraFor(p.year);
+        return `
+            <article class="frontier-card">
+                <div class="frontier-card-name">${escapeHtml(p.playerID)}</div>
+                <div class="frontier-card-year">${p.year}</div>
+                <div class="frontier-card-team">${escapeHtml(p.teamID)} · ${escapeHtml(p.lgID)}</div>
+                <div class="frontier-card-stats">${xDim} ${formatStat(xDim, p.x)} · ${yDim} ${formatStat(yDim, p.y)}</div>
+                <div class="frontier-card-era">${era ? era.name : "—"}</div>
+            </article>
+        `;
+    }).join("");
 }

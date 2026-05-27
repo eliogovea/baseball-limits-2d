@@ -491,19 +491,106 @@ input[type="number"].field::-webkit-outer-spin-button {
     color: var(--text-muted);
 }
 
-.result-summary {
-    padding: 10px 12px;
-    background: var(--bg);
-    border-radius: var(--radius-sm);
+.frontier-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
+}
+.frontier-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 0 2px;
+}
+.frontier-header h2 {
+    margin: 0;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+}
+.frontier-count {
     font-size: 12px;
+    font-weight: 600;
+    color: var(--mlb-blue);
+    font-variant-numeric: tabular-nums;
+}
+.frontier-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    overflow-y: auto;
+    /* small bottom shadow as a scroll affordance */
+    padding-bottom: 2px;
+}
+.frontier-card {
+    padding: 8px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--mlb-red);
+    border-radius: var(--radius-sm);
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-rows: auto auto auto;
+    column-gap: 8px;
+    row-gap: 2px;
+    align-items: baseline;
+}
+.frontier-card-name {
+    font-weight: 600;
+    color: var(--text);
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.frontier-card-year {
+    grid-column: 2;
+    grid-row: 1;
+    font-size: 12px;
+    font-weight: 600;
     color: var(--text-muted);
     font-variant-numeric: tabular-nums;
-    text-align: center;
-    border: 1px solid var(--border);
 }
-.result-summary strong {
+.frontier-card-team {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.frontier-card-stats {
+    grid-column: 1;
+    grid-row: 3;
+    font-size: 12px;
+    font-weight: 500;
     color: var(--text);
-    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+.frontier-card-era {
+    grid-column: 2;
+    grid-row: 3;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    white-space: nowrap;
+}
+.frontier-empty {
+    padding: 12px;
+    font-size: 12px;
+    color: var(--text-muted);
+    text-align: center;
+    background: var(--bg);
+    border-radius: var(--radius-sm);
+    border: 1px dashed var(--border);
 }
 
 /* -------- Responsive: tablet and up -------- */
