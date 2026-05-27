@@ -43,8 +43,30 @@ OUT_DIR = ROOT / "dist"
 OUT_PATH = OUT_DIR / "index.html"
 
 YEAR_BASE = 1871
-WIDE_COLS = ["G", "AB", "R", "H", "BB", "SO", "RBI"]
-NARROW_COLS = ["2B", "3B", "HR", "SB", "CS", "IBB", "HBP", "SH", "SF", "GIDP"]
+
+# Each dataset declares its stat columns as (name, width_bytes) pairs.
+# width=1 -> u8 (0..254, 0xFF=blank), width=2 -> u16 (0..65534, 0xFFFF=blank).
+# Pick the narrowest width that fits the max known value to keep the bundle
+# small; widening later is a binary-format-compatible change.
+BATTING_COLUMN_SPEC = [
+    ("G",    2), ("AB",  2), ("R",   2), ("H",   2),
+    ("BB",   2), ("SO",  2), ("RBI", 2),
+    ("2B",   1), ("3B",  1), ("HR",  1), ("SB",  1), ("CS",  1),
+    ("IBB",  1), ("HBP", 1), ("SH",  1), ("SF",  1), ("GIDP", 1),
+]
+PITCHING_COLUMN_SPEC = [
+    # u16: counting stats whose max exceeds 254.
+    ("G",      2), ("IPouts", 2), ("H",   2), ("ER",  2),
+    ("BB",     2), ("SO",     2), ("BFP", 2), ("R",   2),
+    # u8: everything else fits.
+    ("W",   1), ("L",  1), ("GS",  1), ("CG", 1), ("SHO", 1), ("SV",  1),
+    ("HR",  1), ("IBB", 1), ("WP", 1), ("HBP", 1), ("BK", 1), ("GF",  1),
+    ("SH",  1), ("SF",  1), ("GIDP", 1),
+]
+
+ALL_STATS_BATTING = [c for c, _ in BATTING_COLUMN_SPEC]
+ALL_STATS_PITCHING = [c for c, _ in PITCHING_COLUMN_SPEC]
+
 W16_BLANK = 0xFFFF
 W8_BLANK = 0xFF
 
@@ -59,9 +81,6 @@ def parse_int(s, blank_sentinel):
     if not s or not s.lstrip("-").isdigit():
         return blank_sentinel
     return int(s)
-
-
-ALL_STATS = WIDE_COLS + NARROW_COLS
 
 
 _SUMMARY_TEAM_RE = re.compile(r"^\d+TM$")
@@ -157,7 +176,7 @@ def build_people_section(name_to_idx, people_by_name):
     return buf.getvalue(), stats
 
 
-def aggregate_stints(rows):
+def aggregate_stints(rows, stat_cols):
     """Collapse traded-mid-season rows into one row per (playerID, yearID).
 
     Each stat is summed across stints; if every stint left it blank, the result
@@ -195,7 +214,7 @@ def aggregate_stints(rows):
             "teamID": primary["teamID"],
             "lgID": primary["lgID"],
         }
-        for col in ALL_STATS:
+        for col in stat_cols:
             total = 0
             any_present = False
             for s in stints:
@@ -208,10 +227,11 @@ def aggregate_stints(rows):
     return out
 
 
-def build_binary(csv_path: Path) -> tuple[bytes, dict]:
+def build_binary(csv_path: Path, column_spec: list[tuple[str, int]]) -> tuple[bytes, dict]:
+    stat_cols = [c for c, _ in column_spec]
     with csv_path.open(encoding="utf-8") as f:
         raw_rows = list(csv.DictReader(f))
-    rows = aggregate_stints(raw_rows)
+    rows = aggregate_stints(raw_rows, stat_cols)
     n = len(rows)
 
     names = sorted({r["playerID"] for r in rows})
@@ -236,11 +256,25 @@ def build_binary(csv_path: Path) -> tuple[bytes, dict]:
         sys.exit(f"min year {min_year} < YEAR_BASE {YEAR_BASE}")
     if max_year - YEAR_BASE > 0xFF:
         sys.exit(f"year span > 255 ({min_year}..{max_year}); widen year_off to u16")
+    if len(column_spec) > 0xFF:
+        sys.exit(f"column count {len(column_spec)} exceeds u8")
 
     buf = io.BytesIO()
     buf.write(b"BL2D")
-    buf.write(struct.pack("<BB", 3, 0))
+    buf.write(struct.pack("<BB", 4, 0))
     buf.write(struct.pack("<HI", YEAR_BASE, n))
+
+    # v4: column metadata (so the decoder doesn't need to hardcode the
+    # column list and we can ship batting + pitching with the same decoder).
+    buf.write(struct.pack("<B", len(column_spec)))
+    for name, width in column_spec:
+        nb = name.encode("utf-8")
+        if width not in (1, 2):
+            sys.exit(f"unsupported width {width} for column {name!r}")
+        if len(nb) > 255:
+            sys.exit(f"column name >255 bytes: {name!r}")
+        buf.write(struct.pack("<BB", width, len(nb)))
+        buf.write(nb)
 
     buf.write(struct.pack("<I", len(names)))
     for name in names:
@@ -263,37 +297,29 @@ def build_binary(csv_path: Path) -> tuple[bytes, dict]:
 
     name_arr = array.array("H", (name_to_idx[r["playerID"]] for r in rows))
     year_arr = array.array("B", (int(r["yearID"]) - YEAR_BASE for r in rows))
-    # team_idx widened to u16 in v3 — Negro Leagues addition pushed team count
-    # past 256.
     team_arr = array.array("H", (team_to_idx[(r["lgID"], r["teamID"])] for r in rows))
-
-    wide_arrays = {}
-    for col in WIDE_COLS:
-        a = array.array("H", [0] * n)
-        for i, r in enumerate(rows):
-            v = parse_int(r[col], W16_BLANK)
-            if v != W16_BLANK and (v < 0 or v > 0xFFFE):
-                sys.exit(f"{col}[row {i}] value {v} out of u16 range")
-            a[i] = v
-        wide_arrays[col] = a
-
-    narrow_arrays = {}
-    for col in NARROW_COLS:
-        a = array.array("B", [0] * n)
-        for i, r in enumerate(rows):
-            v = parse_int(r[col], W8_BLANK)
-            if v != W8_BLANK and (v < 0 or v > 0xFE):
-                sys.exit(f"{col}[row {i}] value {v} out of u8 range")
-            a[i] = v
-        narrow_arrays[col] = a
 
     buf.write(name_arr.tobytes())
     buf.write(year_arr.tobytes())
     buf.write(team_arr.tobytes())
-    for col in WIDE_COLS:
-        buf.write(wide_arrays[col].tobytes())
-    for col in NARROW_COLS:
-        buf.write(narrow_arrays[col].tobytes())
+
+    # Per-column payloads, written in metadata order.
+    for col, width in column_spec:
+        if width == 2:
+            a = array.array("H", [0] * n)
+            for i, r in enumerate(rows):
+                v = parse_int(r[col], W16_BLANK)
+                if v != W16_BLANK and (v < 0 or v > 0xFFFE):
+                    sys.exit(f"{col}[row {i}] value {v} out of u16 range")
+                a[i] = v
+        else:
+            a = array.array("B", [0] * n)
+            for i, r in enumerate(rows):
+                v = parse_int(r[col], W8_BLANK)
+                if v != W8_BLANK and (v < 0 or v > 0xFE):
+                    sys.exit(f"{col}[row {i}] value {v} out of u8 range")
+                a[i] = v
+        buf.write(a.tobytes())
 
     stats = {
         "raw_rows": len(raw_rows),
@@ -301,6 +327,7 @@ def build_binary(csv_path: Path) -> tuple[bytes, dict]:
         "names": len(names),
         "teams": len(teams),
         "year_range": (min_year, max_year),
+        "columns": len(column_spec),
         **people_stats,
     }
     return buf.getvalue(), stats
@@ -309,8 +336,6 @@ def build_binary(csv_path: Path) -> tuple[bytes, dict]:
 DECODER_JS_TEMPLATE = r"""
 // --- BL2D inline decoder (generated by scripts/build_bundle.py) ---
 const BL_DATA_B64 = "__BL_DATA_B64__";
-const BL_WIDE_COLS = ['G','AB','R','H','BB','SO','RBI'];
-const BL_NARROW_COLS = ['2B','3B','HR','SB','CS','IBB','HBP','SH','SF','GIDP'];
 
 async function decodeBL() {
     const bin = atob(BL_DATA_B64);
@@ -324,9 +349,19 @@ async function decodeBL() {
     const magic = dec.decode(buf.subarray(off, off + 4)); off += 4;
     if (magic !== 'BL2D') throw new Error('decodeBL: bad magic ' + magic);
     const major = buf[off++]; const minor = buf[off++];
-    if (major !== 3) throw new Error('decodeBL: unsupported version ' + major + '.' + minor);
+    if (major !== 4) throw new Error('decodeBL: unsupported version ' + major + '.' + minor);
     const yearBase = dv.getUint16(off, true); off += 2;
     const N = dv.getUint32(off, true); off += 4;
+
+    // v4 column metadata: list of {name, width} the columnar payload uses.
+    const colCount = buf[off++];
+    const columnSpec = new Array(colCount);
+    for (let i = 0; i < colCount; i++) {
+        const width = buf[off++];
+        const nl = buf[off++];
+        const name = dec.decode(buf.subarray(off, off + nl)); off += nl;
+        columnSpec[i] = { name, width };
+    }
 
     const nameCount = dv.getUint32(off, true); off += 4;
     const names = new Array(nameCount);
@@ -345,7 +380,7 @@ async function decodeBL() {
         teams[i] = { lgID: lg, teamID: tm };
     }
 
-    // People section (v2): country dict, then fixed-width per-player records.
+    // People section (unchanged from v2): country dict + fixed records.
     const countryCount = buf[off++];
     const countries = new Array(countryCount);
     for (let i = 0; i < countryCount; i++) {
@@ -392,8 +427,10 @@ async function decodeBL() {
     const nameIdx = sliceU16();
     const yearOff = sliceU8();
     const teamIdx = sliceU16();
-    const wide = {}; for (const c of BL_WIDE_COLS) wide[c] = sliceU16();
-    const narrow = {}; for (const c of BL_NARROW_COLS) narrow[c] = sliceU8();
+    const cols = {};
+    for (const { name, width } of columnSpec) {
+        cols[name] = width === 2 ? sliceU16() : sliceU8();
+    }
 
     const W16 = 0xFFFF, W8 = 0xFF;
     const points = new Array(N);
@@ -405,13 +442,10 @@ async function decodeBL() {
             teamID: t.teamID,
             lgID: t.lgID,
         };
-        for (const c of BL_WIDE_COLS) {
-            const v = wide[c][i];
-            p[c] = v === W16 ? '' : String(v);
-        }
-        for (const c of BL_NARROW_COLS) {
-            const v = narrow[c][i];
-            p[c] = v === W8 ? '' : String(v);
+        for (const { name, width } of columnSpec) {
+            const v = cols[name][i];
+            const blank = width === 2 ? W16 : W8;
+            p[name] = v === blank ? '' : String(v);
         }
         points[i] = p;
     }
@@ -427,7 +461,7 @@ async function decodeBL() {
 def build_bundle():
     OUT_DIR.mkdir(exist_ok=True)
 
-    binary, stats = build_binary(CSV_PATH)
+    binary, stats = build_binary(CSV_PATH, BATTING_COLUMN_SPEC)
     compressed = gzip.compress(binary, compresslevel=9)
     b64 = base64.b64encode(compressed).decode("ascii")
 
