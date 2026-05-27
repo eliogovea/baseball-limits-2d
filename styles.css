@@ -181,6 +181,18 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     letter-spacing: 0.02em;
 }
 
+.frontier-label {
+    font-family: var(--font-sans);
+    font-size: 11px;
+    font-weight: 600;
+    fill: var(--mlb-blue);
+    /* White halo so labels stay readable when they overlap dots in the cloud. */
+    stroke: #ffffff;
+    stroke-width: 3px;
+    paint-order: stroke;
+    pointer-events: none;
+}
+
 /* Chart overlays */
 
 .legend {

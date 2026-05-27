@@ -302,6 +302,20 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat) {
         .attr("cy", d => yScale(d.y))
         .attr("r", frontierRadius);
 
+    // On-chart frontier labels: greedy collision avoidance, mobile shows
+    // only the two extreme endpoints so small viewports stay readable.
+    const labels = layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, frontierRadius, width < 480);
+    g.append("g")
+        .attr("class", "frontier-labels")
+        .selectAll("text")
+        .data(labels).enter()
+        .append("text")
+        .attr("class", "frontier-label")
+        .attr("x", d => d.x)
+        .attr("y", d => d.y)
+        .attr("text-anchor", d => d.anchor)
+        .text(d => d.text);
+
     // Tooltip targets: invisible larger circles to ease hover/tap on every point.
     const tooltip = document.getElementById("tooltip");
     const showTooltip = (event, d) => {
@@ -364,6 +378,86 @@ function escapeHtml(s) {
         "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
     })[c]);
 }
+
+function lastNameOf(playerID) {
+    const m = String(playerID).match(/[^\s]+$/);
+    return m ? m[0] : String(playerID);
+}
+
+function layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, pointR, isSmall) {
+    if (!frontier.length) return [];
+
+    // On narrow phones, only label the two extreme endpoints to avoid clutter.
+    let candidates;
+    if (isSmall && frontier.length > 2) {
+        candidates = [frontier[0], frontier[frontier.length - 1]];
+    } else {
+        candidates = frontier;
+    }
+
+    const CHAR_W = 6.2;
+    const H = 12;
+    const GAP = 5;
+
+    const pointBoxes = frontier.map(p => ({
+        x: xScale(p.x) - pointR,
+        y: yScale(p.y) - pointR,
+        w: pointR * 2,
+        h: pointR * 2,
+    }));
+    const placed = [];
+    const overlap = (a, b) =>
+        !(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y);
+
+    const out = [];
+    for (const p of candidates) {
+        const text = `${lastNameOf(p.playerID)} ${p.year}`;
+        const w = text.length * CHAR_W;
+        const cx = xScale(p.x);
+        const cy = yScale(p.y);
+
+        // Try cardinal positions first, then diagonal corners as fallbacks
+        // for points near the plot edges (e.g. the topmost frontier point).
+        const positions = [
+            // right
+            { x: cx + pointR + GAP, y: cy + H / 3, anchor: "start",
+              bx: cx + pointR + GAP, by: cy - H / 2 },
+            // left
+            { x: cx - pointR - GAP, y: cy + H / 3, anchor: "end",
+              bx: cx - pointR - GAP - w, by: cy - H / 2 },
+            // above
+            { x: cx, y: cy - pointR - GAP, anchor: "middle",
+              bx: cx - w / 2, by: cy - pointR - GAP - H },
+            // below
+            { x: cx, y: cy + pointR + GAP + H, anchor: "middle",
+              bx: cx - w / 2, by: cy + pointR + GAP },
+            // below-right
+            { x: cx + pointR + GAP, y: cy + pointR + GAP + H, anchor: "start",
+              bx: cx + pointR + GAP, by: cy + pointR + GAP },
+            // below-left
+            { x: cx - pointR - GAP, y: cy + pointR + GAP + H, anchor: "end",
+              bx: cx - pointR - GAP - w, by: cy + pointR + GAP },
+            // above-right
+            { x: cx + pointR + GAP, y: cy - pointR - GAP, anchor: "start",
+              bx: cx + pointR + GAP, by: cy - pointR - GAP - H },
+            // above-left
+            { x: cx - pointR - GAP, y: cy - pointR - GAP, anchor: "end",
+              bx: cx - pointR - GAP - w, by: cy - pointR - GAP - H },
+        ];
+
+        for (const pos of positions) {
+            const bbox = { x: pos.bx, y: pos.by, w, h: H };
+            if (bbox.x < 0 || bbox.y < 0 || bbox.x + bbox.w > plotW || bbox.y + bbox.h > plotH) continue;
+            if (placed.some(b => overlap(b, bbox))) continue;
+            if (pointBoxes.some(b => overlap(b, bbox))) continue;
+            placed.push(bbox);
+            out.push({ text, x: pos.x, y: pos.y, anchor: pos.anchor });
+            break;
+        }
+    }
+    return out;
+}
+
 
 function renderFrontierCards(frontier, xDim, yDim, formatStat, totalSeasons) {
     const countEl = document.getElementById("frontier-count");
