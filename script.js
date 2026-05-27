@@ -73,8 +73,13 @@ const DATASETS = {
         thresholdLabel: "Min Plate Appearances",
         rateStats: new Set(["AVG", "OBP", "SLG"]),
         thresholdConfig: {
+            // `default` is the threshold the slider lands on for a fresh view
+            // (no PA in the URL). Set to the qualifier minimum in Season mode
+            // so cup-of-coffee 1.000 AVG outliers don't pollute the default
+            // frontier on rate-stat axes; left at 0 in Career mode where the
+            // qualifier number doesn't apply.
             season: {
-                max: 600, step: 1,
+                max: 600, step: 1, default: 502,
                 presets: [
                     { val: 0,   label: "All" },
                     { val: 100, label: "100" },
@@ -84,7 +89,7 @@ const DATASETS = {
                 hint: "502 PA qualifies for the batting title.",
             },
             career: {
-                max: 16000, step: 100,
+                max: 16000, step: 100, default: 0,
                 presets: [
                     { val: 0,     label: "All" },
                     { val: 1000,  label: "1k" },
@@ -105,7 +110,7 @@ const DATASETS = {
         rateStats: new Set(["ERA", "WHIP", "K/9", "BB/9", "K/BB", "H/9"]),
         thresholdConfig: {
             season: {
-                max: 400, step: 1,
+                max: 400, step: 1, default: 162,
                 presets: [
                     { val: 0,   label: "All" },
                     { val: 50,  label: "50" },
@@ -115,7 +120,7 @@ const DATASETS = {
                 hint: "162 IP qualifies for the ERA title.",
             },
             career: {
-                max: 6000, step: 10,
+                max: 6000, step: 10, default: 0,
                 presets: [
                     { val: 0,    label: "All" },
                     { val: 500,  label: "500" },
@@ -142,6 +147,14 @@ const peoplePromise = d3.csv("data/people_lahman_1871-2025.csv").catch(() => nul
 const BATTING_COUNT_COLS = ["G","AB","R","H","2B","3B","HR","RBI","SB","CS","BB","SO","IBB","HBP","SH","SF","GIDP"];
 const PITCHING_COUNT_COLS = ["W","L","G","GS","CG","SHO","SV","IPouts","H","ER","HR","BB","SO","IBB","WP","HBP","BK","BFP","GF","R","SH","SF","GIDP"];
 
+// `|| 0` coerces NaN (from a blank CSV cell) to 0 so the sum stays a
+// number. HBP / SH / SF aren't tracked for early eras; treating those
+// blanks as zero gives an approximate-but-numeric PA. Critical for the
+// threshold filter — NaN < 502 is false in JS, so a NaN PA would bypass
+// the filter entirely and let cup-of-coffee 1.000 averages onto the
+// frontier.
+const z = (v) => (isFinite(v) ? v : 0);
+
 function parseBattingRows(rawPoints) {
     const out = [];
     for (const r of rawPoints) {
@@ -152,8 +165,8 @@ function parseBattingRows(rawPoints) {
             lgID: r.lgID,
         };
         for (const c of BATTING_COUNT_COLS) p[c] = parseInt(r[c]);
-        p.PA = p.AB + p.BB + p.HBP + p.SH + p.SF;
-        p.TB = p.H + p["2B"] + 2 * p["3B"] + 3 * p.HR;
+        p.PA = z(p.AB) + z(p.BB) + z(p.HBP) + z(p.SH) + z(p.SF);
+        p.TB = z(p.H) + z(p["2B"]) + 2 * z(p["3B"]) + 3 * z(p.HR);
         p.AVG = p.AB > 0 ? p.H / p.AB : NaN;
         const obpDen = p.AB + p.BB + p.HBP + p.SF;
         p.OBP = obpDen > 0 ? (p.H + p.BB + p.HBP) / obpDen : NaN;
@@ -175,7 +188,10 @@ function parsePitchingRows(rawPoints) {
         for (const c of PITCHING_COUNT_COLS) p[c] = parseInt(r[c]);
         // Lahman stores IPouts (innings * 3). IP as a decimal is simpler for
         // charting than the .1/.2 "outs-as-fractions" baseball convention.
-        p.IP    = isNaN(p.IPouts) ? NaN : p.IPouts / 3;
+        // Coerce blank IPouts to 0 so the IP threshold filter never bypasses
+        // (parallel reason to PA above).
+        p.IPouts = z(p.IPouts);
+        p.IP     = p.IPouts / 3;
         p.ERA   = p.IPouts > 0 ? (9 * p.ER) / (p.IPouts / 3) : NaN;
         p.WHIP  = p.IPouts > 0 ? (p.BB + p.H) / (p.IPouts / 3) : NaN;
         p["K/9"]  = p.IPouts > 0 ? (9 * p.SO) / (p.IPouts / 3) : NaN;
@@ -248,11 +264,13 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     });
     setupModeToggle("stats-toggle", () => {
         // Switching datasets resets axes, threshold config, dimension selectors,
-        // and clears the career highlight (different players).
+        // the slider (units changed — PA vs IP), and clears the career highlight
+        // (different players).
         activeDatasetKey = getActiveModeBtnData("stats-toggle", "stats") || "batting";
         playerIndex = datasetState[activeDatasetKey].playerIndex;
         careerHighlight = null;
         populateSelectorsForActive();
+        resetThresholdToDefault();
         applyModeConfig(getCurrentMode());
         refreshChart();
     });
@@ -300,7 +318,9 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
 
     // Restore state from URL hash (if present) before first render so the
     // shareable-URL flow lands on the exact view the link encoded.
+    const urlHadPa = "pa" in parseUrlHash();
     applyUrlState();
+    if (!urlHadPa) resetThresholdToDefault();
     refreshChart();
 
     // Lets nested call sites (like the chart's click handler) trigger a
@@ -565,6 +585,12 @@ function setupModeToggle(containerId, onChange) {
 function getActiveModeBtnData(containerId, attr) {
     const active = document.querySelector(`#${containerId} .mode-btn.active`);
     return active ? active.dataset[attr] : null;
+}
+
+function resetThresholdToDefault() {
+    const cfg = activeDataset().thresholdConfig[getCurrentMode()];
+    if (!cfg) return;
+    document.getElementById("pa-min-select").value = cfg.default ?? 0;
 }
 
 function applyModeConfig(mode) {
