@@ -93,6 +93,11 @@ const PA_MODE_CONFIG = {
 // short-circuits this fetch to a Promise.resolve(null)).
 const peoplePromise = d3.csv("data/people_lahman_1871-2025.csv").catch(() => null);
 
+// Pitching is loaded in parallel too. F4 wires it into the UI; for now it's
+// only fetched + cached. In the bundle, the same call gets swapped for
+// decodePitching() by the bundler.
+const pitchingPromise = d3.csv("data/pitching_limits_1871-2025.csv").catch(() => null);
+
 d3.csv("data/batting_limits_1871-2025.csv").then(async (points) => {
     if (typeof points.metaFor === "function") {
         metaFor = points.metaFor;
