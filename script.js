@@ -49,6 +49,18 @@ let playerIndex = null;       // Map<playerID, Point[]>  (all seasons per player
 let careerHighlight = null;   // playerID being highlighted, or null
 let metaFor = () => null;     // populated after decode: (playerID) -> {bats, throws, country, ...} | null
 
+// Pin state for the tooltip (UX only; not serialized to URL — the career
+// highlight, which IS in the URL, plays the role of "sharable focus").
+let tooltipPinned = false;
+
+// URL state defaults — params at their default value are omitted from the
+// hash to keep it short.
+const URL_DEFAULTS = {
+    x: "HR", y: "SB", sy: "1920", ey: "2024", pa: "0",
+    m: "season", lg: "all", bt: "all", co: "all",
+    cb: "era", sb: "none", hl: "",
+};
+
 // PA slider config differs by mode: per-season values cluster under ~700, but
 // career totals span 0 to ~16,000. Adjusting max + step + presets keeps the
 // slider usable in both modes.
@@ -187,10 +199,18 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
             drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode,
                 { league, bats, country, colorBy, sizeBy });
             loadingIndicator.classList.remove("active");
+            writeUrlState({ xDim, yDim, sYear, eYear, minPa, mode, league, bats, country, colorBy, sizeBy });
         });
     }
 
+    // Restore state from URL hash (if present) before first render so the
+    // shareable-URL flow lands on the exact view the link encoded.
+    applyUrlState();
     refreshChart();
+
+    // Lets nested call sites (like the chart's click handler) trigger a
+    // refresh without holding a reference to the closure.
+    document.addEventListener("bl2d:refresh", refreshChart);
 
     const filterChanged = () => {
         // Any filter change resets the career-highlight pin so the visible
@@ -203,18 +223,25 @@ d3.csv("data/batting_limits_1871-2024.csv").then((points) => {
     });
     document.getElementById("pa-min-select").addEventListener("input", filterChanged);
 
-    // Career-highlight clearing: click on empty chart area, or Escape.
-    document.querySelector(".chart-region").addEventListener("click", (e) => {
-        if (careerHighlight && !e.target.closest("circle")) {
-            careerHighlight = null;
-            refreshChart();
+    // Click on empty chart area, or Escape, clears both the tooltip pin and
+    // the career highlight in one motion.
+    const clearPinAndHighlight = () => {
+        let dirty = false;
+        if (tooltipPinned) {
+            tooltipPinned = false;
+            document.getElementById("tooltip").setAttribute("data-visible", "false");
         }
+        if (careerHighlight) {
+            careerHighlight = null;
+            dirty = true;
+        }
+        if (dirty) refreshChart();
+    };
+    document.querySelector(".chart-region").addEventListener("click", (e) => {
+        if (!e.target.closest("circle")) clearPinAndHighlight();
     });
     document.addEventListener("keydown", (e) => {
-        if (e.key === "Escape" && careerHighlight) {
-            careerHighlight = null;
-            refreshChart();
-        }
+        if (e.key === "Escape") clearPinAndHighlight();
     });
 
     // Re-render when the chart container changes size (window resize, mobile controls toggle).
@@ -281,6 +308,86 @@ function populateSelectors(points, dimensions) {
     pa.min = 0;
     pa.max = 600;
     pa.value = 0;
+}
+
+function parseUrlHash() {
+    const raw = (window.location.hash || "").replace(/^#/, "");
+    if (!raw) return {};
+    const out = {};
+    for (const seg of raw.split("&")) {
+        const eq = seg.indexOf("=");
+        if (eq < 0) continue;
+        const k = decodeURIComponent(seg.slice(0, eq));
+        const v = decodeURIComponent(seg.slice(eq + 1));
+        out[k] = v;
+    }
+    return out;
+}
+
+function applyUrlState() {
+    const u = parseUrlHash();
+    const setSelect = (id, val) => {
+        if (val == null) return;
+        const sel = document.getElementById(id);
+        if (sel && [...sel.options].some(o => o.value === val)) sel.value = val;
+    };
+    const setSeg = (groupId, dataKey, val) => {
+        if (val == null) return;
+        const btn = document.querySelector(`#${groupId} .seg-btn[data-${dataKey}="${val}"]`);
+        if (!btn) return;
+        document.querySelectorAll(`#${groupId} .seg-btn`).forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+    };
+    setSelect("x-axis-select", u.x);
+    setSelect("y-axis-select", u.y);
+    if (u.sy) document.getElementById("s-year-select").value = u.sy;
+    if (u.ey) document.getElementById("e-year-select").value = u.ey;
+    // Mode applies first so PA slider config is right before we set its value.
+    if (u.m === "career") {
+        document.querySelectorAll(".mode-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === "career"));
+        applyModeConfig("career");
+        document.getElementById("mode-hint").textContent =
+            "Each dot is one player's career totals over the year window.";
+    }
+    if (u.pa) document.getElementById("pa-min-select").value = u.pa;
+    setSeg("league-seg", "league", u.lg);
+    setSeg("bats-seg", "bats", u.bt);
+    setSelect("country-select", u.co);
+    setSelect("color-by-select", u.cb);
+    setSelect("size-by-select", u.sb);
+    if (u.hl) careerHighlight = u.hl;
+}
+
+let urlWriteTimer = null;
+function writeUrlState(state) {
+    clearTimeout(urlWriteTimer);
+    urlWriteTimer = setTimeout(() => {
+        const params = {
+            x: state.xDim,
+            y: state.yDim,
+            sy: String(state.sYear),
+            ey: String(state.eYear),
+            pa: String(state.minPa),
+            m: state.mode,
+            lg: state.league,
+            bt: state.bats,
+            co: state.country,
+            cb: state.colorBy,
+            sb: state.sizeBy,
+            hl: careerHighlight || "",
+        };
+        // Drop defaults to keep the URL short.
+        const parts = [];
+        for (const [k, v] of Object.entries(params)) {
+            if (v === URL_DEFAULTS[k] || v === "") continue;
+            parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
+        }
+        const hash = parts.length ? "#" + parts.join("&") : "";
+        // replaceState avoids polluting browser history with every change.
+        if (hash !== window.location.hash) {
+            history.replaceState(null, "", window.location.pathname + window.location.search + hash);
+        }
+    }, 120);
 }
 
 function getCurrentMode() {
@@ -817,7 +924,10 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         tooltip.setAttribute("data-visible", "true");
         positionTooltip(event, tooltip);
     };
-    const hideTooltip = () => tooltip.setAttribute("data-visible", "false");
+    const hideTooltip = (force = false) => {
+        if (tooltipPinned && !force) return;
+        tooltip.setAttribute("data-visible", "false");
+    };
 
     g.append("g").selectAll("circle.hit")
         .data(unique).enter()
@@ -833,18 +943,24 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         .on("mouseout", hideTooltip)
         .on("touchstart", showTooltip, { passive: true })
         .on("click", (event, d) => {
-            // Click a frontier point → highlight that player's whole career arc.
-            // Disabled in career mode: each dot IS already the career, so an
-            // overlay trail of season-level points doesn't add information.
-            if (mode !== "season") return;
-            if (frontierSet.has(d)) {
+            // Any click on any point pins the tooltip there so the user can
+            // read it without holding the mouse still. Click empty area or
+            // Escape unpins.
+            tooltipPinned = true;
+            showTooltip(event, d);
+            event.stopPropagation();
+            // Click a frontier point (in season mode only) also triggers the
+            // career-arc highlight. Career mode skips this — each dot IS
+            // already the career, so an overlay would be noise.
+            if (mode === "season" && frontierSet.has(d)) {
                 const seasons = filtered
                     .filter(p => p.x === d.x && p.y === d.y)
                     .sort((a, b) => b.year - a.year);
                 const target = seasons[0] || d;
                 careerHighlight = target.playerID;
-                event.stopPropagation();
-                drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode, filters);
+                // Dispatch via the same change-pipeline so the URL hash
+                // (which carries the highlight id) stays in sync.
+                document.dispatchEvent(new CustomEvent("bl2d:refresh"));
             }
         });
 
