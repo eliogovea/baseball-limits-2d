@@ -43,6 +43,56 @@ function colorOf(p, colorBy, getMeta) {
     return "#4a6fa5";
 }
 
+const COUNTRY_FLAGS = {
+    "USA": "🇺🇸", "D.R.": "🇩🇴", "Venezuela": "🇻🇪", "P.R.": "🇵🇷",
+    "Cuba": "🇨🇺", "Mexico": "🇲🇽", "Japan": "🇯🇵", "Panama": "🇵🇦",
+    "Australia": "🇦🇺", "Canada": "🇨🇦", "Colombia": "🇨🇴", "Nicaragua": "🇳🇮",
+    "Curacao": "🇨🇼", "Netherlands": "🇳🇱", "South Korea": "🇰🇷", "Aruba": "🇦🇼",
+    "Brazil": "🇧🇷", "Germany": "🇩🇪", "Spain": "🇪🇸", "Italy": "🇮🇹",
+    "UK": "🇬🇧", "Bahamas": "🇧🇸", "Jamaica": "🇯🇲", "Taiwan": "🇹🇼",
+    "France": "🇫🇷", "Belgium": "🇧🇪", "Sweden": "🇸🇪", "Haiti": "🇭🇹",
+    "Honduras": "🇭🇳", "Belize": "🇧🇿", "South Africa": "🇿🇦", "Ireland": "🇮🇪",
+};
+
+// Current 30 MLB franchises with every historical Lahman teamID that belongs
+// to the same franchise. Used for the franchise filter dropdown.
+const FRANCHISES = [
+    { id: "ari", name: "Arizona Diamondbacks",                         teams: ["ARI"] },
+    { id: "atl", name: "Atlanta Braves",        note: "incl. Boston & Milwaukee",      teams: ["BSN","BS1","BS2","ML1","ATL"] },
+    { id: "bal", name: "Baltimore Orioles",     note: "incl. St. Louis Browns",        teams: ["SLA","SL4","BAL"] },
+    { id: "bos", name: "Boston Red Sox",                               teams: ["BOS"] },
+    { id: "chc", name: "Chicago Cubs",          note: "incl. White Stockings era",     teams: ["CHN","CH1","CH2"] },
+    { id: "cws", name: "Chicago White Sox",                            teams: ["CHA"] },
+    { id: "cin", name: "Cincinnati Reds",                              teams: ["CIN","CN1","CN2","CN3","CNU"] },
+    { id: "cle", name: "Cleveland Guardians",   note: "incl. Indians/Spiders/Blues",   teams: ["CL1","CL2","CL3","CL4","CL5","CL6","CLE"] },
+    { id: "col", name: "Colorado Rockies",                             teams: ["COL"] },
+    { id: "det", name: "Detroit Tigers",                               teams: ["DET"] },
+    { id: "hou", name: "Houston Astros",                               teams: ["HOU"] },
+    { id: "kc",  name: "Kansas City Royals",                           teams: ["KCA"] },
+    { id: "laa", name: "Los Angeles Angels",    note: "incl. California & Anaheim",    teams: ["CAL","ANA","LAA"] },
+    { id: "lad", name: "Los Angeles Dodgers",   note: "incl. Brooklyn",                teams: ["BRO","LAN"] },
+    { id: "mia", name: "Miami Marlins",         note: "incl. Florida Marlins",         teams: ["FLO","MIA"] },
+    { id: "mil", name: "Milwaukee Brewers",                                           teams: ["MIL"] },
+    { id: "min", name: "Minnesota Twins",       note: "incl. Washington Senators",     teams: ["WS1","MIN"] },
+    { id: "nym", name: "New York Mets",                                teams: ["NYN"] },
+    { id: "nyy", name: "New York Yankees",      note: "incl. Highlanders",             teams: ["NYA"] },
+    { id: "oak", name: "Oakland Athletics",     note: "incl. Philadelphia & KC A's",   teams: ["PHA","KC1","KC2","OAK"] },
+    { id: "phi", name: "Philadelphia Phillies",                        teams: ["PHI","PHP"] },
+    { id: "pit", name: "Pittsburgh Pirates",                           teams: ["PIT"] },
+    { id: "sd",  name: "San Diego Padres",                             teams: ["SDN"] },
+    { id: "sea", name: "Seattle Mariners",                             teams: ["SEA"] },
+    { id: "sf",  name: "San Francisco Giants",  note: "incl. New York Giants",         teams: ["NY1","SFN"] },
+    { id: "stl", name: "St. Louis Cardinals",                          teams: ["SLN","SL1","SL5"] },
+    { id: "tb",  name: "Tampa Bay Rays",        note: "orig. Devil Rays",              teams: ["TBA"] },
+    { id: "tex", name: "Texas Rangers",         note: "incl. Washington Senators '61", teams: ["WS2","TEX"] },
+    { id: "tor", name: "Toronto Blue Jays",                            teams: ["TOR"] },
+    { id: "was", name: "Washington Nationals",  note: "incl. Montreal Expos",          teams: ["MON","WAS"] },
+];
+// Fast lookup: teamID → franchise id
+const FRANCHISE_BY_TEAM = new Map(
+    FRANCHISES.flatMap(f => f.teams.map(t => [t, f.id]))
+);
+
 // Career-highlight state. Set when the user clicks a frontier point; cleared
 // on outside click, Escape, or any filter change.
 let playerIndex = null;       // Map<playerID, Point[]>  (all seasons per player)
@@ -66,7 +116,7 @@ let zoomMode = "off";
 const URL_DEFAULTS = {
     x: "HR", y: "SB", sy: "1920", ey: "2024", pa: "0",
     m: "season", lg: "all", bt: "all", co: "all",
-    cb: "era", sb: "none", hl: "",
+    tm: "all", fr: "all", hl: "",
 };
 
 // Per-dataset metadata. The Stats toggle in the UI switches `activeDataset`;
@@ -269,9 +319,11 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
 
     populateSelectorsForActive();
     populateCountrySelect(datasetState.batting.playerIndex);
+    populateFranchiseSelect();
+    populatePlayerDatalist();
     setupControlsToggle();
     setupPaPresets();
-    populateEraLegend();
+    setupYearPresets();
     setupExplainer();
     setupExportButton();
     setupShareButton();
@@ -281,7 +333,8 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         const mode = getCurrentMode();
         applyModeConfig(mode);
         careerHighlight = null;
-        viewDomain = null;        // mode changes the dataset shape too
+        viewDomain = null;
+        syncPlayerHint();
         document.getElementById("mode-hint").textContent =
             mode === "career"
                 ? "Each dot is one player's career totals across the selected year window."
@@ -289,26 +342,53 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         refreshChart();
     });
     setupModeToggle("stats-toggle", () => {
-        // Switching datasets resets axes, threshold config, dimension selectors,
-        // the slider (units changed — PA vs IP), the career highlight (different
-        // players), and any zoom rectangle (units changed too).
         activeDatasetKey = getActiveModeBtnData("stats-toggle", "stats") || "batting";
         playerIndex = datasetState[activeDatasetKey].playerIndex;
         careerHighlight = null;
         viewDomain = null;
+        syncPlayerHint();
         populateSelectorsForActive();
+        populatePlayerDatalist();
         resetThresholdToDefault();
         applyModeConfig(getCurrentMode());
         refreshChart();
     });
-    setupSegGroup("league-seg", () => { careerHighlight = null; refreshChart(); });
-    setupSegGroup("bats-seg",   () => { careerHighlight = null; refreshChart(); });
-    ["country-select", "color-by-select", "size-by-select"].forEach((id) => {
-        document.getElementById(id).addEventListener("change", () => {
+    setupSegGroup("league-seg", () => { careerHighlight = null; syncPlayerHint(); refreshChart(); });
+    setupSegGroup("bats-seg",   () => { careerHighlight = null; syncPlayerHint(); refreshChart(); });
+    ["country-select", "team-select", "franchise-select"].forEach((id) => {
+        document.getElementById(id)?.addEventListener("change", () => {
             careerHighlight = null;
+            syncPlayerHint();
             refreshChart();
         });
     });
+
+    // Franchise selection cascades into team dropdown reset
+    document.getElementById("franchise-select")?.addEventListener("change", () => {
+        const teamSel = document.getElementById("team-select");
+        if (teamSel) teamSel.value = "all";
+    });
+
+    // Player search
+    const playerSearch = document.getElementById("player-search");
+    if (playerSearch) {
+        playerSearch.addEventListener("change", () => {
+            const val = playerSearch.value.trim();
+            if (val && playerIndex?.has(val)) {
+                careerHighlight = val;
+            } else if (!val) {
+                careerHighlight = null;
+            }
+            syncPlayerHint();
+            refreshChart();
+        });
+        document.getElementById("player-hint-clear")?.addEventListener("click", () => {
+            careerHighlight = null;
+            playerSearch.value = "";
+            syncPlayerHint();
+            refreshChart();
+        });
+    }
 
     const loadingIndicator = document.getElementById("loading-indicator");
     let pendingRender = null;
@@ -323,12 +403,15 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         const league = getSegValue("league-seg", "league") || "all";
         const bats = getSegValue("bats-seg", "bats") || "all";
         const country = document.getElementById("country-select").value || "all";
-        const colorBy = document.getElementById("color-by-select").value;
-        const sizeBy = document.getElementById("size-by-select").value;
+        const team = document.getElementById("team-select")?.value || "all";
+        const franchise = document.getElementById("franchise-select")?.value || "all";
         const def = activeDataset();
         const data = activeData();
 
-        updateColorLegend(colorBy);
+        updateColorLegend();
+        updateYearHint(sYear, eYear);
+        populateTeamSelect(data.points, sYear, eYear, league, team);
+        syncPlayerHint();
 
         document.getElementById("pa-min-value").textContent = minThreshold.toLocaleString();
         syncPresetActive(minThreshold);
@@ -337,9 +420,9 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         cancelAnimationFrame(pendingRender);
         pendingRender = requestAnimationFrame(() => {
             drawScatterPlot(data.points, xDim, yDim, sYear, eYear, minThreshold, formatStat, mode,
-                { league, bats, country, colorBy, sizeBy, thresholdField: def.thresholdField, dataset: activeDatasetKey });
+                { league, bats, country, team, franchise, thresholdField: def.thresholdField, dataset: activeDatasetKey });
             loadingIndicator.classList.remove("active");
-            writeUrlState({ xDim, yDim, sYear, eYear, minPa: minThreshold, mode, league, bats, country, colorBy, sizeBy });
+            writeUrlState({ xDim, yDim, sYear, eYear, minPa: minThreshold, mode, league, bats, country, team, franchise });
         });
     }
 
@@ -348,6 +431,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     const urlHadPa = "pa" in parseUrlHash();
     applyUrlState();
     if (!urlHadPa) resetThresholdToDefault();
+    syncPlayerHint();
     refreshChart();
 
     // Lets nested call sites (like the chart's click handler) trigger a
@@ -386,6 +470,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         }
         if (careerHighlight) {
             careerHighlight = null;
+            syncPlayerHint();
             dirty = true;
         }
         if (dirty) refreshChart();
@@ -466,7 +551,10 @@ function populateCountrySelect(playerIdx) {
         .map(([c, n]) => ({ c, n }))
         .sort((a, b) => a.c.localeCompare(b.c));
     sel.innerHTML = `<option value="all">All countries</option>` +
-        list.map(({ c, n }) => `<option value="${escapeHtml(c)}">${escapeHtml(c)} (${n.toLocaleString()})</option>`).join("");
+        list.map(({ c, n }) => {
+            const flag = COUNTRY_FLAGS[c] ? COUNTRY_FLAGS[c] + " " : "";
+            return `<option value="${escapeHtml(c)}">${flag}${escapeHtml(c)} (${n.toLocaleString()})</option>`;
+        }).join("");
     sel.value = "all";
 }
 
@@ -548,9 +636,9 @@ function applyUrlState() {
     setSeg("league-seg", "league", u.lg);
     setSeg("bats-seg", "bats", u.bt);
     setSelect("country-select", u.co);
-    setSelect("color-by-select", u.cb);
-    setSelect("size-by-select", u.sb);
-    if (u.hl) careerHighlight = u.hl;
+    setSelect("franchise-select", u.fr);
+    setSelect("team-select", u.tm);
+    if (u.hl) { careerHighlight = u.hl; }
 }
 
 let urlWriteTimer = null;
@@ -567,8 +655,8 @@ function writeUrlState(state) {
             lg: state.league,
             bt: state.bats,
             co: state.country,
-            cb: state.colorBy,
-            sb: state.sizeBy,
+            tm: state.team,
+            fr: state.franchise,
             hl: careerHighlight || "",
         };
         // Drop defaults to keep the URL short.
@@ -669,7 +757,7 @@ function applyModeConfig(mode) {
     if (parseInt(slider.value) > cfg.max) slider.value = 0;
     document.getElementById("pa-min-value").textContent = parseInt(slider.value).toLocaleString();
 
-    const row = document.querySelector(".preset-row");
+    const row = document.querySelector(".preset-row:not(.year-preset-row)");
     row.innerHTML = cfg.presets
         .map(p => `<button type="button" class="preset" data-pa="${p.val}">${p.label}</button>`)
         .join("");
@@ -1137,32 +1225,88 @@ function setupGlossary() {
 }
 
 
-function populateEraLegend() {
-    updateColorLegend("era");
-}
 
-function updateColorLegend(colorBy) {
+function updateColorLegend() {
     const el = document.getElementById("legend-eras");
     if (!el) return;
-    if (colorBy === "era") {
-        el.innerHTML = ERAS.map(e =>
-            `<span class="legend-era" style="background:${e.color}" title="${e.name} (${e.start}–${e.end === 2099 ? "present" : e.end})"></span>`
-        ).join("");
-    } else if (colorBy === "bats" || colorBy === "league") {
-        const palette = COLOR_PALETTES[colorBy];
-        const keys = colorBy === "bats" ? ["L", "R", "S"] : ["AL", "NL"];
-        el.innerHTML = keys.map(k => {
-            const e = palette[k];
-            return `<span class="legend-era" style="background:${e.color}" title="${escapeHtml(e.name)}"></span>`;
-        }).join("");
+    const palette = COLOR_PALETTES.league;
+    el.innerHTML = ["AL", "NL"].map(k => {
+        const e = palette[k];
+        return `<span class="legend-era" style="background:${e.color}" title="${escapeHtml(e.name)} League"></span>`;
+    }).join("");
+}
+
+function updateYearHint(sYear, eYear) {
+    const hint = document.getElementById("year-hint");
+    if (!hint) return;
+    const era = ERAS.find(e => e.start === sYear && (e.end === eYear || (e.end === 2099 && eYear >= 2006)));
+    if (era) {
+        hint.textContent = `${era.name} era`;
+        hint.hidden = false;
     } else {
-        el.innerHTML = "";
+        hint.hidden = true;
+    }
+}
+
+function populateTeamSelect(points, sYear, eYear, league, currentTeam) {
+    const sel = document.getElementById("team-select");
+    if (!sel) return;
+    const franchise = document.getElementById("franchise-select")?.value || "all";
+    const teamSet = new Set();
+    for (const p of points) {
+        if (p.yearID < sYear || p.yearID > eYear) continue;
+        if (league !== "all" && p.lgID !== league) continue;
+        if (franchise !== "all") {
+            const fid = FRANCHISE_BY_TEAM.get(p.teamID);
+            if (fid !== franchise) continue;
+        }
+        if (p.teamID && p.teamID !== "—") teamSet.add(p.teamID);
+    }
+    const teams = [...teamSet].sort();
+    const prev = sel.value;
+    sel.innerHTML = `<option value="all">All teams</option>` +
+        teams.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join("");
+    // Restore selection if still valid
+    if (teams.includes(prev)) sel.value = prev;
+    else sel.value = "all";
+}
+
+function populateFranchiseSelect() {
+    const sel = document.getElementById("franchise-select");
+    if (!sel) return;
+    sel.innerHTML = `<option value="all">All franchises</option>` +
+        FRANCHISES.map(f => {
+            const note = f.note ? ` (${f.note})` : "";
+            return `<option value="${escapeHtml(f.id)}">${escapeHtml(f.name)}${escapeHtml(note)}</option>`;
+        }).join("");
+}
+
+function populatePlayerDatalist() {
+    const dl = document.getElementById("player-datalist");
+    if (!dl || !playerIndex) return;
+    const names = [...playerIndex.keys()].sort();
+    dl.innerHTML = names.map(n => `<option value="${escapeHtml(n)}">`).join("");
+}
+
+function syncPlayerHint() {
+    const hint    = document.getElementById("player-hint");
+    const nameEl  = document.getElementById("player-hint-name");
+    const search  = document.getElementById("player-search");
+    if (!hint || !nameEl) return;
+    if (careerHighlight) {
+        nameEl.textContent = careerHighlight;
+        hint.hidden = false;
+        // Keep search input in sync if highlight was set by chart click
+        if (search && search.value !== careerHighlight) search.value = careerHighlight;
+    } else {
+        hint.hidden = true;
+        if (search) search.value = "";
     }
 }
 
 function setupPaPresets() {
     const slider = document.getElementById("pa-min-select");
-    document.querySelectorAll(".preset").forEach((btn) => {
+    document.querySelectorAll(".preset[data-pa]").forEach((btn) => {
         btn.addEventListener("click", () => {
             slider.value = btn.dataset.pa;
             slider.dispatchEvent(new Event("input", { bubbles: true }));
@@ -1171,8 +1315,20 @@ function setupPaPresets() {
 }
 
 function syncPresetActive(value) {
-    document.querySelectorAll(".preset").forEach((btn) => {
+    document.querySelectorAll(".preset[data-pa]").forEach((btn) => {
         btn.classList.toggle("active", parseInt(btn.dataset.pa) === value);
+    });
+}
+
+function setupYearPresets() {
+    const sInput = document.getElementById("s-year-select");
+    const eInput = document.getElementById("e-year-select");
+    document.querySelectorAll(".preset[data-sy]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            sInput.value = btn.dataset.sy;
+            eInput.value = btn.dataset.ey;
+            sInput.dispatchEvent(new Event("change", { bubbles: true }));
+        });
     });
 }
 
@@ -1184,7 +1340,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
 
     const league = filters.league || "all";
     const bats = filters.bats || "all";
-    const country = filters.country || "all";
+    const country   = filters.country   || "all";
+    const team      = filters.team      || "all";
+    const franchise = filters.franchise || "all";
 
     // Cache meta lookups per playerID across the filter pass.
     const metaCache = new Map();
@@ -1195,18 +1353,13 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         return m;
     };
 
-    // Row-level predicate, applied before any aggregation. In Career mode
-    // this also gates which seasons contribute to the aggregate — so
-    // "League: AL + Bats: L + Career" yields each player's AL lefty-only
-    // career totals (Bonds' regular-season AL totals would be empty; his NL
-    // career sums alone in NL/L mode).
     const seasonMatches = (p) => {
         if (p.yearID < sYear || p.yearID > eYear) return false;
         if (league !== "all" && p.lgID !== league) return false;
+        if (team !== "all" && p.teamID !== team) return false;
+        if (franchise !== "all" && FRANCHISE_BY_TEAM.get(p.teamID) !== franchise) return false;
         if (bats !== "all" || country !== "all") {
             const m = getMeta(p.playerID);
-            // Strict: rows for players with no Lahman metadata (mostly 2024
-            // BBRef entries with handedness suffixes) are dropped here.
             if (!m) return false;
             if (bats !== "all" && m.bats !== bats) return false;
             if (country !== "all" && m.country !== country) return false;
@@ -1355,33 +1508,14 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const regular = unique.filter(d => !frontierSet.has(d));
     const special = unique.filter(d => frontierSet.has(d));
 
-    const colorBy = filters.colorBy || "era";
-    const sizeBy = filters.sizeBy || "none";
-    // Build a size scale only if needed — radius range chosen to keep frontier
-    // (r=6) visually dominant; size-by tops out near it but never larger.
-    let sizeScale = null;
-    if (sizeBy !== "none") {
-        const vals = regular.map(d => d.orig && !isNaN(d.orig[sizeBy]) ? d.orig[sizeBy] : NaN)
-            .filter(v => !isNaN(v));
-        if (vals.length > 0) {
-            const lo = d3.min(vals);
-            const hi = d3.max(vals);
-            sizeScale = d3.scaleSqrt().domain([lo, hi]).range([2, Math.max(pointRadius + 1, 5)]);
-        }
-    }
-
     g.append("g").selectAll("circle.regular-point")
         .data(regular).enter()
         .append("circle")
         .attr("class", "regular-point")
         .attr("cx", d => xScale(d.x))
         .attr("cy", d => yScale(d.y))
-        .attr("r", d => {
-            if (!sizeScale) return pointRadius;
-            const v = d.orig && d.orig[sizeBy];
-            return isNaN(v) ? 2 : sizeScale(v);
-        })
-        .attr("fill", d => colorOf(d, colorBy, getMeta));
+        .attr("r", pointRadius)
+        .attr("fill", d => colorOf(d, "league", getMeta));
 
     // Career-highlight layer: dots only (no connecting line — the
     // year-order trail tended to add zigzag noise more than it clarified
@@ -1546,8 +1680,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                     .sort((a, b) => b.year - a.year);
                 const target = seasons[0] || d;
                 careerHighlight = target.playerID;
-                // Dispatch via the same change-pipeline so the URL hash
-                // (which carries the highlight id) stays in sync.
+                syncPlayerHint();
                 document.dispatchEvent(new CustomEvent("bl2d:refresh"));
             }
         });

@@ -1049,6 +1049,40 @@ input[type="number"].field::-webkit-outer-spin-button {
     font-size: 11px;
     color: var(--text-muted);
 }
+.control-hint[hidden] { display: none; }
+
+/* Year era presets wrap gracefully at narrow widths */
+.year-preset-row { flex-wrap: wrap; }
+.year-preset-row .preset { flex: 0 1 auto; }
+
+/* Player highlight hint row */
+.player-hint {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+    padding: 5px 8px;
+    background: #fef9e7;
+    border: 1px solid #f59e0b;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    font-weight: 600;
+    color: #92400e;
+}
+.player-hint[hidden] { display: none; }
+#player-hint-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#player-hint-clear {
+    flex: 0 0 auto;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #92400e;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 2px;
+    opacity: 0.7;
+}
+#player-hint-clear:hover { opacity: 1; }
 
 .frontier-section {
     display: flex;

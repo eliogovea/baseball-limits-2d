@@ -179,35 +179,22 @@
                 </fieldset>
 
                 <fieldset class="control-group">
-                    <legend>Display</legend>
-                    <div class="field-row">
-                        <label class="field-label">
-                            <span>Color by</span>
-                            <select id="color-by-select" class="field">
-                                <option value="era" selected>Era</option>
-                                <option value="bats">Handedness</option>
-                                <option value="league">League</option>
-                            </select>
-                        </label>
-                        <label class="field-label">
-                            <span>Size by</span>
-                            <select id="size-by-select" class="field">
-                                <option value="none" selected>Constant</option>
-                                <option value="PA">PA</option>
-                                <option value="G">Games</option>
-                                <option value="AB">At Bats</option>
-                            </select>
-                        </label>
-                    </div>
-                </fieldset>
-
-                <fieldset class="control-group">
                     <legend>Year Range</legend>
                     <div class="year-range">
                         <input type="number" id="s-year-select" class="field" inputmode="numeric" aria-label="Start year">
                         <span class="year-range-sep">–</span>
                         <input type="number" id="e-year-select" class="field" inputmode="numeric" aria-label="End year">
                     </div>
+                    <div class="preset-row year-preset-row" role="group" aria-label="Era presets">
+                        <button type="button" class="preset" data-sy="1871" data-ey="2025">All</button>
+                        <button type="button" class="preset" data-sy="1900" data-ey="1919">Dead Ball</button>
+                        <button type="button" class="preset" data-sy="1920" data-ey="1941">Live Ball</button>
+                        <button type="button" class="preset" data-sy="1942" data-ey="1968">Integration</button>
+                        <button type="button" class="preset" data-sy="1969" data-ey="1992">Free Agency</button>
+                        <button type="button" class="preset" data-sy="1993" data-ey="2005">Steroid</button>
+                        <button type="button" class="preset" data-sy="2006" data-ey="2025">Modern</button>
+                    </div>
+                    <p class="control-hint" id="year-hint" hidden></p>
                 </fieldset>
 
                 <fieldset class="control-group">
@@ -233,6 +220,24 @@
                         <span class="filter-label">Born in</span>
                         <select id="country-select" class="field" aria-label="Country of birth"></select>
                     </div>
+                    <div class="filter-row">
+                        <span class="filter-label">Franchise</span>
+                        <select id="franchise-select" class="field" aria-label="Franchise"></select>
+                    </div>
+                    <div class="filter-row">
+                        <span class="filter-label">Team</span>
+                        <select id="team-select" class="field" aria-label="Team"></select>
+                    </div>
+                    <p class="control-hint">Teams shown for selected year range.</p>
+                    <div class="filter-row">
+                        <span class="filter-label">Player</span>
+                        <input type="text" id="player-search" list="player-datalist" class="field" placeholder="Search…" autocomplete="off" aria-label="Highlight player seasons">
+                        <datalist id="player-datalist"></datalist>
+                    </div>
+                    <p class="control-hint player-hint" id="player-hint" hidden>
+                        <span id="player-hint-name"></span>
+                        <button type="button" id="player-hint-clear" aria-label="Clear player">×</button>
+                    </p>
                 </fieldset>
 
                 <fieldset class="control-group">
