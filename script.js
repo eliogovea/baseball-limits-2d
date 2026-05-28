@@ -96,7 +96,19 @@ const FRANCHISE_BY_TEAM = new Map(
 // Career-highlight state. Set when the user clicks a frontier point; cleared
 // on outside click, Escape, or any filter change.
 let playerIndex = null;       // Map<playerID, Point[]>  (all seasons per player)
-let careerHighlight = null;   // playerID being highlighted, or null
+// Up to 6 players can be highlighted simultaneously, each with a distinct color.
+const HIGHLIGHT_COLORS = ["#f59e0b","#14b8a6","#a855f7","#f97316","#84cc16","#ec4899"];
+let careerHighlights = new Map(); // playerID → color
+
+function addHighlight(playerID) {
+    if (!playerID || careerHighlights.has(playerID)) return;
+    if (careerHighlights.size >= HIGHLIGHT_COLORS.length) return;
+    const used = new Set(careerHighlights.values());
+    const color = HIGHLIGHT_COLORS.find(c => !used.has(c));
+    careerHighlights.set(playerID, color);
+}
+function removeHighlight(playerID) { careerHighlights.delete(playerID); }
+function clearHighlights() { careerHighlights.clear(); }
 let metaFor = () => null;     // populated after decode: (playerID) -> {bats, throws, country, ...} | null
 
 // Pin state for the tooltip (UX only; not serialized to URL — the career
@@ -332,7 +344,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     setupModeToggle("mode-toggle", () => {
         const mode = getCurrentMode();
         applyModeConfig(mode);
-        careerHighlight = null;
+        clearHighlights();
         viewDomain = null;
         syncPlayerHint();
         document.getElementById("mode-hint").textContent =
@@ -344,7 +356,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     setupModeToggle("stats-toggle", () => {
         activeDatasetKey = getActiveModeBtnData("stats-toggle", "stats") || "batting";
         playerIndex = datasetState[activeDatasetKey].playerIndex;
-        careerHighlight = null;
+        clearHighlights();
         viewDomain = null;
         syncPlayerHint();
         populateSelectorsForActive();
@@ -353,11 +365,11 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         applyModeConfig(getCurrentMode());
         refreshChart();
     });
-    setupSegGroup("league-seg", () => { careerHighlight = null; syncPlayerHint(); refreshChart(); });
-    setupSegGroup("bats-seg",   () => { careerHighlight = null; syncPlayerHint(); refreshChart(); });
+    setupSegGroup("league-seg", () => { clearHighlights(); syncPlayerHint(); refreshChart(); });
+    setupSegGroup("bats-seg",   () => { clearHighlights(); syncPlayerHint(); refreshChart(); });
     ["country-select", "team-select", "franchise-select"].forEach((id) => {
         document.getElementById(id)?.addEventListener("change", () => {
-            careerHighlight = null;
+            clearHighlights();
             syncPlayerHint();
             refreshChart();
         });
@@ -379,27 +391,28 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             const frSel = document.getElementById("franchise-select");
             if (frSel) frSel.value = "all";
         }
-        careerHighlight = null;
+        clearHighlights();
         syncPlayerHint();
         refreshChart();
     });
 
-    // Player search
+    // Player search — adds a new highlighted player on each selection
     const playerSearch = document.getElementById("player-search");
     if (playerSearch) {
         playerSearch.addEventListener("change", () => {
             const val = playerSearch.value.trim();
             if (val && playerIndex?.has(val)) {
-                careerHighlight = val;
-            } else if (!val) {
-                careerHighlight = null;
+                addHighlight(val);
             }
+            playerSearch.value = "";
             syncPlayerHint();
             refreshChart();
         });
-        document.getElementById("player-hint-clear")?.addEventListener("click", () => {
-            careerHighlight = null;
-            playerSearch.value = "";
+        // Chip remove buttons — delegated listener on the container
+        document.getElementById("player-hint")?.addEventListener("click", (e) => {
+            const removeBtn = e.target.closest(".player-chip-remove");
+            if (!removeBtn) return;
+            removeHighlight(removeBtn.closest(".player-chip").dataset.player);
             syncPlayerHint();
             refreshChart();
         });
@@ -456,7 +469,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     const filterChanged = () => {
         // Any filter change resets the career-highlight pin so the visible
         // trail doesn't outlive the view it was set in.
-        careerHighlight = null;
+        clearHighlights();
         refreshChart();
     };
     const axisOrViewChanged = () => {
@@ -483,8 +496,8 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             tooltipPinned = false;
             document.getElementById("tooltip").setAttribute("data-visible", "false");
         }
-        if (careerHighlight) {
-            careerHighlight = null;
+        if (careerHighlights.size > 0) {
+            clearHighlights();
             syncPlayerHint();
             dirty = true;
         }
@@ -661,7 +674,7 @@ function applyUrlState() {
     } else {
         setSelect("franchise-select", u.fr);
     }
-    if (u.hl) { careerHighlight = u.hl; }
+    if (u.hl) { u.hl.split(",").forEach(id => addHighlight(id.trim())); }
 }
 
 let urlWriteTimer = null;
@@ -680,7 +693,7 @@ function writeUrlState(state) {
             co: state.country,
             tm: state.team,
             fr: state.franchise,
-            hl: careerHighlight || "",
+            hl: [...careerHighlights.keys()].join(","),
         };
         // Drop defaults to keep the URL short.
         const parts = [];
@@ -1316,14 +1329,24 @@ function syncPlayerHint() {
     const nameEl  = document.getElementById("player-hint-name");
     const search  = document.getElementById("player-search");
     if (!hint || !nameEl) return;
-    if (careerHighlight) {
-        nameEl.textContent = careerHighlight;
+    if (careerHighlights.size > 0) {
+        hint.innerHTML = [...careerHighlights.entries()].map(([pid, color]) =>
+            `<span class="player-chip" data-player="${escapeHtml(pid)}" style="--chip-color:${color}">` +
+            `<span class="player-chip-dot"></span>` +
+            `<span class="player-chip-name">${escapeHtml(pid)}</span>` +
+            `<button type="button" class="player-chip-remove" aria-label="Remove ${escapeHtml(pid)}">×</button>` +
+            `</span>`
+        ).join("");
         hint.hidden = false;
-        // Keep search input in sync if highlight was set by chart click
-        if (search && search.value !== careerHighlight) search.value = careerHighlight;
     } else {
+        hint.innerHTML = "";
         hint.hidden = true;
-        if (search) search.value = "";
+    }
+    if (search) {
+        const full = careerHighlights.size >= HIGHLIGHT_COLORS.length;
+        search.disabled = full;
+        search.placeholder = full ? "Max 6 players" : "Search…";
+        search.value = "";
     }
 }
 
@@ -1544,19 +1567,23 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // year-order trail tended to add zigzag noise more than it clarified
     // the trajectory). Rendered BEFORE the red frontier dots so the
     // clicked-on frontier point keeps its red marker on top.
-    if (careerHighlight && playerIndex && playerIndex.has(careerHighlight)) {
-        const allSeasons = playerIndex.get(careerHighlight)
-            .map(p => ({ x: p[xDim], y: p[yDim], year: p.yearID }))
-            .filter(s => !isNaN(s.x) && !isNaN(s.y));
-        if (allSeasons.length > 0) {
-            const careerG = g.append("g").attr("class", "career-trail");
-            careerG.selectAll("circle")
+    if (careerHighlights.size > 0 && playerIndex) {
+        for (const [pid, hcolor] of careerHighlights) {
+            if (!playerIndex.has(pid)) continue;
+            const allSeasons = playerIndex.get(pid)
+                .map(p => ({ x: p[xDim], y: p[yDim], year: p.yearID }))
+                .filter(s => !isNaN(s.x) && !isNaN(s.y));
+            if (!allSeasons.length) continue;
+            g.append("g").attr("class", "career-trail")
+                .selectAll("circle")
                 .data(allSeasons).enter()
                 .append("circle")
                 .attr("class", "career-point")
                 .attr("cx", d => xScale(d.x))
                 .attr("cy", d => yScale(d.y))
-                .attr("r", Math.max(pointRadius + 3, 6));
+                .attr("r", Math.max(pointRadius + 3, 6))
+                .style("fill", hcolor)
+                .style("stroke", "#ffffff");
         }
     }
 
@@ -1702,7 +1729,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                     .filter(p => p.x === d.x && p.y === d.y)
                     .sort((a, b) => b.year - a.year);
                 const target = seasons[0] || d;
-                careerHighlight = target.playerID;
+                addHighlight(target.playerID);
                 syncPlayerHint();
                 document.dispatchEvent(new CustomEvent("bl2d:refresh"));
             }
