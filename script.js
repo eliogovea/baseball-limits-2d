@@ -1325,10 +1325,9 @@ function populatePlayerDatalist() {
 }
 
 function syncPlayerHint() {
-    const hint    = document.getElementById("player-hint");
-    const nameEl  = document.getElementById("player-hint-name");
-    const search  = document.getElementById("player-search");
-    if (!hint || !nameEl) return;
+    const hint   = document.getElementById("player-hint");
+    const search = document.getElementById("player-search");
+    if (!hint) return;
     if (careerHighlights.size > 0) {
         hint.innerHTML = [...careerHighlights.entries()].map(([pid, color]) =>
             `<span class="player-chip" data-player="${escapeHtml(pid)}" style="--chip-color:${color}">` +
