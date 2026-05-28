@@ -74,12 +74,12 @@ const URL_DEFAULTS = {
 const DATASETS = {
     batting: {
         label: "Batting",
-        dimensions: ["PA","G","AB","R","H","2B","3B","HR","TB","RBI","SB","CS","BB","SO","IBB","HBP","SH","SF","GIDP","AVG","OBP","SLG"],
+        dimensions: ["PA","G","AB","R","H","2B","3B","HR","TB","RBI","SB","CS","BB","SO","IBB","HBP","SH","SF","GIDP","AVG","OBP","SLG","OPS","ISO","BABIP","BB%","K%","RC"],
         defaultX: "HR",
         defaultY: "SB",
         thresholdField: "PA",
         thresholdLabel: "Min Plate Appearances",
-        rateStats: new Set(["AVG", "OBP", "SLG"]),
+        rateStats: new Set(["AVG", "OBP", "SLG", "OPS", "ISO", "BABIP"]),
         thresholdConfig: {
             // `default` is the threshold the slider lands on for a fresh view
             // (no PA in the URL). Set to the qualifier minimum in Season mode
@@ -104,18 +104,18 @@ const DATASETS = {
                     { val: 5000,  label: "5k" },
                     { val: 10000, label: "10k" },
                 ],
-                hint: "10,000+ PA marks a long full career.",
+                hint: "10,000+ PA marks a long, full career.",
             },
         },
     },
     pitching: {
         label: "Pitching",
-        dimensions: ["IP","G","GS","W","L","CG","SHO","SV","H","ER","HR","BB","SO","BFP","ERA","WHIP","K/9","BB/9","K/BB","H/9"],
+        dimensions: ["IP","G","GS","W","L","CG","SHO","SV","H","ER","HR","BB","SO","BFP","ERA","WHIP","K/9","BB/9","K/BB","H/9","HR/9","K%","BB%","K-BB%","BAOpp"],
         defaultX: "IP",
         defaultY: "SO",
         thresholdField: "IP",
         thresholdLabel: "Min Innings Pitched",
-        rateStats: new Set(["ERA", "WHIP", "K/9", "BB/9", "K/BB", "H/9"]),
+        rateStats: new Set(["ERA", "WHIP", "K/9", "BB/9", "K/BB", "H/9", "HR/9", "BAOpp"]),
         thresholdConfig: {
             season: {
                 max: 400, step: 1, default: 162,
@@ -179,6 +179,14 @@ function parseBattingRows(rawPoints) {
         const obpDen = p.AB + p.BB + p.HBP + p.SF;
         p.OBP = obpDen > 0 ? (p.H + p.BB + p.HBP) / obpDen : NaN;
         p.SLG = p.AB > 0 ? p.TB / p.AB : NaN;
+        p.OPS  = isFinite(p.OBP) && isFinite(p.SLG) ? p.OBP + p.SLG : NaN;
+        p.ISO  = p.AB > 0 ? (z(p.TB) - z(p.H)) / p.AB : NaN;
+        const babipDen = z(p.AB) - z(p.SO) - z(p.HR) + z(p.SF);
+        p.BABIP  = babipDen > 0 ? (z(p.H) - z(p.HR)) / babipDen : NaN;
+        p["BB%"] = p.PA > 0 ? z(p.BB) / p.PA : NaN;
+        p["K%"]  = p.PA > 0 ? z(p.SO) / p.PA : NaN;
+        const rcDen = z(p.AB) + z(p.BB);
+        p.RC = rcDen > 0 ? (z(p.H) + z(p.BB)) * z(p.TB) / rcDen : NaN;
         out.push(p);
     }
     return out;
@@ -205,7 +213,13 @@ function parsePitchingRows(rawPoints) {
         p["K/9"]  = p.IPouts > 0 ? (9 * p.SO) / (p.IPouts / 3) : NaN;
         p["BB/9"] = p.IPouts > 0 ? (9 * p.BB) / (p.IPouts / 3) : NaN;
         p["H/9"]  = p.IPouts > 0 ? (9 * p.H)  / (p.IPouts / 3) : NaN;
-        p["K/BB"] = p.BB > 0 ? p.SO / p.BB : NaN;
+        p["K/BB"]  = p.BB > 0 ? p.SO / p.BB : NaN;
+        p["HR/9"]  = p.IPouts > 0 ? (9 * z(p.HR)) / (p.IPouts / 3) : NaN;
+        p["K%"]    = z(p.BFP) > 0 ? z(p.SO) / z(p.BFP) : NaN;
+        p["BB%"]   = z(p.BFP) > 0 ? z(p.BB) / z(p.BFP) : NaN;
+        p["K-BB%"] = z(p.BFP) > 0 ? (z(p.SO) - z(p.BB)) / z(p.BFP) : NaN;
+        const abFacedP = z(p.BFP) - z(p.BB) - z(p.HBP) - z(p.SH) - z(p.SF);
+        p.BAOpp = abFacedP > 0 ? z(p.H) / abFacedP : NaN;
         out.push(p);
     }
     return out;
@@ -246,6 +260,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
 
     const formatStat = (dim, value) => {
         if (typeof value !== "number" || isNaN(value)) return "—";
+        if (dim.endsWith("%")) return (value * 100).toFixed(1) + "%";
         const rate = activeDataset().rateStats;
         if (rate.has(dim)) return value.toFixed(dim === "ERA" || dim === "WHIP" || dim.includes("/") ? 2 : 3);
         if (dim === "IP") return value.toFixed(1);
@@ -258,6 +273,8 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     setupPaPresets();
     populateEraLegend();
     setupExplainer();
+    setupExportButton();
+    setupShareButton();
     setupGlossary();
     applyModeConfig("season");
     setupModeToggle("mode-toggle", () => {
@@ -267,8 +284,8 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         viewDomain = null;        // mode changes the dataset shape too
         document.getElementById("mode-hint").textContent =
             mode === "career"
-                ? "Each dot is one player's career totals over the year window."
-                : "Each dot is one player-season.";
+                ? "Each dot is one player's career totals across the selected year window."
+                : "Each dot is one player's single season.";
         refreshChart();
     });
     setupModeToggle("stats-toggle", () => {
@@ -525,7 +542,7 @@ function applyUrlState() {
         document.querySelectorAll(".mode-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === "career"));
         applyModeConfig("career");
         document.getElementById("mode-hint").textContent =
-            "Each dot is one player's career totals over the year window.";
+            "Each dot is one player's career totals across the selected year window.";
     }
     if (u.pa) document.getElementById("pa-min-select").value = u.pa;
     setSeg("league-seg", "league", u.lg);
@@ -698,12 +715,26 @@ function aggregateCareer(seasons, dataset = "batting") {
         out["K/9"]  = out.IPouts > 0 ? (9 * out.SO) / ip : NaN;
         out["BB/9"] = out.IPouts > 0 ? (9 * out.BB) / ip : NaN;
         out["H/9"]  = out.IPouts > 0 ? (9 * out.H)  / ip : NaN;
-        out["K/BB"] = out.BB > 0 ? out.SO / out.BB : NaN;
+        out["K/BB"]  = out.BB > 0 ? out.SO / out.BB : NaN;
+        out["HR/9"]  = out.IPouts > 0 ? (9 * out.HR) / ip : NaN;
+        out["K%"]    = out.BFP > 0 ? out.SO / out.BFP : NaN;
+        out["BB%"]   = out.BFP > 0 ? out.BB / out.BFP : NaN;
+        out["K-BB%"] = out.BFP > 0 ? (out.SO - out.BB) / out.BFP : NaN;
+        const abFacedC = out.BFP - out.BB - z(out.HBP) - z(out.SH) - z(out.SF);
+        out.BAOpp = abFacedC > 0 ? out.H / abFacedC : NaN;
     } else {
         out.AVG = out.AB > 0 ? out.H / out.AB : NaN;
         const obpDen = out.AB + out.BB + out.HBP + out.SF;
         out.OBP = obpDen > 0 ? (out.H + out.BB + out.HBP) / obpDen : NaN;
         out.SLG = out.AB > 0 ? out.TB / out.AB : NaN;
+        out.OPS  = isFinite(out.OBP) && isFinite(out.SLG) ? out.OBP + out.SLG : NaN;
+        out.ISO  = out.AB > 0 ? (out.TB - out.H) / out.AB : NaN;
+        const babipDen = out.AB - z(out.SO) - z(out.HR) + z(out.SF);
+        out.BABIP  = babipDen > 0 ? (out.H - z(out.HR)) / babipDen : NaN;
+        out["BB%"] = out.PA > 0 ? out.BB / out.PA : NaN;
+        out["K%"]  = out.PA > 0 ? z(out.SO) / out.PA : NaN;
+        const rcDen = z(out.AB) + z(out.BB);
+        out.RC = rcDen > 0 ? (z(out.H) + z(out.BB)) * z(out.TB) / rcDen : NaN;
     }
     out.yearID = out.yearFirst;
     return out;
@@ -742,6 +773,12 @@ const GLOSSARY = {
     AVG:  { name: "Batting Average",       formula: "H ÷ AB" },
     OBP:  { name: "On-Base Percentage",    formula: "(H + BB + HBP) ÷ (AB + BB + HBP + SF)" },
     SLG:  { name: "Slugging Percentage",   formula: "TB ÷ AB" },
+    OPS:  { name: "On-Base Plus Slugging", formula: "OBP + SLG" },
+    ISO:  { name: "Isolated Power",        formula: "(TB − H) ÷ AB — raw extra-base power" },
+    BABIP:{ name: "Batting Avg on Balls in Play", formula: "(H − HR) ÷ (AB − SO − HR + SF)" },
+    "BB%":{ name: "Walk Rate",             formula: "BB ÷ PA (batters) · BB ÷ BFP (pitchers)" },
+    "K%": { name: "Strikeout Rate",        formula: "SO ÷ PA (batters) · SO ÷ BFP (pitchers)" },
+    RC:   { name: "Runs Created",          formula: "(H + BB) × TB ÷ (AB + BB) — Bill James" },
 
     // Pitching dimensions (some share names with batting: G, BB, SO, HR, etc.
     // — those entries above already cover them, so we don't redeclare.)
@@ -757,11 +794,248 @@ const GLOSSARY = {
     BFP:    { name: "Batters Faced",        formula: "Plate appearances against this pitcher" },
     ERA:    { name: "Earned Run Average",   formula: "9 × ER ÷ IP — lower is better" },
     WHIP:   { name: "Walks + Hits per IP",  formula: "(BB + H) ÷ IP — lower is better" },
-    "K/9":  { name: "Strikeouts per 9 IP",  formula: "9 × SO ÷ IP" },
-    "BB/9": { name: "Walks per 9 IP",       formula: "9 × BB ÷ IP — lower is better" },
-    "K/BB": { name: "Strikeout-to-Walk",    formula: "SO ÷ BB" },
-    "H/9":  { name: "Hits per 9 IP",        formula: "9 × H ÷ IP — lower is better" },
+    "K/9":   { name: "Strikeouts per 9 IP",     formula: "9 × SO ÷ IP" },
+    "BB/9":  { name: "Walks per 9 IP",          formula: "9 × BB ÷ IP — lower is better" },
+    "K/BB":  { name: "Strikeout-to-Walk",       formula: "SO ÷ BB" },
+    "H/9":   { name: "Hits per 9 IP",           formula: "9 × H ÷ IP — lower is better" },
+    "HR/9":  { name: "Home Runs per 9 IP",      formula: "9 × HR ÷ IP — lower is better" },
+    "K-BB%": { name: "Strikeout minus Walk %",  formula: "(SO − BB) ÷ BFP — higher is better" },
+    BAOpp:   { name: "Batting Avg Against",     formula: "H ÷ AB-faced — lower is better" },
 };
+
+function chartExportFilename(ext) {
+    const xDim = document.getElementById("x-axis-select")?.value || "x";
+    const yDim = document.getElementById("y-axis-select")?.value || "y";
+    const mode = document.querySelector("#mode-toggle .mode-btn.active")?.dataset.mode || "season";
+    return `baseball-limits-2d_${xDim}-${yDim}_${mode}.${ext}`;
+}
+
+function buildExportSvgString() {
+    const svg = document.getElementById("scatter-plot");
+    if (!svg) return null;
+
+    const cs = getComputedStyle(document.documentElement);
+    const v = (name) => cs.getPropertyValue(name).trim();
+    const font = v("--font-sans") || "system-ui, -apple-system, sans-serif";
+    const bg = v("--bg") || "#f4f5f7";
+
+    const style = `
+<style>
+svg { background: ${bg}; }
+.regular-point { fill-opacity: 0.4; }
+.special-point { fill: ${v("--mlb-red")}; stroke: #fff; stroke-width: 1.5; }
+.frontier-line { stroke: ${v("--mlb-red")}; stroke-width: 2; fill: none; opacity: 0.55; }
+.career-point { fill: #f59e0b; stroke: #fff; stroke-width: 1.5; }
+.axis text { font-family: ${font}; font-size: 11px; fill: ${v("--text-muted")}; }
+.axis line, .axis path { stroke: ${v("--border")}; fill: none; }
+.axis-title { font-family: ${font}; font-size: 12px; font-weight: 600; fill: ${v("--text")}; }
+.frontier-label { font-family: ${font}; font-size: 11px; font-weight: 600; fill: ${v("--mlb-blue")}; stroke: #fff; stroke-width: 3px; paint-order: stroke; }
+</style>`;
+
+    const clone = svg.cloneNode(true);
+    clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    // Explicit dimensions are required for canvas rasterisation; without them
+    // the browser uses the SVG default (300×150) when drawing to a canvas.
+    const { width, height } = svg.getBoundingClientRect();
+    clone.setAttribute("width", Math.round(width));
+    clone.setAttribute("height", Math.round(height));
+    clone.removeAttribute("role");
+    clone.removeAttribute("aria-label");
+
+    let svgStr = new XMLSerializer().serializeToString(clone);
+    return svgStr.replace(/(<svg[^>]*>)/, `$1${style}`);
+}
+
+function exportChartSVG() {
+    const svgStr = buildExportSvgString();
+    if (!svgStr) return;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([svgStr], { type: "image/svg+xml" }));
+    a.download = chartExportFilename("svg");
+    a.click();
+    URL.revokeObjectURL(a.href);
+}
+
+function svgToPngBlob(svgStr, width, height) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        const svgBlob = new Blob([svgStr], { type: "image/svg+xml;charset=utf-8" });
+        const url = URL.createObjectURL(svgBlob);
+        img.onload = () => {
+            const scale = Math.min(window.devicePixelRatio || 2, 3);
+            const canvas = document.createElement("canvas");
+            canvas.width  = Math.round(width  * scale);
+            canvas.height = Math.round(height * scale);
+            const ctx = canvas.getContext("2d");
+            ctx.scale(scale, scale);
+            const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() || "#f4f5f7";
+            ctx.fillStyle = bg;
+            ctx.fillRect(0, 0, width, height);
+            ctx.drawImage(img, 0, 0, width, height);
+            URL.revokeObjectURL(url);
+            canvas.toBlob(resolve, "image/png");
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("SVG render failed")); };
+        img.src = url;
+    });
+}
+
+
+function setupExportButton() {
+    const btn = document.getElementById("export-btn");
+    if (!btn) return;
+    btn.addEventListener("click", () => {
+        exportChartSVG();
+        btn.classList.add("share-btn--copied");
+        setTimeout(() => btn.classList.remove("share-btn--copied"), 1500);
+    });
+}
+
+let _sharePngBlob = null;
+
+function _shareModalText() {
+    const xDim = document.getElementById("x-axis-select")?.value || "x";
+    const yDim = document.getElementById("y-axis-select")?.value || "y";
+    const mode = document.querySelector("#mode-toggle .mode-btn.active")?.dataset.mode || "season";
+    return `${xDim} vs ${yDim} (${mode}) — Baseball Limits 2D`;
+}
+
+function _updateSharePlatformLinks(url) {
+    const text = encodeURIComponent(_shareModalText());
+    const enc  = encodeURIComponent(url);
+    const set  = (id, href) => { const el = document.getElementById(id); if (el) el.href = href; };
+    set("share-x",        `https://twitter.com/intent/tweet?text=${text}&url=${enc}`);
+    set("share-bluesky",  `https://bsky.app/intent/compose?text=${text}%20${enc}`);
+    set("share-linkedin", `https://www.linkedin.com/sharing/share-offsite/?url=${enc}`);
+    set("share-facebook", `https://www.facebook.com/sharer/sharer.php?u=${enc}`);
+    set("share-whatsapp", `https://wa.me/?text=${text}%20${enc}`);
+    set("share-reddit",   `https://www.reddit.com/submit?url=${enc}&title=${text}`);
+}
+
+async function openShareModal() {
+    const backdrop  = document.getElementById("share-backdrop");
+    const spinner   = document.getElementById("share-preview-spinner");
+    const img       = document.getElementById("share-preview-img");
+    const copyImage = document.getElementById("share-modal-copy-image");
+    if (!backdrop) return;
+
+    // Reset image state and open
+    _sharePngBlob = null;
+    if (img.src) { URL.revokeObjectURL(img.src); img.src = ""; }
+    img.hidden = true;
+    spinner.hidden = false;
+    if (copyImage) copyImage.disabled = true;
+    backdrop.hidden = false;
+    _updateSharePlatformLinks(window.location.href);
+
+    // Generate PNG preview in the background
+    try {
+        const svgStr = buildExportSvgString();
+        if (svgStr) {
+            const svgEl = document.getElementById("scatter-plot");
+            const { width, height } = svgEl.getBoundingClientRect();
+            _sharePngBlob = await svgToPngBlob(svgStr, width, height);
+            await new Promise((res) => {
+                img.onload  = res;
+                img.onerror = res;
+                img.src = URL.createObjectURL(_sharePngBlob);
+            });
+            img.hidden = false;
+        }
+    } catch (_) { /* preview fails silently; copy/download still work */ }
+    spinner.hidden = true;
+    if (copyImage) copyImage.disabled = !_sharePngBlob;
+}
+
+function closeShareModal() {
+    const backdrop = document.getElementById("share-backdrop");
+    if (backdrop) backdrop.hidden = true;
+}
+
+function _flashActionBtn(btn, label, doneLabel = "Done!") {
+    const orig = btn.textContent.trim();
+    btn.classList.add("share-action-btn--done");
+    btn.textContent = doneLabel;
+    setTimeout(() => {
+        btn.classList.remove("share-action-btn--done");
+        btn.textContent = orig;
+        // Restore the icon that was stripped by textContent assignment
+        btn.dispatchEvent(new Event("_restoreicon"));
+    }, 1800);
+}
+
+function setupShareButton() {
+    const shareBtn   = document.getElementById("share-btn");
+    const backdrop   = document.getElementById("share-backdrop");
+    const closeBtn   = document.getElementById("share-modal-close");
+    const copyLink   = document.getElementById("share-modal-copy-link");
+    const copyImage  = document.getElementById("share-modal-copy-image");
+    if (!shareBtn || !backdrop) return;
+
+    shareBtn.addEventListener("click", openShareModal);
+
+    closeBtn?.addEventListener("click", closeShareModal);
+    backdrop.addEventListener("click", (e) => { if (e.target === backdrop) closeShareModal(); });
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && !backdrop.hidden) closeShareModal();
+    });
+
+    copyLink?.addEventListener("click", async () => {
+        const url = window.location.href;
+        try {
+            await navigator.clipboard.writeText(url);
+        } catch {
+            const ta = document.createElement("textarea");
+            ta.value = url;
+            ta.style.cssText = "position:fixed;opacity:0";
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand("copy");
+            document.body.removeChild(ta);
+        }
+        copyLink.classList.add("share-action-btn--done");
+        const origText = copyLink.innerHTML;
+        copyLink.textContent = "Copied!";
+        setTimeout(() => { copyLink.innerHTML = origText; copyLink.classList.remove("share-action-btn--done"); }, 1800);
+    });
+
+    copyImage?.addEventListener("click", async () => {
+        if (!_sharePngBlob) return;
+        const filename = chartExportFilename("png");
+
+        // Mobile with Web Share API file support
+        const pngFile = new File([_sharePngBlob], filename, { type: "image/png" });
+        if (navigator.share && navigator.canShare?.({ files: [pngFile] })) {
+            try {
+                await navigator.share({
+                    title: "Baseball Limits 2D",
+                    text: _shareModalText(),
+                    files: [pngFile],
+                    url: window.location.href,
+                });
+                return;
+            } catch (e) {
+                if (e.name === "AbortError") return;
+            }
+        }
+
+        // Desktop: copy to clipboard
+        const origHTML = copyImage.innerHTML;
+        try {
+            await navigator.clipboard.write([new ClipboardItem({ "image/png": _sharePngBlob })]);
+            copyImage.classList.add("share-action-btn--done");
+            copyImage.textContent = "Copied!";
+            setTimeout(() => { copyImage.innerHTML = origHTML; copyImage.classList.remove("share-action-btn--done"); }, 1800);
+        } catch {
+            // Fallback: download PNG
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(_sharePngBlob);
+            a.download = filename;
+            a.click();
+            URL.revokeObjectURL(a.href);
+        }
+    });
+}
 
 const EXPLAINER_KEY = "bl2d_intro_seen";
 
@@ -1015,7 +1289,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             .attr("font-family", "var(--font-sans, sans-serif)")
             .attr("font-size", 14)
             .attr("fill", "#5a6478")
-            .text("No seasons match the current filters.");
+            .text("No seasons match these filters — try widening the year range or lowering the minimum.");
         return;
     }
 

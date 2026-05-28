@@ -13,7 +13,7 @@
     <header class="app-header">
         <div class="brand">
             <h1>Baseball Limits <span class="brand-accent">2D</span></h1>
-            <p class="tagline">The Pareto frontier of MLB batting</p>
+            <p class="tagline">The Pareto frontier of MLB stats</p>
         </div>
         <div class="header-right">
             <nav class="attribution" aria-label="Data sources">
@@ -22,17 +22,84 @@
                 <span class="attribution-sep">·</span>
                 <a href="https://creativecommons.org/licenses/by-sa/3.0/" target="_blank" rel="noopener" title="Creative Commons Attribution-ShareAlike 3.0">CC BY-SA</a>
             </nav>
-            <button class="help-btn" id="help-btn" type="button" aria-label="Show explainer" title="What is this?">?</button>
+            <button class="icon-btn" id="export-btn" type="button" aria-label="Download SVG" title="Download SVG">
+                <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 1v7M4.5 5.5L7 8l2.5-2.5"/><path d="M2 10v2h10v-2"/></svg>
+            </button>
+            <a class="icon-btn" href="https://github.com/eliogovea/baseball-limits-2d" target="_blank" rel="noopener" aria-label="View source on GitHub" title="View source on GitHub">
+                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+            </a>
+            <button class="icon-btn" id="share-btn" type="button" aria-label="Share" title="Share">
+                <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M5.5 8.5a3.5 3.5 0 0 0 4.95 0l2-2a3.5 3.5 0 0 0-4.95-4.95l-1 1"/><path d="M8.5 5.5a3.5 3.5 0 0 0-4.95 0l-2 2a3.5 3.5 0 0 0 4.95 4.95l1-1"/></svg>
+            </button>
+            <button class="help-btn" id="help-btn" type="button" aria-label="About this chart" title="About Baseball Limits 2D">?</button>
         </div>
     </header>
 
+    <div class="share-backdrop" id="share-backdrop" hidden>
+        <div class="share-modal" role="dialog" aria-labelledby="share-modal-title" aria-modal="true">
+            <div class="share-modal-head">
+                <h2 id="share-modal-title">Share this view</h2>
+                <button type="button" class="share-modal-close" id="share-modal-close" aria-label="Close">
+                    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 2l10 10M12 2L2 12"/></svg>
+                </button>
+            </div>
+            <div class="share-preview" id="share-preview">
+                <div class="share-preview-spinner" id="share-preview-spinner">
+                    <span class="spinner" aria-hidden="true"></span>
+                    <span>Generating preview…</span>
+                </div>
+                <img id="share-preview-img" class="share-preview-img" hidden alt="Chart preview">
+            </div>
+            <div class="share-platforms-label">Share on</div>
+            <div class="share-platforms">
+                <a class="share-platform" id="share-x" href="#" target="_blank" rel="noopener" aria-label="Share on X">
+                    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true" fill="currentColor"><path d="M10.37 7.73 15.9 1.5h-1.32L9.78 6.9 5.88 1.5H1.5l5.8 8.44L1.5 16.5h1.32l5.07-5.9 4.05 5.9H16.5L10.37 7.73zm-1.8 2.08-.58-.84L3.04 2.5h2l3.75 5.4.58.84 4.87 7h-2L8.57 9.81z"/></svg>
+                    <span>X</span>
+                </a>
+                <a class="share-platform" id="share-bluesky" href="#" target="_blank" rel="noopener" aria-label="Share on Bluesky">
+                    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true" fill="currentColor"><path d="M9 6.1C7.5 4 4.3 1.6 1.9 1.6c0 0-1.9 0-1.9 2.8 0 .5.1 4.3 2.3 4.9-1.5.4-2.3.9-2.3 1.8C0 12.6 3.1 16.4 9 16.4s9-3.8 9-5.3c0-.9-.8-1.4-2.3-1.8 2.2-.6 2.3-4.4 2.3-4.9 0-2.8-1.9-2.8-1.9-2.8C13.7 1.6 10.5 4 9 6.1z"/></svg>
+                    <span>Bluesky</span>
+                </a>
+                <a class="share-platform" id="share-linkedin" href="#" target="_blank" rel="noopener" aria-label="Share on LinkedIn">
+                    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true" fill="currentColor"><path d="M0 1.3C0 .6.6 0 1.3 0h15.4C17.4 0 18 .6 18 1.3v15.4c0 .7-.6 1.3-1.3 1.3H1.3C.6 18 0 17.4 0 16.7V1.3zM5.4 15.1V6.9H2.7v8.2h2.7zM4 5.7c.9 0 1.5-.6 1.5-1.5S5 2.7 4 2.7s-1.5.6-1.5 1.5.6 1.5 1.5 1.5zm11.3 9.4v-4.5c0-2.4-.5-4.3-3.3-4.3-1.4 0-2.3.7-2.7 1.4h-.1V6.9H6.8v8.2H9.4v-4c0-1.2.2-2.3 1.7-2.3s1.5 1.3 1.5 2.3v4h2.7z"/></svg>
+                    <span>LinkedIn</span>
+                </a>
+                <a class="share-platform" id="share-facebook" href="#" target="_blank" rel="noopener" aria-label="Share on Facebook">
+                    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true" fill="currentColor"><path d="M18 9A9 9 0 1 0 7.6 17.9v-6.3H5.3V9h2.3V7c0-2.3 1.4-3.6 3.5-3.6 1 0 2.1.2 2.1.2v2.3h-1.2c-1.2 0-1.5.7-1.5 1.4V9h2.6l-.4 2.6h-2.2v6.3A9 9 0 0 0 18 9z"/></svg>
+                    <span>Facebook</span>
+                </a>
+                <a class="share-platform" id="share-whatsapp" href="#" target="_blank" rel="noopener" aria-label="Share on WhatsApp">
+                    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true" fill="currentColor"><path d="M15.3 2.6A8.8 8.8 0 0 0 .1 13.3L0 18l4.8-1.3a8.8 8.8 0 0 0 4.2 1.1A8.8 8.8 0 0 0 18 8.8a8.8 8.8 0 0 0-2.7-6.2zM9 16.1c-1.2 0-2.4-.3-3.5-1l-.3-.1-2.9.8.8-2.8-.2-.3A7.2 7.2 0 0 1 1.8 8.8a7.2 7.2 0 0 1 12.3-5 7.2 7.2 0 0 1-5.1 12.3zM13 11c-.2-.1-1.4-.7-1.6-.8-.2-.1-.3-.1-.4.1-.2.2-.6.7-.7.9-.1.1-.2.1-.4 0-.2-.1-.9-.3-1.7-1.1-.6-.6-1-1.2-1.1-1.4-.1-.2 0-.3.1-.5l.3-.4.2-.3v-.4l-.7-1.6c-.2-.4-.4-.4-.6-.4h-.4c-.2 0-.4.1-.6.3C5 6.7 4.4 7.3 4.4 8.4s.9 2.4 1 2.6c.1.1 1.8 2.8 4.4 3.9.6.3 1.1.4 1.5.5.6.2 1.2.2 1.6.1.5-.1 1.4-.6 1.6-1.1.2-.5.2-1 .1-1.1-.1-.1-.3-.2-.6-.3z"/></svg>
+                    <span>WhatsApp</span>
+                </a>
+                <a class="share-platform" id="share-reddit" href="#" target="_blank" rel="noopener" aria-label="Share on Reddit">
+                    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true" fill="currentColor"><circle cx="9" cy="9" r="9"/><path fill="white" d="M15 9c0-.8-.7-1.5-1.5-1.5-.4 0-.7.1-1 .3C11.5 7.2 10.1 6.7 8.6 6.6l.7-3.1 2.1.5a1.1 1.1 0 1 0 .1-.6L9.3 2.9 8.4 6.6H8C6.5 6.7 5.1 7.2 4.1 7.9a2 2 0 0 0-1-.3C2.4 7.5 1.7 8.2 1.7 9c0 .5.3 1 .7 1.3v.4c0 2 2.2 3.5 5 3.5s5-1.5 5-3.5v-.4c.4-.3.6-.8.6-1.3zM5.5 9.8c0-.5.4-.8.8-.8s.8.4.8.8-.4.8-.8.8-.8-.3-.8-.8zm4.7 2.5c-.5.5-1.4.8-2.6.8s-2.1-.3-2.6-.8a.3.3 0 0 1 .4-.4c.5.4 1.2.6 2.2.6s1.7-.2 2.2-.6a.3.3 0 0 1 .4.4zm-.2-1.7c-.4 0-.8-.4-.8-.8s.4-.8.8-.8.8.4.8.8-.4.8-.8.8z"/></svg>
+                    <span>Reddit</span>
+                </a>
+            </div>
+            <div class="share-divider"></div>
+            <div class="share-actions">
+                <button type="button" class="share-action-btn" id="share-modal-copy-link">
+                    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M5 8.5a3 3 0 0 0 4.24 0l2-2a3 3 0 0 0-4.24-4.24l-1 1"/><path d="M9 5.5a3 3 0 0 0-4.24 0l-2 2a3 3 0 0 0 4.24 4.24l1-1"/></svg>
+                    Copy link
+                </button>
+                <button type="button" class="share-action-btn share-action-btn--secondary" id="share-modal-copy-image">
+                    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="1.5" width="11" height="11" rx="1.5"/><path d="M1.5 9l3.5-3.5 3 3 2-2 2.5 2.5"/><circle cx="10" cy="4.5" r="1" fill="currentColor" stroke="none"/></svg>
+                    Copy image
+                </button>
+            </div>
+            <p class="share-hint">After copying the image, paste it into your post on any platform.</p>
+        </div>
+    </div>
+
     <div class="explainer-backdrop" id="explainer-backdrop" hidden>
         <div class="explainer" role="dialog" aria-labelledby="explainer-title" aria-modal="true">
-            <h2 id="explainer-title">What you're looking at</h2>
-            <p>Each dot is one player's MLB season (or career total in Career mode) — colored by era, from sepia Dead Ball through navy Free Agency to modern blue. Toggle between <strong>Batting</strong> and <strong>Pitching</strong> at the top of the controls.</p>
-            <p>The <strong class="explainer-red">red curve</strong> is the Pareto frontier: no player has ever achieved more in both stats at once. Click a red dot to trace that player's <strong class="explainer-gold">other seasons</strong> in gold.</p>
-            <p>Pick any two stats, change the year range, or raise the minimum PA / IP to see different limits.</p>
-            <button class="explainer-dismiss" id="explainer-dismiss" type="button">Got it</button>
+            <h2 id="explainer-title">Welcome to Baseball Limits 2D</h2>
+            <p><strong>The chart</strong> — each dot is one MLB season (or career total in Career mode), plotted on any two stats you choose. Dots are colored by era, from the Dead Ball years to today.</p>
+            <p><strong class="explainer-red">The red curve</strong> is the Pareto frontier: no player in history has ever achieved more in <em>both</em> stats at once. It's the outer edge of what's been possible.</p>
+            <p><strong class="explainer-gold">Click any red dot</strong> to trace that player's other seasons in gold — a career trail pinned to the frontier.</p>
+            <p><strong>Explore</strong> by picking any two stats, adjusting the year range, or filtering by league, handedness, or birthplace.</p>
+            <button class="explainer-dismiss" id="explainer-dismiss" type="button">Start exploring</button>
         </div>
     </div>
 
@@ -40,14 +107,14 @@
         <section class="chart-region" aria-label="Scatter plot">
             <div class="legend" aria-hidden="true">
                 <div class="legend-row">
-                    <span class="legend-item"><span class="legend-dot legend-dot--frontier"></span>Frontier</span>
+                    <span class="legend-item"><span class="legend-dot legend-dot--frontier"></span>Pareto frontier</span>
                     <span class="legend-item"><span class="legend-dot legend-dot--season"></span>Season</span>
                 </div>
                 <div class="legend-eras" id="legend-eras"></div>
             </div>
             <div class="loading-indicator" id="loading-indicator" role="status" aria-live="polite">
                 <span class="spinner" aria-hidden="true"></span>
-                <span>Loading…</span>
+                <span>Loading data…</span>
             </div>
             <div class="chart-toolbar" id="chart-toolbar">
                 <button class="chart-tool active" id="zoom-mode-brush" data-zoom-mode="brush" title="Brush: drag a rectangle to zoom in" aria-label="Brush zoom mode">
@@ -91,7 +158,7 @@
                         </div>
                     </div>
                 </div>
-                <p class="control-hint" id="mode-hint" hidden>Each dot is one player-season.</p>
+                <p class="control-hint" id="mode-hint" hidden>Each dot is one player's single season.</p>
 
                 <fieldset class="control-group">
                     <legend>Axes</legend>
@@ -186,7 +253,7 @@
                 </div>
                 <section class="frontier-section" aria-label="Frontier seasons">
                     <header class="frontier-header">
-                        <h2>Frontier</h2>
+                        <h2>On the Frontier</h2>
                         <span class="frontier-count" id="frontier-count"></span>
                     </header>
                     <div class="frontier-cards" id="frontier-cards"></div>
