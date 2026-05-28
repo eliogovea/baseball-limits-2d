@@ -123,6 +123,7 @@ let tooltipPinned = false;
 let viewDomain = null;          // {x: [a,b], y: [c,d]} | null
 let zoomMode = "off";
 let showWorstFrontier = false;  // toggle: false = best (default), true = worst
+let isolationPinned = null;     // data-point reference for the pinned isolation ring, or null
 
 // URL state defaults — params at their default value are omitted from the
 // hash to keep it short.
@@ -507,6 +508,10 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         if (tooltipPinned) {
             tooltipPinned = false;
             document.getElementById("tooltip").setAttribute("data-visible", "false");
+        }
+        if (isolationPinned) {
+            isolationPinned = null;
+            dirty = true;
         }
         if (careerHighlights.size > 0) {
             clearHighlights();
@@ -1639,6 +1644,40 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         .attr("text-anchor", d => d.anchor)
         .text(d => d.text);
 
+    // Isolation ring: precompute nearest-neighbour distance (pixel space) for each
+    // frontier point. Drawn on hover; locked in place by click.
+    const isoRingColor = showWorstFrontier ? "#8b5cf6" : "var(--mlb-red)";
+    const isolationMap = new Map();
+    for (const fp of frontier) {
+        const fpx = xScale(fp.x), fpy = yScale(fp.y);
+        let minDist = Infinity;
+        for (const q of unique) {
+            if (q === fp) continue;
+            const dx = xScale(q.x) - fpx, dy = yScale(q.y) - fpy;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < minDist) minDist = dist;
+        }
+        isolationMap.set(fp, { cx: fpx, cy: fpy, r: isFinite(minDist) ? minDist : 0 });
+    }
+
+    const ringGroup = g.append("g").attr("class", "isolation-ring-group");
+
+    // Restore pinned ring across redraws: find the matching current frontier point.
+    if (isolationPinned) {
+        const match = frontier.find(p =>
+            p.x === isolationPinned.x && p.y === isolationPinned.y &&
+            p.playerID === isolationPinned.playerID);
+        if (match) {
+            const iso = isolationMap.get(match);
+            ringGroup.append("circle")
+                .attr("class", "isolation-ring isolation-ring--pinned")
+                .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
+                .style("stroke", isoRingColor);
+        } else {
+            isolationPinned = null;
+        }
+    }
+
     // Tooltip targets: invisible larger circles to ease hover/tap on every point.
     const tooltip = document.getElementById("tooltip");
     const showTooltip = (event, d) => {
@@ -1662,10 +1701,22 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         tooltip.innerHTML = head + body + more;
         tooltip.setAttribute("data-visible", "true");
         positionTooltip(event, tooltip);
+        // Show hover ring for frontier points (skip if a pin is already shown)
+        ringGroup.select(".isolation-ring--hover").remove();
+        if (!isolationPinned && frontierSet.has(d)) {
+            const iso = isolationMap.get(d);
+            if (iso && iso.r > 0) {
+                ringGroup.append("circle")
+                    .attr("class", "isolation-ring isolation-ring--hover")
+                    .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
+                    .style("stroke", isoRingColor);
+            }
+        }
     };
     const hideTooltip = (force = false) => {
         if (tooltipPinned && !force) return;
         tooltip.setAttribute("data-visible", "false");
+        if (!isolationPinned) ringGroup.select(".isolation-ring--hover").remove();
     };
 
     // Brush layer: drag a rectangle on empty chart area to zoom in. Mounted
@@ -1745,24 +1796,35 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         .on("mouseout", hideTooltip)
         .on("touchstart", showTooltip, { passive: true })
         .on("click", (event, d) => {
-            // Any click on any point pins the tooltip there so the user can
-            // read it without holding the mouse still. Click empty area or
-            // Escape unpins.
             tooltipPinned = true;
-            showTooltip(event, d);
             event.stopPropagation();
-            // Click a frontier point (in season mode only) also triggers the
-            // career-arc highlight. Career mode skips this — each dot IS
-            // already the career, so an overlay would be noise.
-            if (mode === "season" && frontierSet.has(d)) {
-                const seasons = filtered
-                    .filter(p => p.x === d.x && p.y === d.y)
-                    .sort((a, b) => b.year - a.year);
-                const target = seasons[0] || d;
-                addHighlight(target.playerID);
-                syncPlayerHint();
-                document.dispatchEvent(new CustomEvent("bl2d:refresh"));
+            if (frontierSet.has(d)) {
+                const iso = isolationMap.get(d);
+                // Toggle pin: clicking the same frontier point again unpins
+                const alreadyPinned = isolationPinned &&
+                    isolationPinned.x === d.x && isolationPinned.y === d.y &&
+                    isolationPinned.playerID === d.playerID;
+                isolationPinned = alreadyPinned ? null : d;
+                // Redraw ring immediately without a full chart refresh
+                ringGroup.selectAll(".isolation-ring--pinned,.isolation-ring--hover").remove();
+                if (isolationPinned && iso && iso.r > 0) {
+                    ringGroup.append("circle")
+                        .attr("class", "isolation-ring isolation-ring--pinned")
+                        .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
+                        .style("stroke", isoRingColor);
+                }
+                // Season mode: also add career highlight
+                if (mode === "season") {
+                    const seasons = filtered
+                        .filter(p => p.x === d.x && p.y === d.y)
+                        .sort((a, b) => b.year - a.year);
+                    const target = seasons[0] || d;
+                    addHighlight(target.playerID);
+                    syncPlayerHint();
+                    document.dispatchEvent(new CustomEvent("bl2d:refresh"));
+                }
             }
+            showTooltip(event, d);
         });
 
     // Hide tooltip on any tap outside a point (mobile).
