@@ -283,6 +283,18 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     opacity: 0.65;
     pointer-events: none;
 }
+.isolation-ring-spoke {
+    stroke-width: 1;
+    stroke-dasharray: 3 3;
+    opacity: 0.4;
+    pointer-events: none;
+}
+.isolation-ring-neighbour {
+    opacity: 0.75;
+    stroke: #ffffff;
+    stroke-width: 1.5;
+    pointer-events: none;
+}
 
 .axis text {
     font-family: var(--font-sans);

@@ -1650,14 +1650,16 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const isolationMap = new Map();
     for (const fp of frontier) {
         const fpx = xScale(fp.x), fpy = yScale(fp.y);
-        let minDist = Infinity;
+        let minDist = Infinity, nearestPoint = null;
         for (const q of unique) {
             if (q === fp) continue;
             const dx = xScale(q.x) - fpx, dy = yScale(q.y) - fpy;
             const dist = Math.sqrt(dx * dx + dy * dy);
-            if (dist < minDist) minDist = dist;
+            if (dist < minDist) { minDist = dist; nearestPoint = q; }
         }
-        isolationMap.set(fp, { cx: fpx, cy: fpy, r: isFinite(minDist) ? minDist : 0 });
+        const nx = nearestPoint ? xScale(nearestPoint.x) : fpx;
+        const ny = nearestPoint ? yScale(nearestPoint.y) : fpy;
+        isolationMap.set(fp, { cx: fpx, cy: fpy, r: isFinite(minDist) ? minDist : 0, nx, ny });
     }
 
     const ringGroup = g.append("g").attr("class", "isolation-ring-group");
@@ -1803,7 +1805,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                     isolationPinned.playerID === d.playerID;
                 isolationPinned = alreadyPinned ? null : d;
                 // Redraw ring immediately without a full chart refresh
-                ringGroup.selectAll(".isolation-ring--pinned,.isolation-ring--hover,.isolation-ring-label").remove();
+                ringGroup.selectAll(".isolation-ring--pinned,.isolation-ring--hover,.isolation-ring-label,.isolation-ring-spoke,.isolation-ring-neighbour").remove();
                 if (isolationPinned && iso && iso.r > 0) {
                     drawIsolationRingPinned(ringGroup, iso, isoRingColor, plotW, plotH);
                 }
@@ -1844,11 +1846,23 @@ function positionTooltip(event, tooltip) {
 }
 
 function drawIsolationRingPinned(ringGroup, iso, color, plotW, plotH) {
+    // Thin line from frontier centre to nearest neighbour
+    ringGroup.append("line")
+        .attr("class", "isolation-ring-spoke")
+        .attr("x1", iso.cx).attr("y1", iso.cy)
+        .attr("x2", iso.nx).attr("y2", iso.ny)
+        .style("stroke", color);
+    // The ring itself
     ringGroup.append("circle")
         .attr("class", "isolation-ring isolation-ring--pinned")
         .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
         .style("stroke", color);
-    // "Loneliness Radius" label: place at top of ring, clamped inside the chart.
+    // Small marker dot at the nearest neighbour
+    ringGroup.append("circle")
+        .attr("class", "isolation-ring-neighbour")
+        .attr("cx", iso.nx).attr("cy", iso.ny).attr("r", 4)
+        .style("fill", color);
+    // "Loneliness Radius" label: place along the spoke, clamped inside the chart.
     const labelAngle = -Math.PI / 4; // 45° top-right
     const lx = Math.min(Math.max(iso.cx + iso.r * Math.cos(labelAngle), 4), plotW - 4);
     const ly = Math.min(Math.max(iso.cy + iso.r * Math.sin(labelAngle), 14), plotH - 4);
