@@ -58,3 +58,7 @@ When SABR releases a new Lahman snapshot:
    ```
 
 See [CLAUDE.md](CLAUDE.md) for the broader architecture and dev workflow.
+
+## Ideas & future work
+
+- **Intra-season / day-by-day animation** — the current ▶ animation steps by full season. With daily cumulative stats (e.g. running HR total after each game) you could watch a record-breaking season unfold game by game. Blocked on data: the Lahman database only publishes season totals; daily logs from BBRef or Statcast come with terms that don't allow bulk redistribution. Worth revisiting if a compatible open dataset appears.
