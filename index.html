@@ -221,14 +221,19 @@
                         <select id="country-select" class="field" aria-label="Country of birth"></select>
                     </div>
                     <div class="filter-row">
-                        <span class="filter-label">Franchise</span>
+                        <span class="filter-label">Scope</span>
+                        <div class="mode-toggle compact" role="group" id="scope-toggle">
+                            <button type="button" class="mode-btn active" data-scope="franchise">Franchise</button>
+                            <button type="button" class="mode-btn" data-scope="team">Team</button>
+                        </div>
+                    </div>
+                    <div id="franchise-row">
                         <select id="franchise-select" class="field" aria-label="Franchise"></select>
                     </div>
-                    <div class="filter-row">
-                        <span class="filter-label">Team</span>
+                    <div id="team-row" hidden>
                         <select id="team-select" class="field" aria-label="Team"></select>
+                        <p class="control-hint">Teams shown for selected year range.</p>
                     </div>
-                    <p class="control-hint">Teams shown for selected year range.</p>
                     <div class="filter-row">
                         <span class="filter-label">Player</span>
                         <input type="text" id="player-search" list="player-datalist" class="field" placeholder="Search…" autocomplete="off" aria-label="Highlight player seasons">

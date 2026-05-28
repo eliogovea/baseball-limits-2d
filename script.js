@@ -363,10 +363,25 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         });
     });
 
-    // Franchise selection cascades into team dropdown reset
-    document.getElementById("franchise-select")?.addEventListener("change", () => {
-        const teamSel = document.getElementById("team-select");
-        if (teamSel) teamSel.value = "all";
+    // Scope toggle: Franchise ↔ Team — mutually exclusive
+    setupModeToggle("scope-toggle", () => {
+        const scope = getActiveModeBtnData("scope-toggle", "scope") || "franchise";
+        const franchiseRow = document.getElementById("franchise-row");
+        const teamRow      = document.getElementById("team-row");
+        if (scope === "franchise") {
+            franchiseRow.hidden = false;
+            teamRow.hidden = true;
+            const teamSel = document.getElementById("team-select");
+            if (teamSel) teamSel.value = "all";
+        } else {
+            franchiseRow.hidden = true;
+            teamRow.hidden = false;
+            const frSel = document.getElementById("franchise-select");
+            if (frSel) frSel.value = "all";
+        }
+        careerHighlight = null;
+        syncPlayerHint();
+        refreshChart();
     });
 
     // Player search
@@ -636,8 +651,16 @@ function applyUrlState() {
     setSeg("league-seg", "league", u.lg);
     setSeg("bats-seg", "bats", u.bt);
     setSelect("country-select", u.co);
-    setSelect("franchise-select", u.fr);
-    setSelect("team-select", u.tm);
+    if (u.tm && u.tm !== "all") {
+        // Restore team scope toggle
+        document.querySelectorAll("#scope-toggle .mode-btn").forEach(b =>
+            b.classList.toggle("active", b.dataset.scope === "team"));
+        document.getElementById("franchise-row").hidden = true;
+        document.getElementById("team-row").hidden = false;
+        setSelect("team-select", u.tm);
+    } else {
+        setSelect("franchise-select", u.fr);
+    }
     if (u.hl) { careerHighlight = u.hl; }
 }
 
