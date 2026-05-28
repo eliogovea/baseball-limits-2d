@@ -260,7 +260,13 @@
                 </div>
                 <section class="frontier-section" aria-label="Frontier seasons">
                     <header class="frontier-header">
-                        <h2>On the Frontier</h2>
+                        <div class="frontier-header-top">
+                            <h2>On the Frontier</h2>
+                            <div class="frontier-toggle" role="group" aria-label="Frontier type">
+                                <button type="button" class="frontier-btn active" data-mode="best" title="Show best seasons (upper-right envelope)">Best</button>
+                                <button type="button" class="frontier-btn" data-mode="worst" title="Show worst seasons (lower-left envelope)">Worst</button>
+                            </div>
+                        </div>
                         <span class="frontier-count" id="frontier-count"></span>
                     </header>
                     <div class="frontier-cards" id="frontier-cards"></div>

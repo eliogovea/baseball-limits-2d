@@ -122,6 +122,7 @@ let tooltipPinned = false;
 // we have a faster renderer (canvas, etc.). Code paths preserved.
 let viewDomain = null;          // {x: [a,b], y: [c,d]} | null
 let zoomMode = "off";
+let showWorstFrontier = false;  // toggle: false = best (default), true = worst
 
 // URL state defaults — params at their default value are omitted from the
 // hash to keep it short.
@@ -419,6 +420,15 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             refreshChart();
         });
     }
+
+    // Frontier toggle: Best / Worst
+    document.querySelectorAll(".frontier-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            showWorstFrontier = btn.dataset.mode === "worst";
+            document.querySelectorAll(".frontier-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === btn.dataset.mode));
+            refreshChart();
+        });
+    });
 
     const loadingIndicator = document.getElementById("loading-indicator");
     let pendingRender = null;
@@ -1457,9 +1467,11 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
 
     // For "lower is better" axes, negate the value for sorting and sweep so the
     // algorithm always maximises — finding the best (lowest) value on that axis.
+    // When showWorstFrontier is true, invert the signs to find the lower-left envelope.
     const datasetDef = DATASETS[filters.dataset || "batting"];
-    const xSign = datasetDef.lowerIsBetter?.has(xDim) ? -1 : 1;
-    const ySign = datasetDef.lowerIsBetter?.has(yDim) ? -1 : 1;
+    let xSign = datasetDef.lowerIsBetter?.has(xDim) ? -1 : 1;
+    let ySign = datasetDef.lowerIsBetter?.has(yDim) ? -1 : 1;
+    if (showWorstFrontier) { xSign *= -1; ySign *= -1; }
 
     filtered.sort((a, b) => {
         const ax = a.x * xSign, bx = b.x * xSign;
@@ -1557,7 +1569,8 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         g.append("path")
             .datum(frontier)
             .attr("class", "frontier-line")
-            .attr("d", line);
+            .attr("d", line)
+            .style("stroke", showWorstFrontier ? "#8b5cf6" : null);
     }
 
     const pointRadius = unique.length > 2000 ? 3 : (unique.length > 500 ? 4 : 5);
@@ -1602,6 +1615,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         }
     }
 
+    const frontierColor = showWorstFrontier ? "#8b5cf6" : null;  // purple for worst, red (CSS) for best
     g.append("g").selectAll("circle.special-point")
         .data(special).enter()
         .append("circle")
@@ -1609,7 +1623,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         .attr("cx", d => xScale(d.x))
         .attr("cy", d => yScale(d.y))
         .attr("r", frontierRadius)
-        .style("fill", d => careerHighlights.get(d.playerID) || null);
+        .style("fill", d => careerHighlights.get(d.playerID) || frontierColor);
 
     // On-chart frontier labels: greedy collision avoidance, mobile shows
     // only the two extreme endpoints so small viewports stay readable.
