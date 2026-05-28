@@ -142,6 +142,7 @@ const DATASETS = {
         thresholdField: "PA",
         thresholdLabel: "Min Plate Appearances",
         rateStats: new Set(["AVG", "OBP", "SLG", "OPS", "ISO", "BABIP"]),
+        lowerIsBetter: new Set(["CS", "GIDP", "SO", "K%"]),
         thresholdConfig: {
             // `default` is the threshold the slider lands on for a fresh view
             // (no PA in the URL). Set to the qualifier minimum in Season mode
@@ -178,6 +179,7 @@ const DATASETS = {
         thresholdField: "IP",
         thresholdLabel: "Min Innings Pitched",
         rateStats: new Set(["ERA", "WHIP", "K/9", "BB/9", "K/BB", "H/9", "HR/9", "BAOpp"]),
+        lowerIsBetter: new Set(["ERA","WHIP","BB/9","H/9","HR/9","BAOpp","BB%","L","H","ER","HR","BB"]),
         thresholdConfig: {
             season: {
                 max: 400, step: 1, default: 162,
@@ -606,12 +608,13 @@ function populateSelectorsForActive() {
 
     const xSelect = document.getElementById("x-axis-select");
     const ySelect = document.getElementById("y-axis-select");
+    const lib = def.lowerIsBetter || new Set();
     [xSelect, ySelect].forEach((sel) => {
         sel.innerHTML = "";
         def.dimensions.forEach((dim) => {
             const opt = document.createElement("option");
             opt.value = dim;
-            opt.textContent = dim;
+            opt.textContent = lib.has(dim) ? `${dim} ↓` : dim;
             sel.appendChild(opt);
         });
     });
@@ -1452,9 +1455,17 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         });
     }
 
+    // For "lower is better" axes, negate the value for sorting and sweep so the
+    // algorithm always maximises — finding the best (lowest) value on that axis.
+    const datasetDef = DATASETS[filters.dataset || "batting"];
+    const xSign = datasetDef.lowerIsBetter?.has(xDim) ? -1 : 1;
+    const ySign = datasetDef.lowerIsBetter?.has(yDim) ? -1 : 1;
+
     filtered.sort((a, b) => {
-        if (a.x !== b.x) return a.x - b.x;
-        if (a.y !== b.y) return a.y - b.y;
+        const ax = a.x * xSign, bx = b.x * xSign;
+        const ay = a.y * ySign, by = b.y * ySign;
+        if (ax !== bx) return ax - bx;
+        if (ay !== by) return ay - by;
         return b.year - a.year; // prefer more recent on ties
     });
 
@@ -1467,11 +1478,14 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         }
     }
 
-    // Pareto frontier: sweep left-to-right, keep upper-right envelope.
+    // Pareto frontier: sweep left-to-right keeping the best-in-class envelope.
+    // Signed values ensure "lower is better" axes are treated correctly.
     const frontier = [];
     for (const p of unique) {
-        while (frontier.length && frontier[frontier.length - 1].y < p.y) frontier.pop();
-        if (frontier.length && frontier[frontier.length - 1].y === p.y && frontier[frontier.length - 1].x < p.x) {
+        const py = p.y * ySign;
+        while (frontier.length && frontier[frontier.length - 1].y * ySign < py) frontier.pop();
+        if (frontier.length && frontier[frontier.length - 1].y === p.y &&
+            frontier[frontier.length - 1].x * xSign < p.x * xSign) {
             frontier.pop();
         }
         frontier.push(p);
@@ -1528,14 +1542,14 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         .attr("x", plotW / 2)
         .attr("y", plotH + 36)
         .attr("text-anchor", "middle")
-        .text(xDim);
+        .text(xSign === -1 ? `${xDim} ↓` : xDim);
     g.append("text")
         .attr("class", "axis-title")
         .attr("transform", `rotate(-90)`)
         .attr("x", -plotH / 2)
         .attr("y", -38)
         .attr("text-anchor", "middle")
-        .text(yDim);
+        .text(ySign === -1 ? `${yDim} ↓` : yDim);
 
     // Frontier connecting line first (under points).
     if (frontier.length > 1) {
