@@ -61,6 +61,40 @@ See [CLAUDE.md](CLAUDE.md) for the broader architecture and dev workflow.
 
 ## Ideas & future work
 
+### Analytical / Pareto frontier concepts
+
+- **Pareto depth (onion peeling)** — recursively remove the frontier and compute the next one from the remaining points, repeating 3–5 times. Render each layer in decreasing opacity or a stepped color. Seasons that survive to layer 1 are the all-time elite; layer 2 are the near-misses; and so on. Visually turns the chart into a topographic map of dominance.
+
+- **Hypervolume shading** — fill the area "dominated" by the frontier (the region beneath and to the left of the curve) with a light gradient. The shaded region is the hypervolume indicator — a single scalar capturing how much of the objective space the frontier controls. Pairs perfectly with the ▶ animation: you can watch the shaded area grow as history advances.
+
+- **Hypervolume contribution per frontier point** — for each red dot, compute how much the total dominated area would shrink if that point were removed. High contribution = the point "owns" a large exclusive territory on the frontier. A natural complement to the Loneliness Radius: Loneliness measures nearest-neighbour distance in the cloud; hypervolume contribution measures the frontier point's structural importance.
+
+- **Crowding distance on the frontier** — the standard NSGA-II metric: for each frontier point, the sum of distances to its immediate left and right neighbours along the frontier. High crowding distance = the point sits in a sparse, uncrowded region of the frontier curve. Could be encoded as dot size or saturation on the frontier, immediately showing which seasons occupy distinct niches vs. cluster together.
+
+- **Frontier longevity / years held** — for each frontier point, track how many seasons it has stood as the record (and whether it still does). Henderson's 130 SB in 1982 has been untouched for 40+ years; Maris's 61 HR stood 37 years. A "time-on-frontier" color scale — older = more saturated — would make durability legible at a glance.
+
+- **Era-normalised frontier** — divide each stat by that season's league average (like ERA+, OPS+). The raw frontier is dominated by the steroid era for power stats and the dead-ball era for pitching volume. An era-adjusted view would show who was most exceptional *relative to their peers*, which is a different (and arguably fairer) question.
+
+- **"Almost frontier" band** — a faint second layer just inside the frontier showing seasons within, say, 5% of both axis values simultaneously. Shows how deep the talent pool is right behind the record-holders and makes the frontier's exclusivity visible.
+
+### Visual / interaction improvements
+
+- **Kernel density contour lines** — overlay smooth topographic contours on the point cloud using `d3-contour`. Makes the shape of the distribution legible (where do most qualified seasons cluster?) without obscuring individual dots. Especially useful for dense axes like AVG or ERA.
+
+- **Voronoi overlay for frontier points** — partition the chart space into cells, one per frontier point, each cell showing the region "closest" to that frontier dot. Visually answers: "if a new season entered, which frontier record would it challenge?" Could be a toggleable layer.
+
+- **Animated transitions on filter change** — when the axis, year range, or filters change, smoothly morph the frontier line and dots to their new positions using D3 transitions rather than an instant snap. Easier to follow how the frontier shifts when something changes.
+
+- **Sparklines in frontier cards** — add a tiny inline career sparkline (e.g. HR by year) to each entry in the "On the Frontier" sidebar card. Shows at a glance whether the record season was a peak or part of a sustained run.
+
+- **Dark mode** — a dark colour scheme where the chart background is near-black and the dot cloud uses muted colours. The red frontier curve and highlight colours (gold, teal, purple) would pop more dramatically against a dark field.
+
+- **Canvas rendering** — switch the point-cloud layer from SVG circles to an HTML Canvas overlay (D3 still manages axes, labels, and interactions in SVG). Unlocks smooth rendering with 50 k+ points and removes the current lag at large datasets.
+
+- **World map birthplace view** — a companion mini-map showing where frontier (or highlighted) players were born, one dot per player. Leverages the existing country/birthplace data already in the dataset.
+
+### Data / scope
+
 - **Intra-season / day-by-day animation** — the current ▶ animation steps by full season. With daily cumulative stats (e.g. running HR total after each game) you could watch a record-breaking season unfold game by game. Blocked on data: the Lahman database only publishes season totals; daily logs from BBRef or Statcast come with terms that don't allow bulk redistribution. Worth revisiting if a compatible open dataset appears.
 
 - **Interactive guided tour** — replace (or supplement) the static welcome modal with a step-by-step walkthrough that highlights each UI region in sequence: the chart, the frontier curve, the axis selectors, the year-range animation button, the Loneliness Radius, the filters, and the frontier card list. Libraries like [Shepherd.js](https://shepherdjs.dev/) or a lightweight hand-rolled tooltip-chain would work. Keeps the first-visit experience self-contained without needing external docs.
