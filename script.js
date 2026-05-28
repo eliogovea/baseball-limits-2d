@@ -1594,7 +1594,8 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         .attr("class", "special-point")
         .attr("cx", d => xScale(d.x))
         .attr("cy", d => yScale(d.y))
-        .attr("r", frontierRadius);
+        .attr("r", frontierRadius)
+        .style("fill", d => careerHighlights.get(d.playerID) || null);
 
     // On-chart frontier labels: greedy collision avoidance, mobile shows
     // only the two extreme endpoints so small viewports stay readable.
