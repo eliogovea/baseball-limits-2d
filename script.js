@@ -124,6 +124,7 @@ let viewDomain = null;          // {x: [a,b], y: [c,d]} | null
 let zoomMode = "off";
 let showWorstFrontier = false;  // toggle: false = best (default), true = worst
 let isolationPinned = null;     // data-point reference for the pinned isolation ring, or null
+let animTimer = null;           // setInterval handle while frontier animation is running
 
 // URL state defaults — params at their default value are omitted from the
 // hash to keep it short.
@@ -480,8 +481,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     document.addEventListener("bl2d:refresh", refreshChart);
 
     const filterChanged = () => {
-        // Any filter change resets the career-highlight pin so the visible
-        // trail doesn't outlive the view it was set in.
+        stopAnimation();
         clearHighlights();
         refreshChart();
     };
@@ -495,9 +495,44 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         document.getElementById(id).addEventListener("change", axisOrViewChanged);
     });
     ["s-year-select", "e-year-select"].forEach((id) => {
-        document.getElementById(id).addEventListener("change", filterChanged);
+        document.getElementById(id).addEventListener("change", () => {
+            stopAnimation();
+            filterChanged();
+        });
     });
     document.getElementById("pa-min-select").addEventListener("input", filterChanged);
+
+    // Frontier animation: advance end year from start → max, redrawing each step.
+    function stopAnimation() {
+        if (!animTimer) return;
+        clearInterval(animTimer);
+        animTimer = null;
+        const btn = document.getElementById("anim-play-btn");
+        btn.classList.remove("playing");
+        document.getElementById("anim-icon-play").hidden = false;
+        document.getElementById("anim-icon-stop").hidden = true;
+    }
+    function startAnimation() {
+        const sInput = document.getElementById("s-year-select");
+        const eInput = document.getElementById("e-year-select");
+        const maxYear = parseInt(eInput.max);
+        // Reset end year to start year so the evolution plays from scratch.
+        eInput.value = sInput.value;
+        const btn = document.getElementById("anim-play-btn");
+        btn.classList.add("playing");
+        document.getElementById("anim-icon-play").hidden = true;
+        document.getElementById("anim-icon-stop").hidden = false;
+        refreshChart();
+        animTimer = setInterval(() => {
+            const cur = parseInt(eInput.value);
+            if (cur >= maxYear) { stopAnimation(); return; }
+            eInput.value = cur + 1;
+            refreshChart();
+        }, 400);
+    }
+    document.getElementById("anim-play-btn").addEventListener("click", () => {
+        if (animTimer) stopAnimation(); else startAnimation();
+    });
 
     setupZoomToolbar();
 

@@ -1365,6 +1365,30 @@ input[type="number"].field::-webkit-outer-spin-button {
     .year-range-sep { color: var(--text-muted); font-weight: 600; }
 }
 
+.anim-play-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    flex-shrink: 0;
+    background: none;
+    border: 1.5px solid var(--border);
+    border-radius: 50%;
+    cursor: pointer;
+    color: var(--text-muted);
+    transition: border-color 150ms, color 150ms, background 150ms;
+}
+.anim-play-btn:hover {
+    border-color: var(--mlb-blue);
+    color: var(--mlb-blue);
+}
+.anim-play-btn.playing {
+    border-color: var(--mlb-red);
+    color: var(--mlb-red);
+    background: color-mix(in srgb, var(--mlb-red) 8%, transparent);
+}
+
 @media (min-width: 1200px) {
     :root { --sidebar-w: 320px; }
     .controls-panel { padding: 18px; }
