@@ -54,11 +54,12 @@ let metaFor = () => null;     // populated after decode: (playerID) -> {bats, th
 let tooltipPinned = false;
 
 // Zoom state. viewDomain overrides the chart's x/y scale domains when set.
-// zoomMode is "brush" (drag a rectangle to zoom in) or "pan" (drag to pan,
-// wheel to zoom). Reset on axis/dataset/mode change since the domain values
-// no longer make sense across dimension changes.
+// zoomMode controls which interaction layer mounts on the chart: "brush",
+// "pan", or "off". Currently "off" by default — the SVG-based zoom paths
+// are laggy on the larger clouds; the toolbar UI is hidden via CSS until
+// we have a faster renderer (canvas, etc.). Code paths preserved.
 let viewDomain = null;          // {x: [a,b], y: [c,d]} | null
-let zoomMode = "brush";
+let zoomMode = "off";
 
 // URL state defaults — params at their default value are omitted from the
 // hash to keep it short.

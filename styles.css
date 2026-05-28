@@ -275,10 +275,13 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
 .legend-dot--season   { background: var(--mlb-blue-light); }
 
 .chart-toolbar {
+    /* Hidden for now — the SVG-based zoom path is laggy on the larger
+       point clouds. Code path stays in place behind this and the JS
+       feature flag so we can switch it back on after a perf rework. */
+    display: none;
     position: absolute;
     top: 12px;
     left: 12px;
-    display: flex;
     gap: 4px;
     z-index: 3;
 }
@@ -324,7 +327,7 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
 
 .loading-indicator {
     position: absolute;
-    top: 48px;             /* below the zoom toolbar */
+    top: 12px;
     left: 12px;
     display: none;
     align-items: center;
