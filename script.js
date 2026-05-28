@@ -1553,6 +1553,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const regular = unique.filter(d => !frontierSet.has(d));
     const special = unique.filter(d => frontierSet.has(d));
 
+    const cloudOpacity = careerHighlights.size > 0 ? 0.1 : 0.4;
     g.append("g").selectAll("circle.regular-point")
         .data(regular).enter()
         .append("circle")
@@ -1560,7 +1561,8 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         .attr("cx", d => xScale(d.x))
         .attr("cy", d => yScale(d.y))
         .attr("r", pointRadius)
-        .attr("fill", d => colorOf(d, "league", getMeta));
+        .attr("fill", d => colorOf(d, "league", getMeta))
+        .style("fill-opacity", cloudOpacity);
 
     // Career-highlight layer: dots only (no connecting line — the
     // year-order trail tended to add zigzag noise more than it clarified
