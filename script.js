@@ -1669,10 +1669,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             p.playerID === isolationPinned.playerID);
         if (match) {
             const iso = isolationMap.get(match);
-            ringGroup.append("circle")
-                .attr("class", "isolation-ring isolation-ring--pinned")
-                .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
-                .style("stroke", isoRingColor);
+            drawIsolationRingPinned(ringGroup, iso, isoRingColor, plotW, plotH);
         } else {
             isolationPinned = null;
         }
@@ -1806,12 +1803,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                     isolationPinned.playerID === d.playerID;
                 isolationPinned = alreadyPinned ? null : d;
                 // Redraw ring immediately without a full chart refresh
-                ringGroup.selectAll(".isolation-ring--pinned,.isolation-ring--hover").remove();
+                ringGroup.selectAll(".isolation-ring--pinned,.isolation-ring--hover,.isolation-ring-label").remove();
                 if (isolationPinned && iso && iso.r > 0) {
-                    ringGroup.append("circle")
-                        .attr("class", "isolation-ring isolation-ring--pinned")
-                        .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
-                        .style("stroke", isoRingColor);
+                    drawIsolationRingPinned(ringGroup, iso, isoRingColor, plotW, plotH);
                 }
                 // Season mode: also add career highlight
                 if (mode === "season") {
@@ -1847,6 +1841,22 @@ function positionTooltip(event, tooltip) {
     if (y < pad) y = pad;
     tooltip.style.left = x + "px";
     tooltip.style.top = y + "px";
+}
+
+function drawIsolationRingPinned(ringGroup, iso, color, plotW, plotH) {
+    ringGroup.append("circle")
+        .attr("class", "isolation-ring isolation-ring--pinned")
+        .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
+        .style("stroke", color);
+    // "Loneliness Radius" label: place at top of ring, clamped inside the chart.
+    const labelAngle = -Math.PI / 4; // 45° top-right
+    const lx = Math.min(Math.max(iso.cx + iso.r * Math.cos(labelAngle), 4), plotW - 4);
+    const ly = Math.min(Math.max(iso.cy + iso.r * Math.sin(labelAngle), 14), plotH - 4);
+    ringGroup.append("text")
+        .attr("class", "isolation-ring-label")
+        .attr("x", lx).attr("y", ly)
+        .style("fill", color)
+        .text("Loneliness Radius");
 }
 
 function escapeHtml(s) {

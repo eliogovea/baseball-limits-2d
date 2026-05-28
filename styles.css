@@ -275,6 +275,14 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
 }
 .isolation-ring--hover  { opacity: 0.35; }
 .isolation-ring--pinned { opacity: 0.6; stroke-width: 2; }
+.isolation-ring-label {
+    font-family: var(--font-sans, sans-serif);
+    font-size: 10px;
+    font-weight: 600;
+    font-style: italic;
+    opacity: 0.65;
+    pointer-events: none;
+}
 
 .axis text {
     font-family: var(--font-sans);
