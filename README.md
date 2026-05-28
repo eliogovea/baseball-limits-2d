@@ -62,3 +62,5 @@ See [CLAUDE.md](CLAUDE.md) for the broader architecture and dev workflow.
 ## Ideas & future work
 
 - **Intra-season / day-by-day animation** — the current ▶ animation steps by full season. With daily cumulative stats (e.g. running HR total after each game) you could watch a record-breaking season unfold game by game. Blocked on data: the Lahman database only publishes season totals; daily logs from BBRef or Statcast come with terms that don't allow bulk redistribution. Worth revisiting if a compatible open dataset appears.
+
+- **Interactive guided tour** — replace (or supplement) the static welcome modal with a step-by-step walkthrough that highlights each UI region in sequence: the chart, the frontier curve, the axis selectors, the year-range animation button, the Loneliness Radius, the filters, and the frontier card list. Libraries like [Shepherd.js](https://shepherdjs.dev/) or a lightweight hand-rolled tooltip-chain would work. Keeps the first-visit experience self-contained without needing external docs.
