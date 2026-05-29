@@ -372,6 +372,17 @@ This table is a worked example of the classification rubric applied to the READM
 
 These rules exist to keep effort proportional, not to be a straitjacket. Drop down a tier when the task turns out smaller than expected; escalate when a "simple" change turns out to touch the Pareto algorithm or the binary format. State the deviation explicitly in the response so the next session can see what changed and why.
 
+### Tracking what's shipped (README is the source of truth)
+
+The `## Ideas & future work` section in `README.md` uses GitHub task-list syntax: `- [ ]` for open items and `- [x] *(shipped <sha>)*` for shipped ones. **In the same commit that ships, moots, or partially-discards a backlog item, update its README entry.** This is mandatory, not advisory:
+
+- **Shipped**: flip `- [ ]` to `- [x]` and append `*(shipped <commit-sha>)*` after the bold name. Use the SHA from the commit doing the work (use the first 7 chars).
+- **Design-only progress**: keep `- [ ]` and append `*(Design in [`docs/<file>.md`](docs/<file>.md); implementation pending.)*` so the next session can pick up the design and ship.
+- **Discarded / partial attempt**: keep `- [ ]` and append a parenthetical explaining what was tried, what didn't work, and what the holistic next attempt needs to address. Future-you should not re-fall into the same partial trap.
+- **New ideas surfaced during work**: add as `- [ ]` bullets under the most relevant subsection, or under "Methodology infrastructure follow-ups" if they're about the methodology itself.
+
+The README is the single source of truth for "what's done". The pre-tiered backlog table in this file is illustrative; if it diverges from the README, the README wins.
+
 ### Validating the methodology
 
 A methodology you can't measure is just a wish. Claude Code writes per-session transcripts as JSONL at `~/.claude/projects/-Users-eliogovea-Project-baseball-limits-2d/<session-id>.jsonl`. Each `assistant` entry carries `message.model` (e.g. `claude-opus-4-7`), `message.usage` with input/output/cache token counts, `isSidechain: true` for subagent threads, and `tool_use` entries for `Agent` calls. That's the substrate `scripts/methodology_audit.py` reads.
