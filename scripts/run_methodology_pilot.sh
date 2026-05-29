@@ -7,6 +7,7 @@
 #   ./scripts/run_methodology_pilot.sh                # dry-run: print commands
 #   ./scripts/run_methodology_pilot.sh --execute      # actually spend tokens (probes then runs pilots)
 #   ./scripts/run_methodology_pilot.sh --probe-only   # only run the --agent Plan probe (~$0.01)
+#   ./scripts/run_methodology_pilot.sh --only 3       # run only pilot 3 (comma-separate for multiple: --only 1,3)
 #   ./scripts/run_methodology_pilot.sh --cleanup      # remove pilot worktrees + results
 #   ./scripts/run_methodology_pilot.sh --baseline <ref>  # baseline ref (default: HEAD)
 #   ./scripts/run_methodology_pilot.sh --skip-probe   # skip the --agent Plan probe step
@@ -30,6 +31,7 @@ EXECUTE=false
 CLEANUP=false
 PROBE_ONLY=false
 SKIP_PROBE=false
+ONLY=""
 
 # Tools the pilots need beyond what --permission-mode acceptEdits gives them.
 # Scope: file ops + the methodology's verification-floor shell commands
@@ -47,6 +49,7 @@ while [ $# -gt 0 ]; do
         --execute) EXECUTE=true; shift ;;
         --probe-only) PROBE_ONLY=true; EXECUTE=true; shift ;;
         --skip-probe) SKIP_PROBE=true; shift ;;
+        --only) ONLY="$2"; shift 2 ;;
         --cleanup) CLEANUP=true; shift ;;
         --baseline) BASELINE="$2"; shift 2 ;;
         -h|--help) usage 0 ;;
@@ -255,13 +258,26 @@ PY
     echo "  cost:     \$${cost}"
 }
 
-# Run each pilot
-idx=1
+# Build the set of pilots to run (default: all)
+declare -a RUN_IDS=()
+if [ -n "$ONLY" ]; then
+    IFS=',' read -ra RUN_IDS <<< "$ONLY"
+else
+    for i in "${!PILOTS[@]}"; do RUN_IDS+=("$((i + 1))"); done
+fi
+
+# Run each selected pilot
 failures=0
-for spec in "${PILOTS[@]}"; do
+for want_idx in "${RUN_IDS[@]}"; do
+    idx=$want_idx
+    spec="${PILOTS[$((idx - 1))]:-}"
+    if [ -z "$spec" ]; then
+        echo "no such pilot: $idx" >&2
+        failures=$((failures + 1))
+        continue
+    fi
     IFS='|' read -r tier label model agent prompt <<< "$spec"
     run_pilot "$idx" "$tier" "$label" "$model" "$agent" "$prompt" || failures=$((failures + 1))
-    idx=$((idx + 1))
 done
 
 if [ "$EXECUTE" = false ]; then
