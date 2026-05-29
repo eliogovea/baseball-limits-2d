@@ -1817,8 +1817,14 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                     .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
                     .style("stroke", isoRingColor);
             }
-            // Highlight the exclusive-contribution rectangle that would
-            // disappear if this point were removed from the frontier.
+            // Visualize the area that vanishes if this point is removed from
+            // the frontier. Three pieces tell the before/after story:
+            //   (1) the exclusive-contribution rectangle (the area lost)
+            //   (2) the dashed "alternative" frontier segment connecting the
+            //       previous and next frontier points directly — where the
+            //       curve would be without this point (interior points only)
+            //   (3) a percentage label inside the rect so the magnitude is
+            //       legible at a glance
             const hvItem = hvByPoint.get(d);
             if (hvItem && hvItem.contribution > 0) {
                 const r = hvItem.rect;
@@ -1832,6 +1838,24 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                     .attr("class", "hv-contrib-rect hv-contrib-rect--hover")
                     .attr("x", x).attr("y", y)
                     .attr("width", w).attr("height", h);
+                const idx = frontier.indexOf(d);
+                if (idx > 0 && idx < frontier.length - 1) {
+                    const prev = frontier[idx - 1];
+                    const next = frontier[idx + 1];
+                    hvRectGroup.append("line")
+                        .attr("class", "hv-alt-frontier hv-alt-frontier--hover")
+                        .attr("x1", xScale(prev.x)).attr("y1", yScale(prev.y))
+                        .attr("x2", xScale(next.x)).attr("y2", yScale(next.y));
+                }
+                if (w > 36 && h > 18) {
+                    hvRectGroup.append("text")
+                        .attr("class", "hv-contrib-label hv-contrib-rect--hover")
+                        .attr("x", x + w / 2)
+                        .attr("y", y + h / 2)
+                        .attr("text-anchor", "middle")
+                        .attr("dominant-baseline", "middle")
+                        .text(`−${(hvItem.fraction * 100).toFixed(1)}%`);
+                }
             }
         }
     };
