@@ -5,9 +5,11 @@
 #
 # Usage:
 #   ./scripts/run_methodology_pilot.sh                # dry-run: print commands
-#   ./scripts/run_methodology_pilot.sh --execute      # actually spend tokens
+#   ./scripts/run_methodology_pilot.sh --execute      # actually spend tokens (probes then runs pilots)
+#   ./scripts/run_methodology_pilot.sh --probe-only   # only run the --agent Plan probe (~$0.01)
 #   ./scripts/run_methodology_pilot.sh --cleanup      # remove pilot worktrees + results
 #   ./scripts/run_methodology_pilot.sh --baseline <ref>  # baseline ref (default: HEAD)
+#   ./scripts/run_methodology_pilot.sh --skip-probe   # skip the --agent Plan probe step
 #
 # Environment:
 #   PILOT_PRICING  — path to pricing JSON (default: ~/.claude/pricing.json)
@@ -26,6 +28,8 @@ PRICING="${PILOT_PRICING:-$HOME/.claude/pricing.json}"
 BASELINE="HEAD"
 EXECUTE=false
 CLEANUP=false
+PROBE_ONLY=false
+SKIP_PROBE=false
 
 usage() {
     sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
@@ -35,6 +39,8 @@ usage() {
 while [ $# -gt 0 ]; do
     case "$1" in
         --execute) EXECUTE=true; shift ;;
+        --probe-only) PROBE_ONLY=true; EXECUTE=true; shift ;;
+        --skip-probe) SKIP_PROBE=true; shift ;;
         --cleanup) CLEANUP=true; shift ;;
         --baseline) BASELINE="$2"; shift 2 ;;
         -h|--help) usage 0 ;;
@@ -75,6 +81,85 @@ if ! git show "$BASELINE_SHA":CLAUDE.md 2>/dev/null | grep -q "Working methodolo
 fi
 
 mkdir -p "$WORKTREE_DIR" "$RESULTS_DIR"
+
+# --- Probe: confirm `claude -p --agent Plan` is accepted AND records the
+# Plan session-agent setting in the transcript JSONL. Three pass conditions:
+#   (a) CLI accepts the flag without erroring
+#   (b) JSON output has a non-empty session_id
+#   (c) The session JSONL contains `{"type":"agent-setting","agentSetting":"Plan"}`
+#       — empirical ground truth that the flag took effect (not just was accepted)
+# Cost: ~$0.05 in Haiku. Probe failure aborts unless --skip-probe.
+probe_agent_flag() {
+    local probe_dir="$RESULTS_DIR/probe"
+    mkdir -p "$probe_dir"
+    local out_file="$probe_dir/probe.stdout.json"
+    local prompt="Reply with exactly: probe-ok. (Used to verify the --agent flag is accepted.)"
+
+    echo "=== Probe: claude -p --agent Plan --model haiku ==="
+    if [ "$EXECUTE" = false ]; then
+        echo "  command:  claude -p $(printf '%q' "$prompt") --agent Plan --model haiku --permission-mode acceptEdits --output-format json"
+        echo "  (dry-run — not executed)"
+        return 0
+    fi
+
+    if ! claude -p "$prompt" --agent Plan --model haiku --permission-mode acceptEdits --output-format json > "$out_file" 2>&1; then
+        echo "  FAIL — claude -p --agent Plan exited non-zero. See $out_file" >&2
+        return 1
+    fi
+
+    local sid cost
+    sid=$(python3 -c "import json; print(json.load(open('$out_file')).get('session_id',''))" 2>/dev/null || true)
+    cost=$(python3 -c "import json; print(json.load(open('$out_file')).get('total_cost_usd', 0))" 2>/dev/null || echo 0)
+
+    if [ -z "$sid" ]; then
+        echo "  FAIL — no session_id in probe response. See $out_file" >&2
+        return 1
+    fi
+
+    # Verify the JSONL recorded the agent-setting marker
+    local jsonl_path
+    jsonl_path=$(python3 -c "
+import pathlib
+for p in pathlib.Path.home().glob('.claude/projects/*/${sid}.jsonl'):
+    print(p); break
+" 2>/dev/null || true)
+    if [ -z "$jsonl_path" ] || [ ! -f "$jsonl_path" ]; then
+        echo "  FAIL — transcript JSONL for session $sid not found" >&2
+        return 1
+    fi
+    local agent_marker
+    agent_marker=$(python3 -c "
+import json
+with open('$jsonl_path') as f:
+    for line in f:
+        try: d = json.loads(line)
+        except: continue
+        if d.get('type') == 'agent-setting':
+            print(d.get('agentSetting','')); break
+" 2>/dev/null || true)
+    if [ "$agent_marker" != "Plan" ]; then
+        echo "  FAIL — JSONL agent-setting marker is '$agent_marker', expected 'Plan'" >&2
+        echo "  This means --agent Plan was accepted but did NOT activate Plan as the session agent." >&2
+        return 1
+    fi
+    echo "  PASS — session_id=$sid  cost=\$$cost  agent-setting=Plan (confirmed in transcript)"
+    return 0
+}
+
+if [ "$SKIP_PROBE" = false ]; then
+    if ! probe_agent_flag; then
+        echo
+        echo "Probe failed. The --agent Plan flag is not behaving as expected in your environment." >&2
+        echo "Re-run with --skip-probe to proceed anyway, or investigate before spending on real pilots." >&2
+        exit 1
+    fi
+fi
+
+if [ "$PROBE_ONLY" = true ]; then
+    echo
+    echo "Probe-only run complete. Exit without running pilots."
+    exit 0
+fi
 
 # Pilot definitions: tier|label|model|session_agent|prompt
 #   session_agent="none" means no --agent flag (relies on natural-language or assistant judgment)

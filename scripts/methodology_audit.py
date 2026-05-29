@@ -63,6 +63,7 @@ def parse_session(path):
     agents = []
     first_ts = last_ts = None
     entrypoint = None
+    session_agent_setting = None
 
     with path.open() as fh:
         for line in fh:
@@ -74,6 +75,8 @@ def parse_session(path):
             except json.JSONDecodeError:
                 continue
             entrypoint = entrypoint or d.get("entrypoint")
+            if d.get("type") == "agent-setting" and not session_agent_setting:
+                session_agent_setting = d.get("agentSetting")
             ts = d.get("timestamp")
             if ts:
                 first_ts = first_ts or ts
@@ -117,6 +120,7 @@ def parse_session(path):
         "first_ts": first_ts,
         "last_ts": last_ts,
         "entrypoint": entrypoint,
+        "session_agent_setting": session_agent_setting,
     }
 
 
@@ -167,8 +171,18 @@ def compliance(rep, meta=None):
     plan_agents = [a for a in rep["agents"] if a["subagent_type"] == "Plan"]
     opus_plans = [a for a in plan_agents if a["model_override"] == "opus"]
     mentioned = set(AT_MENTION_RE.findall(rep["first_user_text"]))
-    intent_plan = "Plan" in mentioned or meta.get("session_agent") == "Plan"
-    session_agent_plan = meta.get("session_agent") == "Plan"
+    # Three sources of "Plan agent intent": @-mention in opening prompt,
+    # side-channel meta from the runner, or the agentSetting marker recorded
+    # in the JSONL itself (ground truth).
+    intent_plan = (
+        "Plan" in mentioned
+        or meta.get("session_agent") == "Plan"
+        or rep.get("session_agent_setting") == "Plan"
+    )
+    session_agent_plan = (
+        meta.get("session_agent") == "Plan"
+        or rep.get("session_agent_setting") == "Plan"
+    )
     worktree = any(a.get("isolation") == "worktree" for a in rep["agents"])
 
     if tier == "T0":
@@ -227,8 +241,9 @@ def _summary_line(rep, pricing, meta=None):
         cost_str = f"  cost ${actual:.4f}  all-opus ${cf:.4f}  savings {savings:.1f}%"
     status, reason = compliance(rep, meta)
     label = "PASS" if status is True else ("FAIL" if status is False else "SKIP")
-    sess_agent = (meta or {}).get("session_agent")
-    sess_agent_str = f"  session_agent: {sess_agent}\n" if sess_agent else ""
+    sess_agent = (meta or {}).get("session_agent") or rep.get("session_agent_setting")
+    sess_agent_src = "meta" if (meta or {}).get("session_agent") else ("jsonl" if rep.get("session_agent_setting") else None)
+    sess_agent_str = f"  session_agent: {sess_agent} (from {sess_agent_src})\n" if sess_agent else ""
     return (
         f"session {rep['session_id'][:8]}  tier={tier}  models=[{models}]\n"
         f"  prompt: {text!r}\n"
