@@ -316,14 +316,14 @@ def main(argv=None):
             if args.session and not any(s in path.stem for s in args.session):
                 continue
             rep = parse_session(path)
-        if since and rep["last_ts"]:
-            try:
-                last = _dt.datetime.fromisoformat(rep["last_ts"].rstrip("Z"))
-            except ValueError:
-                last = None
-            if last and last < since:
-                continue
-        reports.append(rep)
+            if since and rep["last_ts"]:
+                try:
+                    last = _dt.datetime.fromisoformat(rep["last_ts"].rstrip("Z"))
+                except ValueError:
+                    last = None
+                if last and last < since:
+                    continue
+            reports.append(rep)
 
     if args.json:
         out = []
