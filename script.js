@@ -1817,45 +1817,67 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                     .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
                     .style("stroke", isoRingColor);
             }
-            // Visualize the polygon enclosed by the original frontier path
-            // (which bends through p_i) and the alternative path that would
-            // skip p_i (straight from p_{i-1} to p_{i+1}). For interior
-            // points the two paths bound a triangle with vertices
-            // p_{i-1}, p_i, p_{i+1} — exactly the area "carved out" by
-            // routing through p_i instead of going neighbor-to-neighbor.
-            // First/last frontier points have no alternative path past them,
-            // so they fall back to the exclusive-contribution rectangle.
+            // Show the polygon between the WITH-p_i staircase frontier and the
+            // WITHOUT-p_i staircase frontier — exactly the area the frontier
+            // gains by routing through p_i instead of skipping straight from
+            // p_{i-1} to p_{i+1}.
+            //
+            // The Pareto frontier is a staircase step function. For interior
+            // point p_i with previous p_{i-1} and next p_{i+1}:
+            //   WITH p_i path: right at y_{i-1} → down at x_i to y_i → right at y_i to x_{i+1}
+            //   WITHOUT p_i: right at y_{i-1} all the way to x_{i+1} → down to y_{i+1}
+            // The two paths diverge at (x_i, y_{i-1}) and reconverge at (x_{i+1}, y_{i+1}).
+            // The enclosed polygon has 4 vertices in screen space:
+            //   top-left  = (xScale(p_i.x),    yScale(p_{i-1}.y))  ← step-top of p_i's column
+            //   top-right = (xScale(p_{i+1}.x), yScale(p_{i-1}.y)) ← where WITHOUT path turns down
+            //   bot-right = (xScale(p_{i+1}.x), yScale(p_i.y))     ← p_i's y level at next x
+            //   bot-left  = (xScale(p_i.x),    yScale(p_i.y))      ← p_i itself
+            // The top edge is the WITH path's horizontal step; the left edge is the WITH path's
+            // vertical drop to p_i; the bottom edge is the WITH path's horizontal step after p_i;
+            // the right edge is where both paths share the vertical drop to p_{i+1}.
             const hvItem = hvByPoint.get(d);
             if (hvItem && hvItem.contribution > 0) {
                 const idx = frontier.indexOf(d);
                 if (idx > 0 && idx < frontier.length - 1) {
                     const prev = frontier[idx - 1];
                     const next = frontier[idx + 1];
-                    const px = xScale(prev.x), py = yScale(prev.y);
-                    const cx = xScale(d.x), cy = yScale(d.y);
-                    const nx = xScale(next.x), ny = yScale(next.y);
+                    // Screen coords of the four polygon corners.
+                    const xL = xScale(d.x),    xR = xScale(next.x);
+                    const yT = yScale(prev.y),  yB = yScale(d.y);
+                    // Filled area = the polygon between the two staircase paths.
                     hvRectGroup.append("polygon")
                         .attr("class", "hv-contrib-poly hv-contrib-overlay--hover")
-                        .attr("points", `${px},${py} ${cx},${cy} ${nx},${ny}`);
+                        .attr("points", `${xL},${yT} ${xR},${yT} ${xR},${yB} ${xL},${yB}`);
+                    // WITH-p_i staircase path in this region (solid red):
+                    //   vertical drop at x_i from prev.y to d.y (the step p_i creates)
+                    hvRectGroup.append("line")
+                        .attr("class", "hv-with-frontier hv-contrib-overlay--hover")
+                        .attr("x1", xL).attr("y1", yT)
+                        .attr("x2", xL).attr("y2", yB);
+                    //   horizontal run at d.y from x_i to next.x
+                    hvRectGroup.append("line")
+                        .attr("class", "hv-with-frontier hv-contrib-overlay--hover")
+                        .attr("x1", xL).attr("y1", yB)
+                        .attr("x2", xR).attr("y2", yB);
+                    // WITHOUT-p_i staircase path (dashed): horizontal at prev.y from x_i to next.x
                     hvRectGroup.append("line")
                         .attr("class", "hv-alt-frontier hv-contrib-overlay--hover")
-                        .attr("x1", px).attr("y1", py)
-                        .attr("x2", nx).attr("y2", ny);
-                    const bbW = Math.max(px, cx, nx) - Math.min(px, cx, nx);
-                    const bbH = Math.max(py, cy, ny) - Math.min(py, cy, ny);
-                    if (bbW > 36 && bbH > 18) {
+                        .attr("x1", xL).attr("y1", yT)
+                        .attr("x2", xR).attr("y2", yT);
+                    const w = Math.abs(xR - xL), h = Math.abs(yB - yT);
+                    if (w > 24 && h > 12) {
                         hvRectGroup.append("text")
                             .attr("class", "hv-contrib-label hv-contrib-overlay--hover")
-                            .attr("x", (px + cx + nx) / 3)
-                            .attr("y", (py + cy + ny) / 3)
+                            .attr("x", (xL + xR) / 2)
+                            .attr("y", (yT + yB) / 2)
                             .attr("text-anchor", "middle")
                             .attr("dominant-baseline", "middle")
                             .text(`−${(hvItem.fraction * 100).toFixed(1)}%`);
                     }
                 } else {
-                    // Endpoint: no polygon difference defined — fall back to
-                    // the exclusive-contribution rectangle so endpoints still
-                    // get a visible "this would vanish" affordance.
+                    // Endpoint: the staircase polygon is unbounded on one side
+                    // (no previous/next neighbor). Fall back to the exclusive-
+                    // contribution rectangle so endpoints still get a visible affordance.
                     const r = hvItem.rect;
                     const sx0 = xScale(r.x0), sx1 = xScale(r.x1);
                     const sy0 = yScale(r.y0), sy1 = yScale(r.y1);

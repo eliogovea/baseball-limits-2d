@@ -1252,7 +1252,14 @@ input[type="number"].field::-webkit-outer-spin-button {
     stroke: var(--mlb-red);
     stroke-width: 1.5;
     stroke-dasharray: 6 4;
-    stroke-opacity: 0.55;
+    stroke-opacity: 0.7;
+    fill: none;
+    pointer-events: none;
+}
+.hv-with-frontier {
+    stroke: var(--mlb-red);
+    stroke-width: 2;
+    stroke-opacity: 0.8;
     fill: none;
     pointer-events: none;
 }
