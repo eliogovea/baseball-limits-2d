@@ -264,8 +264,13 @@ def main(argv=None):
     p.add_argument("--pilot-meta", help="Directory of per-pilot meta JSON files written by run_methodology_pilot.sh")
     p.add_argument(
         "--transcript-dir",
-        default=str(TRANSCRIPT_DIR),
-        help=f"Directory of *.jsonl transcripts (default: {TRANSCRIPT_DIR})",
+        action="append",
+        default=[],
+        help=f"Directory of *.jsonl transcripts (repeatable; default if none given: {TRANSCRIPT_DIR})",
+    )
+    p.add_argument(
+        "--transcript-glob",
+        help=f"Glob under ~/.claude/projects to scan multiple project dirs at once (e.g. '*pilot-worktrees*')",
     )
     p.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text")
     args = p.parse_args(argv)
@@ -288,19 +293,29 @@ def main(argv=None):
             if sid:
                 meta_by_sid[sid] = m
 
-    tdir = pathlib.Path(args.transcript_dir)
-    if not tdir.is_dir():
-        print(f"transcript dir not found: {tdir}", file=sys.stderr)
+    tdirs = [pathlib.Path(d) for d in args.transcript_dir] or [TRANSCRIPT_DIR]
+    if args.transcript_glob:
+        projects_root = pathlib.Path.home() / ".claude/projects"
+        tdirs.extend(projects_root.glob(args.transcript_glob))
+    missing = [d for d in tdirs if not d.is_dir()]
+    if missing:
+        for d in missing:
+            print(f"transcript dir not found: {d}", file=sys.stderr)
         return 1
     since = None
     if args.since:
         since = _dt.datetime.fromisoformat(args.since)
 
     reports = []
-    for path in sorted(tdir.glob("*.jsonl")):
-        if args.session and not any(s in path.stem for s in args.session):
-            continue
-        rep = parse_session(path)
+    seen = set()
+    for tdir in tdirs:
+        for path in sorted(tdir.glob("*.jsonl")):
+            if path.stem in seen:
+                continue
+            seen.add(path.stem)
+            if args.session and not any(s in path.stem for s in args.session):
+                continue
+            rep = parse_session(path)
         if since and rep["last_ts"]:
             try:
                 last = _dt.datetime.fromisoformat(rep["last_ts"].rstrip("Z"))
