@@ -77,6 +77,20 @@ See [CLAUDE.md](CLAUDE.md) for the broader architecture and dev workflow.
 
 - **"Almost frontier" band** — a faint second layer just inside the frontier showing seasons within, say, 5% of both axis values simultaneously. Shows how deep the talent pool is right behind the record-holders and makes the frontier's exclusivity visible.
 
+- **Distance-to-frontier for non-frontier points** — for every season *off* the frontier, compute the shortest objective-space distance to the nearest red dot (Euclidean, dominance distance, or an additive/multiplicative epsilon indicator). Encode as cloud-dot opacity or surface as a "regret" tooltip line — e.g. "Mike Trout 2018 was 4 HR and 0.012 AVG away from the frontier." Turns the background cloud into a heatmap of near-misses.
+
+- **Knee-point / curvature highlight** — flag frontier seasons where the curve bends sharpest. Knee points are the "sweet spot" records: small sacrifice on either axis for a large gain on the other, often the most interesting tradeoffs in a discussion. Compute via local curvature or the angle between adjacent frontier segments and emphasise those dots with a halo or label.
+
+- **Marginal tradeoff slope at each frontier point** — show the local exchange rate between objectives ("at this point, +1 HR costs roughly -0.004 AVG"). Could appear as a tangent line on hover or as a small annotation on each frontier card. Makes the geometric meaning of the curve concrete in baseball units rather than abstract Pareto-speak.
+
+- **Convex hull vs. concave frontier points** — distinguish "supported" frontier points (those on the convex hull, reachable by any linear utility weighting) from "unsupported" ones sitting in concave dips. Concave-region seasons are often the most distinctive because no scalar weighted average of the two stats would have surfaced them — they're records that only multi-objective thinking finds.
+
+- **Era-vs-era frontier comparison** — pick two year ranges side-by-side and quantify how much one era's frontier dominates the other using coverage / generational distance / inverted generational distance. Answers questions like "does the steroid-era HR-vs-AVG frontier strictly dominate the dead-ball frontier?" with a single number plus a translucent overlay showing where the two curves diverge.
+
+- **Frontier entropy / tradeoff diversity** — a single scalar summarising how spread-out the frontier's tradeoffs are along its length. High entropy = a long, balanced frontier with many distinct niches; low entropy = a short frontier crowded near one extreme. Plotted as a time series alongside the ▶ animation, it would show eras when the sport allowed many different paths to greatness vs. eras when one archetype dominated.
+
+- **Pareto dominance count per season** — for each point, store how many other seasons strictly dominate it (lower is better) and how many it dominates (higher is better). Surfaces "second-place" and "near-elite" seasons that the binary frontier/non-frontier split currently hides; pairs naturally with the Pareto depth idea above as a continuous companion to the discrete layer count.
+
 ### Visual / interaction improvements
 
 - **Kernel density contour lines** — overlay smooth topographic contours on the point cloud using `d3-contour`. Makes the shape of the distribution legible (where do most qualified seasons cluster?) without obscuring individual dots. Especially useful for dense axes like AVG or ERA.
@@ -93,8 +107,18 @@ See [CLAUDE.md](CLAUDE.md) for the broader architecture and dev workflow.
 
 - **World map birthplace view** — a companion mini-map showing where frontier (or highlighted) players were born, one dot per player. Leverages the existing country/birthplace data already in the dataset.
 
+- **Player search box** — a typeahead in the filter panel that jumps the view to a specific player and pins their career highlight. The disambiguated display names already exist in `playerIndex`; just needs an autocomplete index over the existing map. Replaces the current "scroll the frontier card list and hope they're on it" flow with a direct lookup.
+
+- **Reduced-motion support** — honour `prefers-reduced-motion` to skip the frontier ▶ animation's per-step transitions and disable any future animated filter morphs. The current CSS has no `@media (prefers-reduced-motion)` block, so motion-sensitive users get the full animation either way. Easy a11y win.
+
+- **Axis-label glossary tooltips** — hover the X/Y axis label to get the same stat blurb the glossary modal shows, without opening the modal. Especially useful on first visit when users don't yet know that ERA or WHIP on the frontier highlights the *worst* seasons (since the frontier finds the upper-right envelope and those stats are "lower is better"). Surfaces the explanation exactly where the confusion happens.
+
+- **Keyboard navigation across frontier points** — arrow keys cycle through frontier dots left-to-right with focus + tooltip, Enter pins the career highlight, Escape clears it. Makes the chart usable without a mouse, improves accessibility, and gives power users a fast way to scan the whole frontier without precise pointer aim.
+
 ### Data / scope
 
 - **Intra-season / day-by-day animation** — the current ▶ animation steps by full season. With daily cumulative stats (e.g. running HR total after each game) you could watch a record-breaking season unfold game by game. Blocked on data: the Lahman database only publishes season totals; daily logs from BBRef or Statcast come with terms that don't allow bulk redistribution. Worth revisiting if a compatible open dataset appears.
 
 - **Interactive guided tour** — replace (or supplement) the static welcome modal with a step-by-step walkthrough that highlights each UI region in sequence: the chart, the frontier curve, the axis selectors, the year-range animation button, the Loneliness Radius, the filters, and the frontier card list. Libraries like [Shepherd.js](https://shepherdjs.dev/) or a lightweight hand-rolled tooltip-chain would work. Keeps the first-visit experience self-contained without needing external docs.
+
+- **Negro Leagues spotlight mode** — the 2020 Lahman release added Negro Leagues seasons and they're already in the dataset, but the league filter and broad year ranges make them easy to overlook. A dedicated toggle (or league preset) that emphasises Negro Leagues seasons in a distinct colour would surface a slice of baseball history that's currently invisible by default, and would pair well with the era-vs-era frontier comparison idea above.

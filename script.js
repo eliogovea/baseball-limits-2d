@@ -1897,15 +1897,15 @@ function drawIsolationRingPinned(ringGroup, iso, color, plotW, plotH) {
         .attr("class", "isolation-ring-neighbour")
         .attr("cx", iso.nx).attr("cy", iso.ny).attr("r", 4)
         .style("fill", color);
-    // "Loneliness Radius" label: place along the spoke, clamped inside the chart.
-    const labelAngle = -Math.PI / 4; // 45° top-right
-    const lx = Math.min(Math.max(iso.cx + iso.r * Math.cos(labelAngle), 4), plotW - 4);
-    const ly = Math.min(Math.max(iso.cy + iso.r * Math.sin(labelAngle), 14), plotH - 4);
-    ringGroup.append("text")
-        .attr("class", "isolation-ring-label")
-        .attr("x", lx).attr("y", ly)
-        .style("fill", color)
-        .text("Loneliness Radius");
+    // // "Loneliness Radius" label: place along the spoke, clamped inside the chart.
+    // const labelAngle = -Math.PI / 4; // 45° top-right
+    // const lx = Math.min(Math.max(iso.cx + iso.r * Math.cos(labelAngle), 4), plotW - 4);
+    // const ly = Math.min(Math.max(iso.cy + iso.r * Math.sin(labelAngle), 14), plotH - 4);
+    // ringGroup.append("text")
+    //     .attr("class", "isolation-ring-label")
+    //     .attr("x", lx).attr("y", ly)
+    //     .style("fill", color)
+    //     .text("Loneliness Radius");
 }
 
 function escapeHtml(s) {
