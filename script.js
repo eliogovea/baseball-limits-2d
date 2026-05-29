@@ -1817,87 +1817,72 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                     .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
                     .style("stroke", isoRingColor);
             }
-            // Show the polygon between the WITH-p_i staircase frontier and the
-            // WITHOUT-p_i staircase frontier — exactly the area the frontier
-            // gains by routing through p_i instead of skipping straight from
-            // p_{i-1} to p_{i+1}.
-            //
-            // The Pareto frontier is a staircase step function. For interior
-            // point p_i with previous p_{i-1} and next p_{i+1}:
-            //   WITH p_i path: right at y_{i-1} → down at x_i to y_i → right at y_i to x_{i+1}
-            //   WITHOUT p_i: right at y_{i-1} all the way to x_{i+1} → down to y_{i+1}
-            // The two paths diverge at (x_i, y_{i-1}) and reconverge at (x_{i+1}, y_{i+1}).
-            // The enclosed polygon has 4 vertices in screen space:
-            //   top-left  = (xScale(p_i.x),    yScale(p_{i-1}.y))  ← step-top of p_i's column
-            //   top-right = (xScale(p_{i+1}.x), yScale(p_{i-1}.y)) ← where WITHOUT path turns down
-            //   bot-right = (xScale(p_{i+1}.x), yScale(p_i.y))     ← p_i's y level at next x
-            //   bot-left  = (xScale(p_i.x),    yScale(p_i.y))      ← p_i itself
-            // The top edge is the WITH path's horizontal step; the left edge is the WITH path's
-            // vertical drop to p_i; the bottom edge is the WITH path's horizontal step after p_i;
-            // the right edge is where both paths share the vertical drop to p_{i+1}.
+            // Re-sweep the frontier without d, draw both staircase lines, shade the
+            // polygon between them. That polygon is the exact area by which the
+            // frontier shrinks when d is removed — how much d "pushed" the frontier.
             const hvItem = hvByPoint.get(d);
-            if (hvItem && hvItem.contribution > 0) {
-                const idx = frontier.indexOf(d);
-                if (idx > 0 && idx < frontier.length - 1) {
-                    const prev = frontier[idx - 1];
-                    const next = frontier[idx + 1];
-                    // Screen coords of the four polygon corners.
-                    const xL = xScale(d.x),    xR = xScale(next.x);
-                    const yT = yScale(prev.y),  yB = yScale(d.y);
-                    // Filled area = the polygon between the two staircase paths.
-                    hvRectGroup.append("polygon")
-                        .attr("class", "hv-contrib-poly hv-contrib-overlay--hover")
-                        .attr("points", `${xL},${yT} ${xR},${yT} ${xR},${yB} ${xL},${yB}`);
-                    // WITH-p_i staircase path in this region (solid red):
-                    //   vertical drop at x_i from prev.y to d.y (the step p_i creates)
-                    hvRectGroup.append("line")
-                        .attr("class", "hv-with-frontier hv-contrib-overlay--hover")
-                        .attr("x1", xL).attr("y1", yT)
-                        .attr("x2", xL).attr("y2", yB);
-                    //   horizontal run at d.y from x_i to next.x
-                    hvRectGroup.append("line")
-                        .attr("class", "hv-with-frontier hv-contrib-overlay--hover")
-                        .attr("x1", xL).attr("y1", yB)
-                        .attr("x2", xR).attr("y2", yB);
-                    // WITHOUT-p_i staircase path (dashed): horizontal at prev.y from x_i to next.x
-                    hvRectGroup.append("line")
-                        .attr("class", "hv-alt-frontier hv-contrib-overlay--hover")
-                        .attr("x1", xL).attr("y1", yT)
-                        .attr("x2", xR).attr("y2", yT);
-                    const w = Math.abs(xR - xL), h = Math.abs(yB - yT);
-                    if (w > 24 && h > 12) {
-                        hvRectGroup.append("text")
-                            .attr("class", "hv-contrib-label hv-contrib-overlay--hover")
-                            .attr("x", (xL + xR) / 2)
-                            .attr("y", (yT + yB) / 2)
-                            .attr("text-anchor", "middle")
-                            .attr("dominant-baseline", "middle")
-                            .text(`−${(hvItem.fraction * 100).toFixed(1)}%`);
+            if (hvItem) {
+                // 1. Frontier without d (re-sweep `unique` excluding d).
+                const altFrontier = [];
+                for (const p of unique) {
+                    if (p === d) continue;
+                    const py = p.y * ySign;
+                    while (altFrontier.length && altFrontier[altFrontier.length-1].y * ySign < py)
+                        altFrontier.pop();
+                    if (altFrontier.length &&
+                        altFrontier[altFrontier.length-1].y === p.y &&
+                        altFrontier[altFrontier.length-1].x * xSign < p.x * xSign)
+                        altFrontier.pop();
+                    altFrontier.push(p);
+                }
+
+                // 2. Build staircase path points [x, y] in screen space.
+                //    step-after: for each frontier point, go horizontal to its x then
+                //    vertical to its y.  Extend left/right to chart edges so both
+                //    paths share the same horizontal extent.
+                const leftX = 0, rightX = plotW;
+                function staircasePts(fr) {
+                    if (!fr.length) return [[leftX, plotH], [rightX, plotH]];
+                    const pts = [];
+                    let curY = yScale(fr[0].y);
+                    pts.push([leftX, curY]);
+                    for (const p of fr) {
+                        const sx = xScale(p.x), sy = yScale(p.y);
+                        pts.push([sx, curY]);
+                        pts.push([sx, sy]);
+                        curY = sy;
                     }
-                } else {
-                    // Endpoint: the staircase polygon is unbounded on one side
-                    // (no previous/next neighbor). Fall back to the exclusive-
-                    // contribution rectangle so endpoints still get a visible affordance.
-                    const r = hvItem.rect;
-                    const sx0 = xScale(r.x0), sx1 = xScale(r.x1);
-                    const sy0 = yScale(r.y0), sy1 = yScale(r.y1);
-                    const x = Math.min(sx0, sx1);
-                    const w = Math.abs(sx1 - sx0);
-                    const y = Math.min(sy0, sy1);
-                    const h = Math.abs(sy1 - sy0);
-                    hvRectGroup.append("rect")
-                        .attr("class", "hv-contrib-rect hv-contrib-overlay--hover")
-                        .attr("x", x).attr("y", y)
-                        .attr("width", w).attr("height", h);
-                    if (w > 36 && h > 18) {
-                        hvRectGroup.append("text")
-                            .attr("class", "hv-contrib-label hv-contrib-overlay--hover")
-                            .attr("x", x + w / 2)
-                            .attr("y", y + h / 2)
-                            .attr("text-anchor", "middle")
-                            .attr("dominant-baseline", "middle")
-                            .text(`−${(hvItem.fraction * 100).toFixed(1)}%`);
-                    }
+                    pts.push([rightX, curY]);
+                    return pts;
+                }
+
+                const fPts  = staircasePts(frontier);
+                const afPts = staircasePts(altFrontier);
+
+                // 3. Alt-frontier staircase as a dashed path.
+                hvRectGroup.append("path")
+                    .attr("class", "hv-alt-frontier hv-contrib-overlay--hover")
+                    .attr("d", "M " + afPts.map(p => p.join(",")).join(" L "));
+
+                // 4. Shaded polygon: trace frontier top-to-bottom (left→right),
+                //    then altFrontier bottom-to-top (right→left), close.
+                //    Since frontier ≥ altFrontier everywhere, this yields the
+                //    exact area d contributes.
+                const polyPts = [...fPts, ...[...afPts].reverse()];
+                hvRectGroup.append("polygon")
+                    .attr("class", "hv-contrib-poly hv-contrib-overlay--hover")
+                    .attr("points", polyPts.map(p => p.join(",")).join(" "));
+
+                // 5. Percentage label near d's position.
+                const hvItem2 = hvByPoint.get(d);
+                if (hvItem2) {
+                    hvRectGroup.append("text")
+                        .attr("class", "hv-contrib-label hv-contrib-overlay--hover")
+                        .attr("x", xScale(d.x) + 8)
+                        .attr("y", yScale(d.y) - 8)
+                        .attr("text-anchor", "start")
+                        .attr("dominant-baseline", "auto")
+                        .text(`−${(hvItem2.fraction * 100).toFixed(1)}%`);
                 }
             }
         }
