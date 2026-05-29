@@ -1660,6 +1660,11 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             .style("stroke", showWorstFrontier ? "#8b5cf6" : null);
     }
 
+    // Overlay group for the hovered frontier point's exclusive-contribution rectangle.
+    // Mounted under the dots and isolation rings but above the cloud so the rect
+    // is visible but doesn't steal hit targets.
+    const hvRectGroup = g.append("g").attr("class", "hv-contrib-overlay");
+
     const pointRadius = unique.length > 2000 ? 3 : (unique.length > 500 ? 4 : 5);
     const frontierRadius = 6;
     const FRONTIER_R_MIN = 4, FRONTIER_R_MAX = 11;
@@ -1803,6 +1808,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         positionTooltip(event, tooltip);
         // Show hover ring for frontier points (skip if a pin is already shown)
         ringGroup.select(".isolation-ring--hover").remove();
+        hvRectGroup.select(".hv-contrib-rect--hover").remove();
         if (!isolationPinned && frontierSet.has(d)) {
             const iso = isolationMap.get(d);
             if (iso && iso.r > 0) {
@@ -1811,12 +1817,31 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                     .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
                     .style("stroke", isoRingColor);
             }
+            // Highlight the exclusive-contribution rectangle that would
+            // disappear if this point were removed from the frontier.
+            const hvItem = hvByPoint.get(d);
+            if (hvItem && hvItem.contribution > 0) {
+                const r = hvItem.rect;
+                const sx0 = xScale(r.x0), sx1 = xScale(r.x1);
+                const sy0 = yScale(r.y0), sy1 = yScale(r.y1);
+                const x = Math.min(sx0, sx1);
+                const w = Math.abs(sx1 - sx0);
+                const y = Math.min(sy0, sy1);
+                const h = Math.abs(sy1 - sy0);
+                hvRectGroup.append("rect")
+                    .attr("class", "hv-contrib-rect hv-contrib-rect--hover")
+                    .attr("x", x).attr("y", y)
+                    .attr("width", w).attr("height", h);
+            }
         }
     };
     const hideTooltip = (force = false) => {
         if (tooltipPinned && !force) return;
         tooltip.setAttribute("data-visible", "false");
-        if (!isolationPinned) ringGroup.select(".isolation-ring--hover").remove();
+        if (!isolationPinned) {
+            ringGroup.select(".isolation-ring--hover").remove();
+            hvRectGroup.select(".hv-contrib-rect--hover").remove();
+        }
     };
 
     // Brush layer: drag a rectangle on empty chart area to zoom in. Mounted

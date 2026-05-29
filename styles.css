@@ -1234,6 +1234,14 @@ input[type="number"].field::-webkit-outer-spin-button {
     border-bottom: 1px dashed var(--border);
     margin-bottom: 4px;
 }
+.hv-contrib-rect {
+    fill: var(--mlb-red);
+    fill-opacity: 0.12;
+    stroke: var(--mlb-red);
+    stroke-width: 1.2;
+    stroke-dasharray: 4 3;
+    pointer-events: none;
+}
 .frontier-card-name {
     font-weight: 600;
     color: var(--text);
