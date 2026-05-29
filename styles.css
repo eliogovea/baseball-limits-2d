@@ -1242,6 +1242,12 @@ input[type="number"].field::-webkit-outer-spin-button {
     stroke-dasharray: 4 3;
     pointer-events: none;
 }
+.hv-contrib-poly {
+    fill: var(--mlb-red);
+    fill-opacity: 0.22;
+    stroke: none;
+    pointer-events: none;
+}
 .hv-alt-frontier {
     stroke: var(--mlb-red);
     stroke-width: 1.5;

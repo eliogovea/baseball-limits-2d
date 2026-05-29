@@ -1808,7 +1808,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         positionTooltip(event, tooltip);
         // Show hover ring for frontier points (skip if a pin is already shown)
         ringGroup.select(".isolation-ring--hover").remove();
-        hvRectGroup.select(".hv-contrib-rect--hover").remove();
+        hvRectGroup.selectAll(".hv-contrib-overlay--hover").remove();
         if (!isolationPinned && frontierSet.has(d)) {
             const iso = isolationMap.get(d);
             if (iso && iso.r > 0) {
@@ -1817,44 +1817,65 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                     .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
                     .style("stroke", isoRingColor);
             }
-            // Visualize the area that vanishes if this point is removed from
-            // the frontier. Three pieces tell the before/after story:
-            //   (1) the exclusive-contribution rectangle (the area lost)
-            //   (2) the dashed "alternative" frontier segment connecting the
-            //       previous and next frontier points directly — where the
-            //       curve would be without this point (interior points only)
-            //   (3) a percentage label inside the rect so the magnitude is
-            //       legible at a glance
+            // Visualize the polygon enclosed by the original frontier path
+            // (which bends through p_i) and the alternative path that would
+            // skip p_i (straight from p_{i-1} to p_{i+1}). For interior
+            // points the two paths bound a triangle with vertices
+            // p_{i-1}, p_i, p_{i+1} — exactly the area "carved out" by
+            // routing through p_i instead of going neighbor-to-neighbor.
+            // First/last frontier points have no alternative path past them,
+            // so they fall back to the exclusive-contribution rectangle.
             const hvItem = hvByPoint.get(d);
             if (hvItem && hvItem.contribution > 0) {
-                const r = hvItem.rect;
-                const sx0 = xScale(r.x0), sx1 = xScale(r.x1);
-                const sy0 = yScale(r.y0), sy1 = yScale(r.y1);
-                const x = Math.min(sx0, sx1);
-                const w = Math.abs(sx1 - sx0);
-                const y = Math.min(sy0, sy1);
-                const h = Math.abs(sy1 - sy0);
-                hvRectGroup.append("rect")
-                    .attr("class", "hv-contrib-rect hv-contrib-rect--hover")
-                    .attr("x", x).attr("y", y)
-                    .attr("width", w).attr("height", h);
                 const idx = frontier.indexOf(d);
                 if (idx > 0 && idx < frontier.length - 1) {
                     const prev = frontier[idx - 1];
                     const next = frontier[idx + 1];
+                    const px = xScale(prev.x), py = yScale(prev.y);
+                    const cx = xScale(d.x), cy = yScale(d.y);
+                    const nx = xScale(next.x), ny = yScale(next.y);
+                    hvRectGroup.append("polygon")
+                        .attr("class", "hv-contrib-poly hv-contrib-overlay--hover")
+                        .attr("points", `${px},${py} ${cx},${cy} ${nx},${ny}`);
                     hvRectGroup.append("line")
-                        .attr("class", "hv-alt-frontier hv-alt-frontier--hover")
-                        .attr("x1", xScale(prev.x)).attr("y1", yScale(prev.y))
-                        .attr("x2", xScale(next.x)).attr("y2", yScale(next.y));
-                }
-                if (w > 36 && h > 18) {
-                    hvRectGroup.append("text")
-                        .attr("class", "hv-contrib-label hv-contrib-rect--hover")
-                        .attr("x", x + w / 2)
-                        .attr("y", y + h / 2)
-                        .attr("text-anchor", "middle")
-                        .attr("dominant-baseline", "middle")
-                        .text(`−${(hvItem.fraction * 100).toFixed(1)}%`);
+                        .attr("class", "hv-alt-frontier hv-contrib-overlay--hover")
+                        .attr("x1", px).attr("y1", py)
+                        .attr("x2", nx).attr("y2", ny);
+                    const bbW = Math.max(px, cx, nx) - Math.min(px, cx, nx);
+                    const bbH = Math.max(py, cy, ny) - Math.min(py, cy, ny);
+                    if (bbW > 36 && bbH > 18) {
+                        hvRectGroup.append("text")
+                            .attr("class", "hv-contrib-label hv-contrib-overlay--hover")
+                            .attr("x", (px + cx + nx) / 3)
+                            .attr("y", (py + cy + ny) / 3)
+                            .attr("text-anchor", "middle")
+                            .attr("dominant-baseline", "middle")
+                            .text(`−${(hvItem.fraction * 100).toFixed(1)}%`);
+                    }
+                } else {
+                    // Endpoint: no polygon difference defined — fall back to
+                    // the exclusive-contribution rectangle so endpoints still
+                    // get a visible "this would vanish" affordance.
+                    const r = hvItem.rect;
+                    const sx0 = xScale(r.x0), sx1 = xScale(r.x1);
+                    const sy0 = yScale(r.y0), sy1 = yScale(r.y1);
+                    const x = Math.min(sx0, sx1);
+                    const w = Math.abs(sx1 - sx0);
+                    const y = Math.min(sy0, sy1);
+                    const h = Math.abs(sy1 - sy0);
+                    hvRectGroup.append("rect")
+                        .attr("class", "hv-contrib-rect hv-contrib-overlay--hover")
+                        .attr("x", x).attr("y", y)
+                        .attr("width", w).attr("height", h);
+                    if (w > 36 && h > 18) {
+                        hvRectGroup.append("text")
+                            .attr("class", "hv-contrib-label hv-contrib-overlay--hover")
+                            .attr("x", x + w / 2)
+                            .attr("y", y + h / 2)
+                            .attr("text-anchor", "middle")
+                            .attr("dominant-baseline", "middle")
+                            .text(`−${(hvItem.fraction * 100).toFixed(1)}%`);
+                    }
                 }
             }
         }
@@ -1864,7 +1885,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         tooltip.setAttribute("data-visible", "false");
         if (!isolationPinned) {
             ringGroup.select(".isolation-ring--hover").remove();
-            hvRectGroup.select(".hv-contrib-rect--hover").remove();
+            hvRectGroup.selectAll(".hv-contrib-overlay--hover").remove();
         }
     };
 
