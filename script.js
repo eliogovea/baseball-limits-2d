@@ -123,6 +123,7 @@ let tooltipPinned = false;
 let viewDomain = null;          // {x: [a,b], y: [c,d]} | null
 let zoomMode = "off";
 let showWorstFrontier = false;  // toggle: false = best (default), true = worst
+let hvEncodingEnabled = false;  // toggle: scale frontier dot radius by hypervolume contribution
 let isolationPinned = null;     // data-point reference for the pinned isolation ring, or null
 let animTimer = null;           // setInterval handle while frontier animation is running
 
@@ -131,7 +132,7 @@ let animTimer = null;           // setInterval handle while frontier animation i
 const URL_DEFAULTS = {
     x: "HR", y: "SB", sy: "1920", ey: "2024", pa: "0",
     m: "season", lg: "all", bt: "all", co: "all",
-    tm: "all", fr: "all", hl: "",
+    tm: "all", fr: "all", hl: "", hv: "0",
 };
 
 // Per-dataset metadata. The Stats toggle in the UI switches `activeDataset`;
@@ -432,6 +433,15 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         });
     });
 
+    // Hypervolume contribution dot-size encoding
+    const hvCb = document.getElementById("hv-contrib-toggle");
+    if (hvCb) {
+        hvCb.addEventListener("change", () => {
+            hvEncodingEnabled = hvCb.checked;
+            refreshChart();
+        });
+    }
+
     const loadingIndicator = document.getElementById("loading-indicator");
     let pendingRender = null;
 
@@ -728,6 +738,11 @@ function applyUrlState() {
         setSelect("franchise-select", u.fr);
     }
     if (u.hl) { u.hl.split(",").forEach(id => addHighlight(id.trim())); }
+    if (u.hv === "1") {
+        hvEncodingEnabled = true;
+        const cb = document.getElementById("hv-contrib-toggle");
+        if (cb) cb.checked = true;
+    }
 }
 
 let urlWriteTimer = null;
@@ -747,6 +762,7 @@ function writeUrlState(state) {
             tm: state.team,
             fr: state.franchise,
             hl: [...careerHighlights.keys()].join(","),
+            hv: hvEncodingEnabled ? "1" : "0",
         };
         // Drop defaults to keep the URL short.
         const parts = [];
@@ -1550,7 +1566,21 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     }
     const frontierSet = new Set(frontier);
 
-    renderFrontierCards(frontier, xDim, yDim, formatStat, filtered.length, mode);
+    const hvInfo = computeHvContributions(frontier, xSign, ySign, unique);
+    const hvByPoint = new Map(hvInfo.items.map(it => [it.point, it]));
+    window.__bl2d_hv = {
+        contributions: hvInfo.items.map(it => ({
+            playerID: it.point.playerID, year: it.point.year,
+            x: it.point.x, y: it.point.y,
+            contribution: it.contribution, fraction: it.fraction,
+        })),
+        total: hvInfo.totalHv,
+        reference: hvInfo.refPoint,
+        xSign, ySign, xDim, yDim,
+    };
+    window.__bl2d_computeHv = computeHvContributions;
+
+    renderFrontierCards(frontier, xDim, yDim, formatStat, filtered.length, mode, hvByPoint);
 
     if (unique.length === 0) {
         svg.append("text")
@@ -1632,7 +1662,15 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
 
     const pointRadius = unique.length > 2000 ? 3 : (unique.length > 500 ? 4 : 5);
     const frontierRadius = 6;
-    const hoverRadius = Math.max(pointRadius + 4, 8);
+    const FRONTIER_R_MIN = 4, FRONTIER_R_MAX = 11;
+    const maxContrib = hvInfo.items.reduce((m, it) => it.contribution > m ? it.contribution : m, 0) || 1;
+    const radiusFor = d => {
+        if (!hvEncodingEnabled) return frontierRadius;
+        const it = hvByPoint.get(d);
+        if (!it) return frontierRadius;
+        return FRONTIER_R_MIN + (FRONTIER_R_MAX - FRONTIER_R_MIN) * Math.sqrt(it.contribution / maxContrib);
+    };
+    const hoverRadius = Math.max(pointRadius + 4, hvEncodingEnabled ? FRONTIER_R_MAX + 4 : 8);
 
     const regular = unique.filter(d => !frontierSet.has(d));
     const special = unique.filter(d => frontierSet.has(d));
@@ -1679,12 +1717,16 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         .attr("class", "special-point")
         .attr("cx", d => xScale(d.x))
         .attr("cy", d => yScale(d.y))
-        .attr("r", frontierRadius)
+        .attr("r", radiusFor)
         .style("fill", d => careerHighlights.get(d.playerID) || frontierColor);
 
     // On-chart frontier labels: greedy collision avoidance, mobile shows
     // only the two extreme endpoints so small viewports stay readable.
-    const labels = layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, frontierRadius, width < 480);
+    // HV radius applies only to .special-point; career-trail dots stay at the
+    // constant size set by pointRadius+3 so the gold layer remains a clean
+    // per-season encoding.
+    const labelRadius = hvEncodingEnabled ? FRONTIER_R_MAX : frontierRadius;
+    const labels = layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, labelRadius, width < 480);
     g.append("g")
         .attr("class", "frontier-labels")
         .selectAll("text")
@@ -1734,6 +1776,13 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const showTooltip = (event, d) => {
         const seasons = filtered.filter(p => p.x === d.x && p.y === d.y);
         const head = `<div class="tooltip-header">${xDim} ${formatStat(xDim, d.x)} · ${yDim} ${formatStat(yDim, d.y)}</div>`;
+        let hvLine = "";
+        if (frontierSet.has(d) && hvByPoint.has(d)) {
+            const it = hvByPoint.get(d);
+            const rateStats = activeDataset().rateStats || new Set();
+            const formatHv = (v) => (rateStats.has(xDim) || rateStats.has(yDim)) ? v.toFixed(4) : v.toLocaleString(undefined, { maximumFractionDigits: 1 });
+            hvLine = `<div class="tooltip-subheader">HV contribution: ${formatHv(it.contribution)} (${(it.fraction * 100).toFixed(1)}%)</div>`;
+        }
         const visible = seasons.slice(0, 6);
         const body = visible.map(s => {
             const meta = mode === "career"
@@ -1749,7 +1798,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         const more = seasons.length > visible.length
             ? `<div class="tooltip-more">+${seasons.length - visible.length} more season${seasons.length - visible.length === 1 ? "" : "s"}</div>`
             : "";
-        tooltip.innerHTML = head + body + more;
+        tooltip.innerHTML = head + hvLine + body + more;
         tooltip.setAttribute("data-visible", "true");
         positionTooltip(event, tooltip);
         // Show hover ring for frontier points (skip if a pin is already shown)
@@ -2016,7 +2065,7 @@ function layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, pointR, is
 }
 
 
-function renderFrontierCards(frontier, xDim, yDim, formatStat, totalUnits, mode = "season") {
+function renderFrontierCards(frontier, xDim, yDim, formatStat, totalUnits, mode = "season", hvByPoint = null) {
     const countEl = document.getElementById("frontier-count");
     const cardsEl = document.getElementById("frontier-cards");
     if (!countEl || !cardsEl) return;
@@ -2046,8 +2095,69 @@ function renderFrontierCards(frontier, xDim, yDim, formatStat, totalUnits, mode 
                 <div class="frontier-card-year">${yearLabel}</div>
                 <div class="frontier-card-team">${subLine}</div>
                 <div class="frontier-card-stats">${xDim} ${formatStat(xDim, p.x)} · ${yDim} ${formatStat(yDim, p.y)}</div>
+                ${hvByPoint && hvByPoint.has(p) ? `<div class="frontier-card-hv">Owns ${(hvByPoint.get(p).fraction * 100).toFixed(1)}% of dominated area</div>` : ""}
                 <div class="frontier-card-era">${era ? era.name : "—"}</div>
             </article>
         `;
     }).join("");
+}
+
+// Leave-one-out hypervolume contribution for a 2D Pareto frontier.
+// Returns per-point exclusive rectangle area relative to a reference point.
+// Invariants: Σ items[i].contribution === totalHv (within FP tolerance);
+// for n=1, items[0].contribution === totalHv;
+// removing items[i].point and recomputing yields totalHv − items[i].contribution.
+// O(F), F = frontier.length.
+function computeHvContributions(frontier, xSign, ySign, unique) {
+    if (!frontier || frontier.length === 0) {
+        return { refPoint: { x: 0, y: 0 }, totalHv: 0, items: [] };
+    }
+    const universe = (unique && unique.length) ? unique : frontier;
+    let xMinS = Infinity, yMinS = Infinity, xMaxS = -Infinity, yMaxS = -Infinity;
+    for (const p of universe) {
+        const sx = p.x * xSign, sy = p.y * ySign;
+        if (sx < xMinS) xMinS = sx;
+        if (sy < yMinS) yMinS = sy;
+        if (sx > xMaxS) xMaxS = sx;
+        if (sy > yMaxS) yMaxS = sy;
+    }
+    const epsX = Math.max(1e-9, (xMaxS - xMinS) * 1e-6);
+    const epsY = Math.max(1e-9, (yMaxS - yMinS) * 1e-6);
+    const Rx = xMinS - epsX;
+    const Ry = yMinS - epsY;
+    const refPoint = { x: Rx * xSign, y: Ry * ySign };
+
+    // frontier is x-asc, y non-increasing in signed space (post-sweep).
+    const n = frontier.length;
+    const items = new Array(n);
+    let totalHv = 0;
+    for (let i = 0; i < n; i++) {
+        const p = frontier[i];
+        const xsI = p.x * xSign;
+        const ysI = p.y * ySign;
+        const xsPrev = i === 0 ? Rx : frontier[i - 1].x * xSign;
+        const ysNext = i === n - 1 ? Ry : frontier[i + 1].y * ySign;
+        const w = xsI - xsPrev;
+        const h = ysI - ysNext;
+        const contribution = w * h;
+        totalHv += contribution;
+        // Reconstruct rect in original (un-signed) coords.
+        const xPrev = xsPrev * xSign;
+        const yNext = ysNext * ySign;
+        items[i] = {
+            point: p,
+            contribution,
+            fraction: 0,  // filled in once totalHv is known
+            rect: {
+                x0: Math.min(xPrev, p.x),
+                x1: Math.max(xPrev, p.x),
+                y0: Math.min(yNext, p.y),
+                y1: Math.max(yNext, p.y),
+            },
+        };
+    }
+    if (totalHv > 0) {
+        for (const it of items) it.fraction = it.contribution / totalHv;
+    }
+    return { refPoint, totalHv, items };
 }

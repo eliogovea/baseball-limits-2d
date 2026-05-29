@@ -1204,10 +1204,35 @@ input[type="number"].field::-webkit-outer-spin-button {
     border-radius: var(--radius-sm);
     display: grid;
     grid-template-columns: 1fr auto;
-    grid-template-rows: auto auto auto;
+    grid-template-rows: auto auto auto auto;
     column-gap: 8px;
     row-gap: 2px;
     align-items: baseline;
+}
+.frontier-card-hv {
+    grid-column: 1 / -1;
+    grid-row: 4;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+.hv-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text);
+    cursor: pointer;
+    user-select: none;
+}
+.hv-toggle input[type="checkbox"] { margin: 0; }
+.tooltip-subheader {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    padding-bottom: 4px;
+    border-bottom: 1px dashed var(--border);
+    margin-bottom: 4px;
 }
 .frontier-card-name {
     font-weight: 600;
