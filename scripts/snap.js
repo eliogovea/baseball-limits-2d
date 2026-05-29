@@ -76,6 +76,9 @@ async function main() {
             deviceScaleFactor: 1,
             mobile: width < 768,
         });
+        // TODO: support headless dark-mode capture via
+        //   await send('Emulation.setEmulatedMedia', { features: [{name:'prefers-color-scheme', value:'dark'}] });
+        // Wired through a --color-scheme flag would unblock @media (prefers-color-scheme: dark) verification.
         await send('Page.navigate', { url });
 
         // Wait for load + extra time for async decode/render.

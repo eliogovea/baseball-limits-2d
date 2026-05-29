@@ -927,6 +927,9 @@ function setupControlsToggle() {
     });
 }
 
+let glossaryShow = null;
+let glossaryHide = null;
+
 const GLOSSARY = {
     PA:   { name: "Plate Appearances",     formula: "AB + BB + HBP + SH + SF" },
     G:    { name: "Games Played",          formula: "Games in which the player appeared" },
@@ -1311,6 +1314,9 @@ function setupGlossary() {
             }
         });
     });
+
+    glossaryShow = show;
+    glossaryHide = hide;
 }
 
 
@@ -1589,19 +1595,30 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         .attr("class", "axis axis-y")
         .call(d3.axisLeft(yScale).ticks(Math.max(4, Math.floor(plotH / 50))));
 
-    g.append("text")
+    const xTitleEl = g.append("text")
         .attr("class", "axis-title")
         .attr("x", plotW / 2)
         .attr("y", plotH + 36)
         .attr("text-anchor", "middle")
         .text(xSign === -1 ? `${xDim} ↓` : xDim);
-    g.append("text")
+    const yTitleEl = g.append("text")
         .attr("class", "axis-title")
         .attr("transform", `rotate(-90)`)
         .attr("x", -plotH / 2)
         .attr("y", -38)
         .attr("text-anchor", "middle")
         .text(ySign === -1 ? `${yDim} ↓` : yDim);
+
+    if (GLOSSARY[xDim]) {
+        xTitleEl.style("cursor", "pointer")
+            .on("mouseenter", function() { if (glossaryShow) glossaryShow(this, xDim); })
+            .on("mouseleave", function() { if (glossaryHide) glossaryHide(); });
+    }
+    if (GLOSSARY[yDim]) {
+        yTitleEl.style("cursor", "pointer")
+            .on("mouseenter", function() { if (glossaryShow) glossaryShow(this, yDim); })
+            .on("mouseleave", function() { if (glossaryHide) glossaryHide(); });
+    }
 
     // Frontier connecting line first (under points).
     if (frontier.length > 1) {
