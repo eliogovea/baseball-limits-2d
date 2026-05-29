@@ -31,6 +31,12 @@ CLEANUP=false
 PROBE_ONLY=false
 SKIP_PROBE=false
 
+# Tools the pilots need beyond what --permission-mode acceptEdits gives them.
+# Scope: file ops + the methodology's verification-floor shell commands
+# (snap.js workflow, server start/stop, csv inspection). Keep tight — broader
+# patterns expand the blast radius even inside a worktree.
+ALLOWED_TOOLS="Read,Edit,Write,Bash(python3 -m http.server *),Bash(python3 -m http.server),Bash(node scripts/snap.js *),Bash(pkill *),Bash(curl *),Bash(grep *),Bash(ls *),Bash(wc *),Bash(md5 *),Bash(echo *),Bash(sleep *),Bash(mkdir *),Bash(git status *),Bash(git status),Bash(git diff *),Bash(git diff),Bash(git log *)"
+
 usage() {
     sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
     exit "${1:-0}"
@@ -97,12 +103,12 @@ probe_agent_flag() {
 
     echo "=== Probe: claude -p --agent Plan --model haiku ==="
     if [ "$EXECUTE" = false ]; then
-        echo "  command:  claude -p $(printf '%q' "$prompt") --agent Plan --model haiku --permission-mode acceptEdits --output-format json"
+        echo "  command:  claude -p $(printf '%q' "$prompt") --agent Plan --model haiku --permission-mode acceptEdits --allowedTools <list> --output-format json"
         echo "  (dry-run — not executed)"
         return 0
     fi
 
-    if ! claude -p "$prompt" --agent Plan --model haiku --permission-mode acceptEdits --output-format json > "$out_file" 2>&1; then
+    if ! claude -p "$prompt" --agent Plan --model haiku --permission-mode acceptEdits --allowedTools "$ALLOWED_TOOLS" --output-format json > "$out_file" 2>&1; then
         echo "  FAIL — claude -p --agent Plan exited non-zero. See $out_file" >&2
         return 1
     fi
@@ -187,7 +193,7 @@ run_pilot() {
     echo "  prompt:   $prompt"
 
     # Compose the claude -p command
-    local claude_cmd=("claude" "-p" "$prompt" "--model" "$model" "--permission-mode" "acceptEdits" "--output-format" "json")
+    local claude_cmd=("claude" "-p" "$prompt" "--model" "$model" "--permission-mode" "acceptEdits" "--allowedTools" "$ALLOWED_TOOLS" "--output-format" "json")
     if [ "$agent" != "none" ]; then
         claude_cmd+=("--agent" "$agent")
     fi
