@@ -1673,10 +1673,67 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             .style("stroke", showWorstFrontier ? "#8b5cf6" : null);
     }
 
-    // Overlay group for the hovered frontier point's exclusive-contribution rectangle.
-    // Mounted under the dots and isolation rings but above the cloud so the rect
-    // is visible but doesn't steal hit targets.
+    // Overlay group for HV contribution polygons (hover + pinned player).
     const hvRectGroup = g.append("g").attr("class", "hv-contrib-overlay");
+
+    const hvPlayerMap = hvInfo.playerContribs || new Map();
+    const frontierSeasonCount = new Map();
+    for (const p of frontier) frontierSeasonCount.set(p.playerID, (frontierSeasonCount.get(p.playerID) || 0) + 1);
+
+    // Staircase path helper (screen coords) shared by hover and pinned overlays.
+    function staircasePts(fr) {
+        if (!fr.length) return [[0, plotH], [plotW, plotH]];
+        const pts = [[0, yScale(fr[0].y)]];
+        for (let i = 0; i < fr.length; i++) {
+            pts.push([xScale(fr[i].x), yScale(fr[i].y)]);
+            pts.push([xScale(fr[i].x), i < fr.length - 1 ? yScale(fr[i + 1].y) : plotH]);
+        }
+        pts.push([plotW, plotH]);
+        return pts;
+    }
+
+    // Draw alt-frontier line + shaded polygon + label into hvRectGroup.
+    function drawHvOverlay(altFr, suffix, labelX, labelY, fraction) {
+        const fPts  = staircasePts(frontier);
+        const afPts = staircasePts(altFr);
+        hvRectGroup.append("path")
+            .attr("class", `hv-alt-frontier hv-contrib-overlay--${suffix}`)
+            .attr("d", "M " + afPts.map(p => p.join(",")).join(" L "));
+        hvRectGroup.append("polygon")
+            .attr("class", `hv-contrib-poly hv-contrib-overlay--${suffix}`)
+            .attr("points", [...fPts, ...[...afPts].reverse()].map(p => p.join(",")).join(" "));
+        if (fraction != null) {
+            hvRectGroup.append("text")
+                .attr("class", `hv-contrib-label hv-contrib-overlay--${suffix}`)
+                .attr("x", labelX + 8)
+                .attr("y", labelY - 8)
+                .attr("text-anchor", "start")
+                .text(`−${(fraction * 100).toFixed(1)}%`);
+        }
+    }
+
+    // Re-sweep unique excluding all points satisfying the predicate.
+    function sweepExcluding(exclude) {
+        const fr = [];
+        for (const p of unique) {
+            if (exclude(p)) continue;
+            const py = p.y * ySign;
+            while (fr.length && fr[fr.length - 1].y * ySign < py) fr.pop();
+            if (fr.length && fr[fr.length - 1].y === p.y &&
+                fr[fr.length - 1].x * xSign < p.x * xSign) fr.pop();
+            fr.push(p);
+        }
+        return fr;
+    }
+
+    // HV of a frontier using the same reference point as computeHvContributions.
+    const Rx_s = hvInfo.refPoint.x * xSign;
+    const Ry_s = hvInfo.refPoint.y * ySign;
+    function hvOf(fr) {
+        let hv = 0, xPrev = Rx_s;
+        for (const p of fr) { hv += (p.x * xSign - xPrev) * (p.y * ySign - Ry_s); xPrev = p.x * xSign; }
+        return hv;
+    }
 
     const pointRadius = unique.length > 2000 ? 3 : (unique.length > 500 ? 4 : 5);
     const frontierRadius = 6;
@@ -1776,16 +1833,30 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
 
     const ringGroup = g.append("g").attr("class", "isolation-ring-group");
 
-    // Restore pinned ring across redraws: find the matching current frontier point.
+    // Restore pinned isolation ring across redraws.
     if (isolationPinned) {
         const match = frontier.find(p =>
             p.x === isolationPinned.x && p.y === isolationPinned.y &&
             p.playerID === isolationPinned.playerID);
         if (match) {
-            const iso = isolationMap.get(match);
-            drawIsolationRingPinned(ringGroup, iso, isoRingColor, plotW, plotH);
+            drawIsolationRingPinned(ringGroup, isolationMap.get(match), isoRingColor, plotW, plotH);
         } else {
             isolationPinned = null;
+        }
+    }
+
+    // When players are career-highlighted, show the combined polygon for what
+    // the frontier loses if all their seasons were removed.
+    if (careerHighlights.size > 0) {
+        const highlightedPids = new Set(careerHighlights.keys());
+        const frSeasons = frontier.filter(p => highlightedPids.has(p.playerID));
+        if (frSeasons.length > 0) {
+            const altFr = sweepExcluding(p => highlightedPids.has(p.playerID));
+            const combinedFrac = hvInfo.totalHv > 0
+                ? (hvInfo.totalHv - hvOf(altFr)) / hvInfo.totalHv : 0;
+            const lx = frSeasons.reduce((s, p) => s + xScale(p.x), 0) / frSeasons.length;
+            const ly = frSeasons.reduce((s, p) => s + yScale(p.y), 0) / frSeasons.length;
+            drawHvOverlay(altFr, "pinned", lx, ly, combinedFrac);
         }
     }
 
@@ -1800,6 +1871,11 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             const rateStats = activeDataset().rateStats || new Set();
             const formatHv = (v) => (rateStats.has(xDim) || rateStats.has(yDim)) ? v.toFixed(4) : v.toLocaleString(undefined, { maximumFractionDigits: 1 });
             hvLine = `<div class="tooltip-subheader">HV contribution: ${formatHv(it.contribution)} (${(it.fraction * 100).toFixed(1)}%)</div>`;
+            const nSeasons = frontierSeasonCount.get(d.playerID) || 0;
+            if (nSeasons > 1) {
+                const pi = hvPlayerMap.get(d.playerID);
+                if (pi) hvLine += `<div class="tooltip-subheader">All ${nSeasons} frontier seasons: −${(pi.fraction * 100).toFixed(1)}% if removed</div>`;
+            }
         }
         const visible = seasons.slice(0, 6);
         const body = visible.map(s => {
@@ -1830,79 +1906,10 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                     .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
                     .style("stroke", isoRingColor);
             }
-            // Re-sweep the frontier without d, draw both staircase lines, shade the
-            // polygon between them. That polygon is the exact area by which the
-            // frontier shrinks when d is removed — how much d "pushed" the frontier.
-            const hvItem = hvByPoint.get(d);
-            if (hvItem) {
-                // 1. Frontier without d (re-sweep `unique` excluding d).
-                const altFrontier = [];
-                for (const p of unique) {
-                    if (p === d) continue;
-                    const py = p.y * ySign;
-                    while (altFrontier.length && altFrontier[altFrontier.length-1].y * ySign < py)
-                        altFrontier.pop();
-                    if (altFrontier.length &&
-                        altFrontier[altFrontier.length-1].y === p.y &&
-                        altFrontier[altFrontier.length-1].x * xSign < p.x * xSign)
-                        altFrontier.pop();
-                    altFrontier.push(p);
-                }
-
-                // 2. Build staircase path points [x, y] in screen space.
-                //    step-after: for each frontier point, go horizontal to its x then
-                //    vertical to its y.  Extend left/right to chart edges so both
-                //    paths share the same horizontal extent.
-                const leftX = 0, rightX = plotW;
-                // Build staircase path points: extend to left edge at first y,
-                // drop to NEXT point's y at EACH point's x (the correct Pareto
-                // step direction), then drop to plotH at the last point's x so
-                // the polygon closes at the chart bottom for extreme points.
-                function staircasePts(fr) {
-                    if (!fr.length) return [[leftX, plotH], [rightX, plotH]];
-                    const pts = [];
-                    pts.push([leftX, yScale(fr[0].y)]);
-                    for (let i = 0; i < fr.length; i++) {
-                        const sx = xScale(fr[i].x), sy = yScale(fr[i].y);
-                        pts.push([sx, sy]);                              // the frontier point
-                        if (i < fr.length - 1) {
-                            pts.push([sx, yScale(fr[i + 1].y)]);        // drop to next y at this x
-                        } else {
-                            pts.push([sx, plotH]);                       // last point: drop to bottom
-                        }
-                    }
-                    pts.push([rightX, plotH]);
-                    return pts;
-                }
-
-                const fPts  = staircasePts(frontier);
-                const afPts = staircasePts(altFrontier);
-
-                // 3. Alt-frontier staircase as a dashed path.
-                hvRectGroup.append("path")
-                    .attr("class", "hv-alt-frontier hv-contrib-overlay--hover")
-                    .attr("d", "M " + afPts.map(p => p.join(",")).join(" L "));
-
-                // 4. Shaded polygon: trace frontier top-to-bottom (left→right),
-                //    then altFrontier bottom-to-top (right→left), close.
-                //    Since frontier ≥ altFrontier everywhere, this yields the
-                //    exact area d contributes.
-                const polyPts = [...fPts, ...[...afPts].reverse()];
-                hvRectGroup.append("polygon")
-                    .attr("class", "hv-contrib-poly hv-contrib-overlay--hover")
-                    .attr("points", polyPts.map(p => p.join(",")).join(" "));
-
-                // 5. Percentage label near d's position.
-                const hvItem2 = hvByPoint.get(d);
-                if (hvItem2) {
-                    hvRectGroup.append("text")
-                        .attr("class", "hv-contrib-label hv-contrib-overlay--hover")
-                        .attr("x", xScale(d.x) + 8)
-                        .attr("y", yScale(d.y) - 8)
-                        .attr("text-anchor", "start")
-                        .attr("dominant-baseline", "auto")
-                        .text(`−${(hvItem2.fraction * 100).toFixed(1)}%`);
-                }
+            // Re-sweep without d, shade the polygon of area d exclusively controls.
+            if (hvByPoint.has(d)) {
+                const altFr = sweepExcluding(p => p === d);
+                drawHvOverlay(altFr, "hover", xScale(d.x), yScale(d.y), hvByPoint.get(d).fraction);
             }
         }
     };
@@ -2258,5 +2265,23 @@ function computeHvContributions(frontier, xSign, ySign, unique) {
     if (totalHv > 0) {
         for (const it of items) it.fraction = it.contribution / totalHv;
     }
-    return { refPoint, totalHv, items };
+
+    // Per-player contributions: re-sweep excluding ALL seasons of each player.
+    const playerContribs = new Map();
+    const playerIds = new Set(frontier.map(p => p.playerID));
+    for (const pid of playerIds) {
+        const altFr = [];
+        for (const p of universe) {
+            if (p.playerID === pid) continue;
+            const py = p.y * ySign;
+            while (altFr.length && altFr[altFr.length - 1].y * ySign < py) altFr.pop();
+            if (altFr.length && altFr[altFr.length - 1].y === p.y &&
+                altFr[altFr.length - 1].x * xSign < p.x * xSign) altFr.pop();
+            altFr.push(p);
+        }
+        const contribution = totalHv - hvOf(altFr);
+        playerContribs.set(pid, { contribution, fraction: totalHv > 0 ? contribution / totalHv : 0 });
+    }
+
+    return { refPoint, totalHv, items, playerContribs };
 }

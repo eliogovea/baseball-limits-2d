@@ -1248,6 +1248,12 @@ input[type="number"].field::-webkit-outer-spin-button {
     stroke: none;
     pointer-events: none;
 }
+.hv-contrib-poly.hv-contrib-overlay--pinned {
+    fill-opacity: 0.32;
+    stroke: var(--mlb-red);
+    stroke-width: 1;
+    stroke-opacity: 0.45;
+}
 .hv-alt-frontier {
     stroke: var(--mlb-red);
     stroke-width: 1.5;
