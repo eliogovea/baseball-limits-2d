@@ -1350,6 +1350,12 @@ function updateYearHint(sYear, eYear) {
     if (era) {
         hint.textContent = `${era.name} era`;
         hint.hidden = false;
+    } else if (sYear === 1920 && eYear >= 2006) {
+        hint.textContent = "Live Ball era to present (default)";
+        hint.hidden = false;
+    } else if (sYear === 1871 && eYear >= 2006) {
+        hint.textContent = "All eras";
+        hint.hidden = false;
     } else {
         hint.hidden = true;
     }
@@ -1442,7 +1448,7 @@ function setupYearPresets() {
     document.querySelectorAll(".preset[data-sy]").forEach((btn) => {
         btn.addEventListener("click", () => {
             sInput.value = btn.dataset.sy;
-            eInput.value = btn.dataset.ey;
+            eInput.value = btn.dataset.ey ?? eInput.max;
             sInput.dispatchEvent(new Event("change", { bubbles: true }));
         });
     });
@@ -1834,8 +1840,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     }
 
     const ringGroup = g.append("g").attr("class", "isolation-ring-group");
-
-
+    const regretGroup = g.append("g").attr("class", "regret-line-group");
 
     // When players are career-highlighted, show the combined polygon for what
     // the frontier loses if all their seasons were removed.
@@ -1867,6 +1872,12 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                 if (pi) hvLine += `<div class="tooltip-subheader">All ${nSeasons} seasons combined: ${(pi.fraction * 100).toFixed(1)}%</div>`;
             }
         }
+        let regretLine = "";
+        let regretInfo = null;
+        if (!frontierSet.has(d)) {
+            regretInfo = computeDistToFrontier([d], frontier, xSign, ySign, xExtent, yExtent).get(d);
+            if (regretInfo) regretLine = `<div class="tooltip-subheader">${(regretInfo.dist * 100).toFixed(1)}% from the limit</div>`;
+        }
         const visible = seasons.slice(0, 6);
         const body = visible.map(s => {
             const meta = mode === "career"
@@ -1882,12 +1893,13 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         const more = seasons.length > visible.length
             ? `<div class="tooltip-more">+${seasons.length - visible.length} more season${seasons.length - visible.length === 1 ? "" : "s"}</div>`
             : "";
-        tooltip.innerHTML = head + hvLine + body + more;
+        tooltip.innerHTML = head + hvLine + regretLine + body + more;
         tooltip.setAttribute("data-visible", "true");
         positionTooltip(event, tooltip);
         // Show hover ring for frontier points (hover only, not when tooltip is pinned by click)
         ringGroup.select(".isolation-ring--hover").remove();
         hvRectGroup.selectAll(".hv-contrib-overlay--hover").remove();
+        regretGroup.selectAll(".regret-line--hover").remove();
         if (!tooltipPinned && frontierSet.has(d)) {
             const iso = isolationMap.get(d);
             if (iso && iso.r > 0) {
@@ -1902,12 +1914,34 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                 drawHvOverlay(altFr, "hover", xScale(d.x), yScale(d.y), hvByPoint.get(d).fraction);
             }
         }
+        if (!tooltipPinned && !frontierSet.has(d)) {
+            if (regretInfo && regretInfo.dist > 0) {
+                regretGroup.append("line")
+                    .attr("class", "regret-line regret-line--hover")
+                    .attr("x1", xScale(d.x)).attr("y1", yScale(d.y))
+                    .attr("x2", xScale(regretInfo.targetX)).attr("y2", yScale(regretInfo.targetY));
+            }
+            // Ring to nearest frontier corner in screen space.
+            let minPx = Infinity;
+            for (const fp of frontier) {
+                const dx = xScale(fp.x) - xScale(d.x), dy = yScale(fp.y) - yScale(d.y);
+                const px = Math.sqrt(dx * dx + dy * dy);
+                if (px < minPx) minPx = px;
+            }
+            if (isFinite(minPx) && minPx > 0) {
+                regretGroup.append("circle")
+                    .attr("class", "regret-ring regret-line--hover")
+                    .attr("cx", xScale(d.x)).attr("cy", yScale(d.y))
+                    .attr("r", minPx);
+            }
+        }
     };
     const hideTooltip = (force = false) => {
         if (tooltipPinned && !force) return;
         tooltip.setAttribute("data-visible", "false");
         ringGroup.select(".isolation-ring--hover").remove();
         hvRectGroup.selectAll(".hv-contrib-overlay--hover").remove();
+        regretGroup.selectAll(".regret-line--hover").remove();
     };
 
     // Brush layer: drag a rectangle on empty chart area to zoom in. Mounted
@@ -2263,4 +2297,64 @@ function computeHvContributions(frontier, xSign, ySign, unique) {
     }
 
     return { refPoint, totalHv, items, playerContribs };
+}
+
+// Euclidean distance in normalized signed space from each non-frontier point
+// to the nearest point on the Pareto staircase boundary.
+// "Signed" coordinates (x*xSign, y*ySign) make "higher always better" on both
+// axes regardless of which direction the stat improves, so the staircase is
+// always the upper-right boundary. Normalization by the full data extent keeps
+// the metric zoom-stable.
+// Returns Map<point, { dist, targetX, targetY }> where:
+//   dist      — [0, ~√2] in normalized space (× 100 = "% from the limit")
+//   targetX/Y — nearest staircase point in data coordinates (for guide line)
+function computeDistToFrontier(nonFrontierPoints, frontierPoints, xSign, ySign, xExtent, yExtent) {
+    const out = new Map();
+    if (!frontierPoints.length || !nonFrontierPoints.length) return out;
+
+    const sxA = xExtent[0] * xSign, sxB = xExtent[1] * xSign;
+    const syA = yExtent[0] * ySign, syB = yExtent[1] * ySign;
+    const [sxLo, sxHi] = sxA < sxB ? [sxA, sxB] : [sxB, sxA];
+    const [syLo, syHi] = syA < syB ? [syA, syB] : [syB, syA];
+    const sxSpan = (sxHi - sxLo) || 1;
+    const sySpan = (syHi - syLo) || 1;
+
+    const nsx = p => (p.x * xSign - sxLo) / sxSpan;
+    const nsy = p => (p.y * ySign - syLo) / sySpan;
+
+    // Staircase vertices in normalized signed space.
+    // frontier is sorted ascending by x*xSign; frontier[0] is top-left corner.
+    // Left cap extends to nsx=0; bottom drop extends to nsy=0.
+    const verts = [];
+    verts.push([0, nsy(frontierPoints[0])]);
+    for (let i = 0; i < frontierPoints.length; i++) {
+        verts.push([nsx(frontierPoints[i]), nsy(frontierPoints[i])]);
+        const nextNsy = i < frontierPoints.length - 1 ? nsy(frontierPoints[i + 1]) : 0;
+        verts.push([nsx(frontierPoints[i]), nextNsy]);
+    }
+
+    function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+    for (const p of nonFrontierPoints) {
+        const px = nsx(p), py = nsy(p);
+        let best = Infinity, bx = px, by = py;
+        for (let s = 0; s < verts.length - 1; s++) {
+            const [ax, ay] = verts[s], [cx, cy] = verts[s + 1];
+            let qx, qy;
+            if (Math.abs(ax - cx) < 1e-12) {        // vertical segment
+                qx = ax;
+                qy = clamp(py, Math.min(ay, cy), Math.max(ay, cy));
+            } else {                                  // horizontal segment
+                qy = ay;
+                qx = clamp(px, Math.min(ax, cx), Math.max(ax, cx));
+            }
+            const dd = (px - qx) * (px - qx) + (py - qy) * (py - qy);
+            if (dd < best) { best = dd; bx = qx; by = qy; }
+        }
+        // Back-convert from normalized signed space to data coordinates.
+        const targetX = (bx * sxSpan + sxLo) * xSign;
+        const targetY = (by * sySpan + syLo) * ySign;
+        out.set(p, { dist: Math.sqrt(best), targetX, targetY });
+    }
+    return out;
 }

@@ -297,6 +297,23 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     pointer-events: none;
 }
 
+.regret-line {
+    fill: none;
+    stroke: #5a6478;
+    stroke-width: 1.5;
+    stroke-dasharray: 4 3;
+    pointer-events: none;
+    opacity: 0.6;
+}
+.regret-ring {
+    fill: none;
+    stroke: #5a6478;
+    stroke-width: 1.5;
+    stroke-dasharray: 4 3;
+    pointer-events: none;
+    opacity: 0.35;
+}
+
 .axis text {
     font-family: var(--font-sans);
     font-size: 11px;
