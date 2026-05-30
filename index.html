@@ -136,95 +136,94 @@
 
         <aside class="controls-region" aria-label="Filters">
             <button class="controls-toggle" id="controls-toggle" type="button" aria-expanded="false" aria-controls="controls-panel">
-                <span>Filters</span>
+                <span>Controls</span>
                 <svg class="chevron" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
                     <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
             </button>
 
             <div class="controls-panel collapsed" id="controls-panel">
-                <div class="quick-toggles">
-                    <div class="toggle-cell">
-                        <span class="toggle-cell-label">Stats</span>
+
+                <!-- FRONTIER DIRECTION (full width, top) -->
+                <section class="ctl-section">
+                    <div class="mode-toggle compact" role="group" aria-label="Frontier direction" title="Frontier direction">
+                        <button type="button" class="frontier-btn mode-btn active" data-mode="best">Best</button>
+                        <button type="button" class="frontier-btn mode-btn" data-mode="worst">Worst</button>
+                    </div>
+                </section>
+
+                <hr class="ctl-divider">
+
+                <!-- DATASET -->
+                <section class="ctl-section">
+                    <div class="ctl-grid-2">
                         <div class="mode-toggle compact" role="group" id="stats-toggle">
                             <button type="button" class="mode-btn active" data-stats="batting">Batting</button>
                             <button type="button" class="mode-btn" data-stats="pitching">Pitching</button>
                         </div>
-                    </div>
-                    <div class="toggle-cell">
-                        <span class="toggle-cell-label">Mode</span>
                         <div class="mode-toggle compact" role="group" id="mode-toggle">
                             <button type="button" class="mode-btn active" data-mode="season">Season</button>
                             <button type="button" class="mode-btn" data-mode="career">Career</button>
                         </div>
                     </div>
-                </div>
-                <p class="control-hint" id="mode-hint" hidden>Each dot is one player's single season.</p>
+                    <p class="control-hint" id="mode-hint" hidden>Each dot is one player's single season.</p>
+                </section>
 
-                <fieldset class="control-group">
-                    <legend class="sr-only">Axes</legend>
-                    <div class="field-row">
-                        <span class="axis-inline-label">X <button type="button" class="glossary-btn" data-target="x-axis-select" aria-label="What does this stat mean?">?</button></span>
-                        <select id="x-axis-select" class="field" aria-label="X axis statistic"></select>
-                        <span class="axis-inline-label">Y <button type="button" class="glossary-btn" data-target="y-axis-select" aria-label="What does this stat mean?">?</button></span>
-                        <select id="y-axis-select" class="field" aria-label="Y axis statistic"></select>
-                        <div class="mode-toggle compact" role="group" aria-label="Frontier direction">
-                            <button type="button" class="frontier-btn mode-btn active" data-mode="best">Best</button>
-                            <button type="button" class="frontier-btn mode-btn" data-mode="worst">Worst</button>
-                        </div>
+                <hr class="ctl-divider">
+
+                <!-- PLOT + RANGE -->
+                <section class="ctl-section">
+                    <div class="ctl-field ctl-field--inline">
+                        <select id="x-axis-select" class="field" aria-label="X axis statistic" title="X axis statistic"></select>
+                        <select id="y-axis-select" class="field" aria-label="Y axis statistic" title="Y axis statistic"></select>
                     </div>
-                </fieldset>
-
-                <fieldset class="control-group">
-                    <legend>
-                        <span id="threshold-label">Min Plate Appearances</span>
-                        <output id="pa-min-value" for="pa-min-select" class="legend-value">502</output>
-                    </legend>
-                    <input type="range" id="pa-min-select" class="slider" min="0" max="600" step="1" value="502">
-                </fieldset>
-
-                <fieldset class="control-group">
-                    <legend>Year Range</legend>
-                    <div class="year-range">
-                        <input type="number" id="s-year-select" class="field" inputmode="numeric" aria-label="Start year">
-                        <span class="year-range-sep">–</span>
-                        <input type="number" id="e-year-select" class="field" inputmode="numeric" aria-label="End year">
+                    <div class="ctl-field ctl-field--inline ctl-year-row">
+                        <input type="number" id="s-year-select" class="field" inputmode="numeric" aria-label="Start year" title="Start year">
                         <button type="button" id="anim-play-btn" class="anim-play-btn" title="Animate frontier evolution" aria-label="Play frontier animation">
                             <svg id="anim-icon-play" width="11" height="12" viewBox="0 0 11 12" fill="currentColor"><polygon points="1,0 11,6 1,12"/></svg>
                             <svg id="anim-icon-stop" width="10" height="10" viewBox="0 0 10 10" fill="currentColor" hidden><rect width="10" height="10" rx="1"/></svg>
                         </button>
+                        <input type="number" id="e-year-select" class="field" inputmode="numeric" aria-label="End year" title="End year">
                     </div>
+                </section>
 
-                </fieldset>
+                <hr class="ctl-divider">
 
-                <fieldset class="control-group">
-                    <legend>Filters</legend>
+                <!-- FILTERS -->
+                <section class="ctl-section">
                     <div id="franchise-row">
                         <div id="franchise-panel" class="franchise-panel" role="listbox" aria-label="Select franchise"></div>
                         <select id="franchise-select" hidden aria-hidden="true" tabindex="-1"></select>
                     </div>
-                    <div class="filter-row">
-                        <span class="filter-label">Bats</span>
-                        <div class="seg-group" role="group" id="bats-seg" aria-label="Batting handedness">
-                            <button type="button" class="seg-btn active" data-bats="all">All</button>
-                            <button type="button" class="seg-btn" data-bats="L">L</button>
-                            <button type="button" class="seg-btn" data-bats="R">R</button>
-                            <button type="button" class="seg-btn" data-bats="S">S</button>
+                    <div class="ctl-field">
+                        <div class="seg-group" role="group" id="bats-seg" aria-label="Bats" title="Bats">
+                            <button type="button" class="seg-btn active" data-bats="all" title="All handedness">All</button>
+                            <button type="button" class="seg-btn" data-bats="L" title="Bats left">L</button>
+                            <button type="button" class="seg-btn" data-bats="R" title="Bats right">R</button>
+                            <button type="button" class="seg-btn" id="bats-switch-btn" data-bats="S" title="Switch hitter">S</button>
                         </div>
                     </div>
                     <div id="country-row">
                         <div id="country-panel" class="country-panel" role="listbox" aria-label="Country of birth"></div>
                         <select id="country-select" hidden aria-hidden="true" tabindex="-1"></select>
                     </div>
-                    <div class="filter-row player-search-row">
+                    <div class="ctl-field player-search-row">
                         <input type="text" id="player-search" class="field" placeholder="Search player…" autocomplete="off" aria-label="Highlight player seasons" aria-autocomplete="list" aria-controls="player-suggestions">
                         <div id="player-suggestions" class="player-suggestions" hidden role="listbox" aria-label="Player suggestions"></div>
                     </div>
                     <div class="player-chips" id="player-hint" hidden></div>
-                    <div class="filter-row">
-                        <label class="hv-toggle"><input type="checkbox" id="hv-contrib-toggle"> Size frontier dots by area owned</label>
+                </section>
+
+                <!-- THRESHOLD: only shown when a rate stat is on an axis -->
+                <hr class="ctl-divider" id="threshold-divider" hidden>
+                <section class="ctl-section ctl-threshold-section" id="threshold-section" hidden>
+                    <div class="ctl-field ctl-field--inline ctl-pa-row">
+                        <label class="ctl-label" id="threshold-label" for="pa-min-select">Min PA</label>
+                        <input type="number" id="pa-min-select" class="field ctl-threshold" list="pa-presets" min="0" step="1" inputmode="numeric" aria-label="Minimum playing time to qualify" title="Type any value or pick a preset">
+                        <datalist id="pa-presets"></datalist>
                     </div>
-                </fieldset>
+                </section>
+
             </div>
         </aside>
     </main>

@@ -52,6 +52,7 @@ const COUNTRY_FLAGS = {
     "UK": "🇬🇧", "Bahamas": "🇧🇸", "Jamaica": "🇯🇲", "Taiwan": "🇹🇼",
     "France": "🇫🇷", "Belgium": "🇧🇪", "Sweden": "🇸🇪", "Haiti": "🇭🇹",
     "Honduras": "🇭🇳", "Belize": "🇧🇿", "South Africa": "🇿🇦", "Ireland": "🇮🇪",
+    "Russia": "🇷🇺",
     // Lahman birthCountry aliases that differ from the canonical display strings above
     "CAN": "🇨🇦", "México": "🇲🇽", "Curaçao": "🇨🇼",
     "England": "🇬🇧", "Scotland": "🏴󠁧󠁢󠁳󠁣󠁴󠁿", "Wales": "🏴󠁧󠁢󠁷󠁬󠁳󠁿",
@@ -146,7 +147,7 @@ let tooltipPinned = false;
 let viewDomain = null;          // {x: [a,b], y: [c,d]} | null
 let zoomMode = "off";
 let showWorstFrontier = false;  // toggle: false = best (default), true = worst
-let hvEncodingEnabled = false;  // toggle: scale frontier dot radius by hypervolume contribution
+let hvEncodingEnabled = true;  // scale frontier dot radius by hypervolume contribution (always on)
 let isolationPinned = null;     // data-point reference for the pinned isolation ring, or null
 let animTimer = null;           // setInterval handle while frontier animation is running
 let animExtentCache = null;     // { key, x, y } — full-range axis extents cached per animation session
@@ -156,7 +157,7 @@ let animExtentCache = null;     // { key, x, y } — full-range axis extents cac
 const URL_DEFAULTS = {
     x: "HR", y: "SB", sy: "1920", ey: "2024", pa: "502",
     m: "season", lg: "all", bt: "all", co: "all",
-    fr: "all", hl: "", hv: "0",
+    fr: "all", hl: "",
 };
 
 // Per-dataset metadata. The Stats toggle in the UI switches `activeDataset`;
@@ -168,7 +169,8 @@ const DATASETS = {
         defaultX: "HR",
         defaultY: "SB",
         thresholdField: "PA",
-        thresholdLabel: "Min Plate Appearances",
+        thresholdLabel: "Min PA",
+        handField: "bats",
         rateStats: new Set(["AVG", "OBP", "SLG", "OPS", "ISO", "BABIP"]),
         lowerIsBetter: new Set(["CS", "GIDP", "SO", "K%"]),
         thresholdConfig: {
@@ -205,7 +207,8 @@ const DATASETS = {
         defaultX: "IP",
         defaultY: "SO",
         thresholdField: "IP",
-        thresholdLabel: "Min Innings Pitched",
+        thresholdLabel: "Min IP",
+        handField: "throws",
         rateStats: new Set(["ERA", "WHIP", "K/9", "BB/9", "K/BB", "H/9", "HR/9", "BAOpp"]),
         lowerIsBetter: new Set(["ERA","WHIP","BB/9","H/9","HR/9","BAOpp","BB%","L","H","ER","HR","BB"]),
         thresholdConfig: {
@@ -424,15 +427,6 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         });
     });
 
-    // Hypervolume contribution dot-size encoding
-    const hvCb = document.getElementById("hv-contrib-toggle");
-    if (hvCb) {
-        hvCb.addEventListener("change", () => {
-            hvEncodingEnabled = hvCb.checked;
-            refreshChart();
-        });
-    }
-
     const loadingIndicator = document.getElementById("loading-indicator");
     let pendingRender = null;
 
@@ -441,7 +435,6 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         const yDim = document.getElementById("y-axis-select").value;
         const sYear = parseInt(document.getElementById("s-year-select").value);
         const eYear = parseInt(document.getElementById("e-year-select").value);
-        const minThreshold = parseInt(document.getElementById("pa-min-select").value);
         const mode = getCurrentMode();
         const league = getSegValue("league-seg", "league") || "all";
         const bats = getSegValue("bats-seg", "bats") || "all";
@@ -450,20 +443,30 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         const def = activeDataset();
         const data = activeData();
 
+        // The playing-time threshold only matters for rate stats — for counting
+        // stats every season qualifies, so we hide the control and apply no
+        // minimum. The dropdown's own value is still written to the URL so the
+        // user's choice persists when they toggle between stat types.
+        const usesRate = def.rateStats?.has(xDim) || def.rateStats?.has(yDim);
+        const thresholdValue = parseInt(document.getElementById("pa-min-select").value) || 0;
+        const minThreshold = usesRate ? thresholdValue : 0;
+        const tSec = document.getElementById("threshold-section");
+        const tDiv = document.getElementById("threshold-divider");
+        if (tSec) tSec.hidden = !usesRate;
+        if (tDiv) tDiv.hidden = !usesRate;
+
         updateColorLegend();
         updateYearHint(sYear, eYear);
         syncPlayerHint();
 
-        document.getElementById("pa-min-value").textContent = minThreshold.toLocaleString();
-        syncPresetActive(minThreshold);
 
         loadingIndicator.classList.add("active");
         cancelAnimationFrame(pendingRender);
         pendingRender = requestAnimationFrame(() => {
             drawScatterPlot(data.points, xDim, yDim, sYear, eYear, minThreshold, formatStat, mode,
-                { league, bats, country, franchise, thresholdField: def.thresholdField, dataset: activeDatasetKey });
+                { league, bats, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey });
             loadingIndicator.classList.remove("active");
-            writeUrlState({ xDim, yDim, sYear, eYear, minPa: minThreshold, mode, league, bats, country, franchise });
+            writeUrlState({ xDim, yDim, sYear, eYear, minPa: thresholdValue, mode, league, bats, country, franchise });
         });
     }
 
@@ -499,7 +502,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             filterChanged();
         });
     });
-    document.getElementById("pa-min-select").addEventListener("input", filterChanged);
+    document.getElementById("pa-min-select").addEventListener("change", filterChanged);
 
     // Frontier animation: advance end year from start → max, redrawing each step.
     function stopAnimation() {
@@ -663,13 +666,16 @@ function populateCountrySelect(playerIdx) {
         chip.className = "country-chip";
         chip.setAttribute("role", "option");
         chip.setAttribute("aria-selected", "false");
-        chip.setAttribute("aria-label", `${c} (${n.toLocaleString()} players)`);
         chip.dataset.country = c;
         const flag = COUNTRY_FLAGS[c] || "";
         const displayName = COUNTRY_DISPLAY[c] || c;
+        // Flag-only chips; the country name lives in the tooltip + accessible name.
+        chip.setAttribute("aria-label", `${displayName} (${n.toLocaleString()} players)`);
+        chip.title = displayName;
         chip.innerHTML = flag
-            ? `<span class="country-flag" aria-hidden="true">${flag}</span><span class="country-name">${escapeHtml(displayName)}</span>`
-            : `<span class="country-name">${escapeHtml(displayName)}</span>`;
+            ? `<span class="country-flag" aria-hidden="true">${flag}</span>`
+            : `<span class="country-name country-code">${escapeHtml(c)}</span>`;
+        if (flag) chip.classList.add("country-chip--flag");
         grid.appendChild(chip);
     }
     panel.appendChild(grid);
@@ -718,6 +724,21 @@ function populateSelectorsForActive() {
     ySelect.value = def.defaultY;
 
     document.getElementById("threshold-label").textContent = def.thresholdLabel;
+
+    const isPitching = activeDatasetKey === "pitching";
+    // No visible label — keep the distinction available via tooltip / screen reader.
+    const batsSeg = document.getElementById("bats-seg");
+    if (batsSeg) {
+        const handLabel = isPitching ? "Throws" : "Bats";
+        batsSeg.setAttribute("aria-label", handLabel);
+        batsSeg.setAttribute("title", handLabel);
+    }
+    const switchBtn = document.getElementById("bats-switch-btn");
+    switchBtn.hidden = isPitching;
+    if (isPitching && switchBtn.classList.contains("active")) {
+        switchBtn.classList.remove("active");
+        document.querySelector("#bats-seg .seg-btn[data-bats='all']").classList.add("active");
+    }
 }
 
 function parseUrlHash() {
@@ -770,11 +791,6 @@ function applyUrlState() {
     updateChipSelection(frVal);
     updateFranchiseDimming(getSegValue("league-seg", "league") || "all");
     if (u.hl) { u.hl.split(",").forEach(id => addHighlight(id.trim())); }
-    if (u.hv === "1") {
-        hvEncodingEnabled = true;
-        const cb = document.getElementById("hv-contrib-toggle");
-        if (cb) cb.checked = true;
-    }
 }
 
 let urlWriteTimer = null;
@@ -793,7 +809,6 @@ function writeUrlState(state) {
             co: state.country,
             fr: state.franchise,
             hl: [...careerHighlights.keys()].join(","),
-            hv: hvEncodingEnabled ? "1" : "0",
         };
         // Drop defaults to keep the URL short.
         const parts = [];
@@ -886,15 +901,30 @@ function resetThresholdToDefault() {
 function applyModeConfig(mode) {
     const cfg = activeDataset().thresholdConfig[mode];
     if (!cfg) return;
-    const slider = document.getElementById("pa-min-select");
-    slider.max = cfg.max;
-    slider.step = cfg.step;
-    // Snap value if it now exceeds the new max.
-    if (parseInt(slider.value) > cfg.max) slider.value = 0;
-    document.getElementById("pa-min-value").textContent = parseInt(slider.value).toLocaleString();
+    // The threshold is a free-entry number input backed by a <datalist> of
+    // presets: the user can type any exact value or pick a suggested one.
+    const input = document.getElementById("pa-min-select");
+    if (!input) return;
+    input.min = 0;
+    input.max = cfg.max;
+    input.step = cfg.step;
 
-    // PA preset buttons and hint have been removed from the UI — only the
-    // slider remains, so no DOM updates needed here beyond the output above.
+    const list = document.getElementById("pa-presets");
+    if (list) {
+        list.innerHTML = "";
+        cfg.presets.forEach((p) => {
+            const opt = document.createElement("option");
+            opt.value = String(p.val);
+            opt.label = p.val === 0
+                ? "No minimum"
+                : (p.val === cfg.default ? `${p.val} (qualified)` : String(p.val));
+            list.appendChild(opt);
+        });
+    }
+
+    // Keep a still-valid prior value; otherwise land on the mode default.
+    const cur = parseInt(input.value);
+    if (isNaN(cur) || cur < 0 || cur > cfg.max) input.value = cfg.default ?? 0;
 }
 
 // Aggregate one player's selected seasons into a single career-totals row.
@@ -1030,27 +1060,87 @@ function chartExportFilename(ext) {
     return `baseball-limits-2d_${xDim}-${yDim}_${mode}.${ext}`;
 }
 
+// ── On-chart axis stat picker ──────────────────────────────────────
+// Clicking an axis title opens a small menu of the active dataset's stats,
+// mirrored from the sidebar <select> (which stays the single source of truth).
+let _axisMenuEl = null;
+let _axisMenuCleanup = null;
+
+function closeAxisStatMenu() {
+    if (_axisMenuEl) { _axisMenuEl.remove(); _axisMenuEl = null; }
+    if (_axisMenuCleanup) { _axisMenuCleanup(); _axisMenuCleanup = null; }
+}
+
+function openAxisStatMenu(anchorEl, selectId, placement) {
+    closeAxisStatMenu();
+    const select = document.getElementById(selectId);
+    const region = document.querySelector(".chart-region");
+    if (!select || !region) return;
+
+    const menu = document.createElement("div");
+    menu.className = "axis-stat-menu";
+    menu.setAttribute("role", "listbox");
+
+    Array.from(select.options).forEach((opt) => {
+        const item = document.createElement("div");
+        item.className = "axis-stat-item";
+        item.setAttribute("role", "option");
+        item.textContent = opt.textContent;
+        if (opt.value === select.value) {
+            item.classList.add("axis-stat-item--active");
+            item.setAttribute("aria-selected", "true");
+        }
+        item.addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (select.value !== opt.value) {
+                select.value = opt.value;
+                // Reuse the sidebar select's change wiring (refresh + URL write).
+                select.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+            closeAxisStatMenu();
+        });
+        menu.appendChild(item);
+    });
+
+    region.appendChild(menu);
+
+    // Position relative to the chart region, opening inward so the region's
+    // overflow:hidden doesn't clip the menu.
+    const a = anchorEl.getBoundingClientRect();
+    const r = region.getBoundingClientRect();
+    const mw = menu.offsetWidth;
+    const mh = menu.offsetHeight;
+    let left, top;
+    if (placement === "right") {           // y-axis title (left edge) → open right
+        left = (a.right - r.left) + 6;
+        top  = (a.top - r.top) + a.height / 2 - mh / 2;
+    } else {                               // x-axis title (bottom) → open upward
+        left = (a.left - r.left) + a.width / 2 - mw / 2;
+        top  = (a.top - r.top) - mh - 6;
+    }
+    left = Math.max(4, Math.min(left, r.width - mw - 4));
+    top  = Math.max(4, Math.min(top, r.height - mh - 4));
+    menu.style.left = `${left}px`;
+    menu.style.top  = `${top}px`;
+
+    _axisMenuEl = menu;
+
+    // Dismiss on outside-click / Escape.
+    const onDocClick = (e) => { if (_axisMenuEl && !_axisMenuEl.contains(e.target)) closeAxisStatMenu(); };
+    const onKey = (e) => { if (e.key === "Escape") closeAxisStatMenu(); };
+    setTimeout(() => document.addEventListener("click", onDocClick), 0);
+    document.addEventListener("keydown", onKey);
+    _axisMenuCleanup = () => {
+        document.removeEventListener("click", onDocClick);
+        document.removeEventListener("keydown", onKey);
+    };
+}
+
 function buildExportSvgString() {
     const svg = document.getElementById("scatter-plot");
     if (!svg) return null;
 
-    const cs = getComputedStyle(document.documentElement);
-    const v = (name) => cs.getPropertyValue(name).trim();
-    const font = v("--font-sans") || "system-ui, -apple-system, sans-serif";
-    const bg = v("--bg") || "#f4f5f7";
-
-    const style = `
-<style>
-svg { background: ${bg}; }
-.regular-point { fill-opacity: 0.4; }
-.special-point { fill: ${v("--frontier-color")}; stroke: #fff; stroke-width: 1.5; }
-.frontier-line { stroke: ${v("--frontier-color")}; stroke-width: 2; fill: none; opacity: 0.55; }
-.career-point { fill: #f59e0b; stroke: #fff; stroke-width: 1.5; }
-.axis text { font-family: ${font}; font-size: 11px; fill: ${v("--text-muted")}; }
-.axis line, .axis path { stroke: ${v("--border")}; fill: none; }
-.axis-title { font-family: ${font}; font-size: 12px; font-weight: 600; fill: ${v("--text")}; }
-.frontier-label { font-family: ${font}; font-size: 11px; font-weight: 600; fill: ${v("--mlb-blue")}; stroke: #fff; stroke-width: 3px; paint-order: stroke; }
-</style>`;
+    const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() || "#f4f5f7";
 
     const clone = svg.cloneNode(true);
     clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
@@ -1062,8 +1152,40 @@ svg { background: ${bg}; }
     clone.removeAttribute("role");
     clone.removeAttribute("aria-label");
 
+    // Faithfully reproduce the on-screen look by inlining each node's *computed*
+    // presentation properties. This is drift-proof: whatever the live chart
+    // renders (stylesheet, class, or inline) is what the export gets — no
+    // hand-maintained per-class style block to fall out of sync. (The old block
+    // still styled the long-renamed `.frontier-line`, so the red Pareto
+    // staircase — now `.frontier-staircase` — vanished from share previews.)
+    // computed values also resolve CSS custom properties to concrete colors, so
+    // the standalone SVG no longer depends on :root variables.
+    const PROPS = [
+        "fill", "fill-opacity", "stroke", "stroke-width", "stroke-opacity",
+        "stroke-dasharray", "stroke-linecap", "stroke-linejoin", "opacity",
+        "paint-order", "font-family", "font-size", "font-weight", "text-anchor",
+    ];
+    // Interaction-only / affordance layers don't belong in a static image.
+    const DROP = ".hit, .zoom-overlay, .brush, .axis-caret, .isolation-ring-group, .regret-line-group";
+    const srcNodes = [svg, ...svg.querySelectorAll("*")];
+    const dstNodes = [clone, ...clone.querySelectorAll("*")];
+    const toRemove = [];
+    for (let i = 0; i < dstNodes.length; i++) {
+        const dst = dstNodes[i];
+        if (dst.matches && dst.matches(DROP)) { toRemove.push(dst); continue; }
+        const cs = getComputedStyle(srcNodes[i]);
+        let inline = dst.getAttribute("style") || "";
+        for (const p of PROPS) {
+            const val = cs.getPropertyValue(p);
+            if (val) inline += `${p}:${val};`;
+        }
+        dst.setAttribute("style", inline);
+    }
+    toRemove.forEach((n) => n.remove());
+
     let svgStr = new XMLSerializer().serializeToString(clone);
-    return svgStr.replace(/(<svg[^>]*>)/, `$1${style}`);
+    // The SVG's own background can't be captured as a presentation property.
+    return svgStr.replace(/(<svg[^>]*>)/, `$1<style>svg{background:${bg};}</style>`);
 }
 
 function exportChartSVG() {
@@ -1462,7 +1584,10 @@ function buildFranchisePicker() {
         cell.appendChild(label);
         const row = document.createElement("div");
         row.className = "franchise-chips-row";
-        for (const fid of div.ids) {
+        // Sort each division's teams lexicographically by abbreviation.
+        const sortedIds = [...div.ids].sort((a, b) =>
+            (FRANCHISE_BY_ID.get(a)?.abbr || "").localeCompare(FRANCHISE_BY_ID.get(b)?.abbr || ""));
+        for (const fid of sortedIds) {
             const f = FRANCHISE_BY_ID.get(fid);
             if (!f) continue;
             const chip = document.createElement("button");
@@ -1572,7 +1697,9 @@ function setupPlayerSearch() {
         if (playerIndex?.has(name)) {
             addHighlight(name);
             syncPlayerHint();
-            refreshChart();
+            // refreshChart is closure-scoped in the init function; top-level
+            // call sites refresh via this event (see the bl2d:refresh listener).
+            document.dispatchEvent(new Event("bl2d:refresh"));
         }
         input.value = "";
         hide();
@@ -1658,6 +1785,8 @@ function setupYearPresets() {
 
 
 function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode = "season", filters = {}) {
+    // Any open axis-stat menu is anchored to the (about to be replaced) titles.
+    closeAxisStatMenu();
     const svg = d3.select("#scatter-plot");
     // FLIP: snapshot current dot positions so we can morph to the new layout.
     // During animation playback (400ms ticks), use a shorter duration so transitions
@@ -1678,6 +1807,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const bats = filters.bats || "all";
     const country   = filters.country   || "all";
     const franchise = filters.franchise || "all";
+    const handField = filters.handField || "bats";
 
     // Cache meta lookups per playerID across the filter pass.
     const metaCache = new Map();
@@ -1695,7 +1825,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         if (bats !== "all" || country !== "all") {
             const m = getMeta(p.playerID);
             if (!m) return false;
-            if (bats !== "all" && m.bats !== bats) return false;
+            if (bats !== "all" && m[handField] !== bats) return false;
             if (country !== "all" && m.country !== country) return false;
         }
         return true;
@@ -1838,7 +1968,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                     if (bats !== "all" || country !== "all") {
                         const m = getMeta(p.playerID);
                         if (!m) continue;
-                        if (bats !== "all" && m.bats !== bats) continue;
+                        if (bats !== "all" && m[handField] !== bats) continue;
                         if (country !== "all" && m.country !== country) continue;
                     }
                     let arr = allByPlayer.get(p.playerID);
@@ -1890,23 +2020,29 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         .attr("x", plotW / 2)
         .attr("y", plotH + 36)
         .attr("text-anchor", "middle")
-        .text(xSign === -1 ? `${xDim} ↓` : xDim);
+        .style("cursor", "pointer")
+        .on("click", function(event) { event.stopPropagation(); openAxisStatMenu(this, "x-axis-select", "up"); });
+    xTitleEl.append("tspan").text(xSign === -1 ? `${xDim} ↓` : xDim);
+    xTitleEl.append("tspan").attr("class", "axis-caret").text("  ▾");
+
     const yTitleEl = g.append("text")
         .attr("class", "axis-title")
         .attr("transform", `rotate(-90)`)
         .attr("x", -plotH / 2)
         .attr("y", -38)
         .attr("text-anchor", "middle")
-        .text(ySign === -1 ? `${yDim} ↓` : yDim);
+        .style("cursor", "pointer")
+        .on("click", function(event) { event.stopPropagation(); openAxisStatMenu(this, "y-axis-select", "right"); });
+    yTitleEl.append("tspan").text(ySign === -1 ? `${yDim} ↓` : yDim);
+    yTitleEl.append("tspan").attr("class", "axis-caret").text("  ▾");
 
+    // Hover still surfaces the glossary definition; click opens the stat picker.
     if (GLOSSARY[xDim]) {
-        xTitleEl.style("cursor", "pointer")
-            .on("mouseenter", function() { if (glossaryShow) glossaryShow(this, xDim); })
+        xTitleEl.on("mouseenter", function() { if (glossaryShow) glossaryShow(this, xDim); })
             .on("mouseleave", function() { if (glossaryHide) glossaryHide(); });
     }
     if (GLOSSARY[yDim]) {
-        yTitleEl.style("cursor", "pointer")
-            .on("mouseenter", function() { if (glossaryShow) glossaryShow(this, yDim); })
+        yTitleEl.on("mouseenter", function() { if (glossaryShow) glossaryShow(this, yDim); })
             .on("mouseleave", function() { if (glossaryHide) glossaryHide(); });
     }
 
