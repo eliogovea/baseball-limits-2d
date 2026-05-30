@@ -52,6 +52,22 @@ const COUNTRY_FLAGS = {
     "UK": "🇬🇧", "Bahamas": "🇧🇸", "Jamaica": "🇯🇲", "Taiwan": "🇹🇼",
     "France": "🇫🇷", "Belgium": "🇧🇪", "Sweden": "🇸🇪", "Haiti": "🇭🇹",
     "Honduras": "🇭🇳", "Belize": "🇧🇿", "South Africa": "🇿🇦", "Ireland": "🇮🇪",
+    // Lahman birthCountry aliases that differ from the canonical display strings above
+    "CAN": "🇨🇦", "México": "🇲🇽", "Curaçao": "🇨🇼",
+    "England": "🇬🇧", "Scotland": "🏴󠁧󠁢󠁳󠁣󠁴󠁿", "Wales": "🏴󠁧󠁢󠁷󠁬󠁳󠁿",
+    "U.S. Virgin Islands": "🇻🇮", "West Germany": "🇩🇪",
+};
+// Maps raw Lahman birthCountry strings to readable display names for chips.
+const COUNTRY_DISPLAY = {
+    "CAN": "Canada",
+    "México": "Mexico",
+    "Curaçao": "Curaçao",
+    "U.S. Virgin Islands": "US Virgin Islands",
+    "West Germany": "West Germany",
+    "D.R.": "Dominican Rep.",
+    "P.R.": "Puerto Rico",
+    "South Korea": "South Korea",
+    "South Africa": "South Africa",
 };
 
 // Current 30 MLB franchises with every historical Lahman teamID that belongs
@@ -133,13 +149,14 @@ let showWorstFrontier = false;  // toggle: false = best (default), true = worst
 let hvEncodingEnabled = false;  // toggle: scale frontier dot radius by hypervolume contribution
 let isolationPinned = null;     // data-point reference for the pinned isolation ring, or null
 let animTimer = null;           // setInterval handle while frontier animation is running
+let animExtentCache = null;     // { key, x, y } — full-range axis extents cached per animation session
 
 // URL state defaults — params at their default value are omitted from the
 // hash to keep it short.
 const URL_DEFAULTS = {
-    x: "HR", y: "SB", sy: "1920", ey: "2024", pa: "0",
+    x: "HR", y: "SB", sy: "1920", ey: "2024", pa: "502",
     m: "season", lg: "all", bt: "all", co: "all",
-    tm: "all", fr: "all", hl: "", hv: "0",
+    fr: "all", hl: "", hv: "0",
 };
 
 // Per-dataset metadata. The Stats toggle in the UI switches `activeDataset`;
@@ -346,7 +363,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     populateCountrySelect(datasetState.batting.playerIndex);
     populateFranchiseSelect();
     buildFranchisePicker();
-    populatePlayerDatalist();
+    setupPlayerSearch();
     setupControlsToggle();
     setupPaPresets();
     setupYearPresets();
@@ -374,14 +391,13 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         viewDomain = null;
         syncPlayerHint();
         populateSelectorsForActive();
-        populatePlayerDatalist();
         resetThresholdToDefault();
         applyModeConfig(getCurrentMode());
         refreshChart();
     });
     setupSegGroup("league-seg", () => { clearHighlights(); syncPlayerHint(); refreshChart(); });
     setupSegGroup("bats-seg",   () => { clearHighlights(); syncPlayerHint(); refreshChart(); });
-    ["country-select", "team-select", "franchise-select"].forEach((id) => {
+    ["country-select", "franchise-select"].forEach((id) => {
         document.getElementById(id)?.addEventListener("change", () => {
             clearHighlights();
             syncPlayerHint();
@@ -389,50 +405,15 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         });
     });
 
-    // Scope toggle: Franchise ↔ Team — mutually exclusive
-    setupModeToggle("scope-toggle", () => {
-        const scope = getActiveModeBtnData("scope-toggle", "scope") || "franchise";
-        const franchiseRow = document.getElementById("franchise-row");
-        const teamRow      = document.getElementById("team-row");
-        if (scope === "franchise") {
-            franchiseRow.hidden = false;
-            teamRow.hidden = true;
-            const teamSel = document.getElementById("team-select");
-            if (teamSel) teamSel.value = "all";
-        } else {
-            franchiseRow.hidden = true;
-            teamRow.hidden = false;
-            const frSel = document.getElementById("franchise-select");
-            if (frSel) frSel.value = "all";
-            updateFranchiseTrigger("all");
-            updateChipSelection("all");
-        }
-        clearHighlights();
+
+    // Chip remove buttons — delegated listener on the container
+    document.getElementById("player-hint")?.addEventListener("click", (e) => {
+        const removeBtn = e.target.closest(".player-chip-remove");
+        if (!removeBtn) return;
+        removeHighlight(removeBtn.closest(".player-chip").dataset.player);
         syncPlayerHint();
         refreshChart();
     });
-
-    // Player search — adds a new highlighted player on each selection
-    const playerSearch = document.getElementById("player-search");
-    if (playerSearch) {
-        playerSearch.addEventListener("change", () => {
-            const val = playerSearch.value.trim();
-            if (val && playerIndex?.has(val)) {
-                addHighlight(val);
-            }
-            playerSearch.value = "";
-            syncPlayerHint();
-            refreshChart();
-        });
-        // Chip remove buttons — delegated listener on the container
-        document.getElementById("player-hint")?.addEventListener("click", (e) => {
-            const removeBtn = e.target.closest(".player-chip-remove");
-            if (!removeBtn) return;
-            removeHighlight(removeBtn.closest(".player-chip").dataset.player);
-            syncPlayerHint();
-            refreshChart();
-        });
-    }
 
     // Frontier toggle: Best / Worst
     document.querySelectorAll(".frontier-btn").forEach((btn) => {
@@ -465,14 +446,12 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         const league = getSegValue("league-seg", "league") || "all";
         const bats = getSegValue("bats-seg", "bats") || "all";
         const country = document.getElementById("country-select").value || "all";
-        const team = document.getElementById("team-select")?.value || "all";
         const franchise = document.getElementById("franchise-select")?.value || "all";
         const def = activeDataset();
         const data = activeData();
 
         updateColorLegend();
         updateYearHint(sYear, eYear);
-        populateTeamSelect(data.points, sYear, eYear, league, team);
         syncPlayerHint();
 
         document.getElementById("pa-min-value").textContent = minThreshold.toLocaleString();
@@ -482,9 +461,9 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         cancelAnimationFrame(pendingRender);
         pendingRender = requestAnimationFrame(() => {
             drawScatterPlot(data.points, xDim, yDim, sYear, eYear, minThreshold, formatStat, mode,
-                { league, bats, country, team, franchise, thresholdField: def.thresholdField, dataset: activeDatasetKey });
+                { league, bats, country, franchise, thresholdField: def.thresholdField, dataset: activeDatasetKey });
             loadingIndicator.classList.remove("active");
-            writeUrlState({ xDim, yDim, sYear, eYear, minPa: minThreshold, mode, league, bats, country, team, franchise });
+            writeUrlState({ xDim, yDim, sYear, eYear, minPa: minThreshold, mode, league, bats, country, franchise });
         });
     }
 
@@ -687,9 +666,10 @@ function populateCountrySelect(playerIdx) {
         chip.setAttribute("aria-label", `${c} (${n.toLocaleString()} players)`);
         chip.dataset.country = c;
         const flag = COUNTRY_FLAGS[c] || "";
+        const displayName = COUNTRY_DISPLAY[c] || c;
         chip.innerHTML = flag
-            ? `<span class="country-flag" aria-hidden="true">${flag}</span><span class="country-name">${escapeHtml(c)}</span>`
-            : `<span class="country-name">${escapeHtml(c)}</span>`;
+            ? `<span class="country-flag" aria-hidden="true">${flag}</span><span class="country-name">${escapeHtml(displayName)}</span>`
+            : `<span class="country-name">${escapeHtml(displayName)}</span>`;
         grid.appendChild(chip);
     }
     panel.appendChild(grid);
@@ -784,19 +764,11 @@ function applyUrlState() {
     setSeg("bats-seg", "bats", u.bt);
     setSelect("country-select", u.co);
     updateCountrySelection(document.getElementById("country-select")?.value || "all");
-    if (u.tm && u.tm !== "all") {
-        // Restore team scope toggle
-        document.querySelectorAll("#scope-toggle .mode-btn").forEach(b =>
-            b.classList.toggle("active", b.dataset.scope === "team"));
-        document.getElementById("franchise-row").hidden = true;
-        document.getElementById("team-row").hidden = false;
-        setSelect("team-select", u.tm);
-    } else {
-        setSelect("franchise-select", u.fr);
-        const frVal = document.getElementById("franchise-select")?.value || "all";
-        updateFranchiseTrigger(frVal);
-        updateChipSelection(frVal);
-    }
+    setSelect("franchise-select", u.fr);
+    const frVal = document.getElementById("franchise-select")?.value || "all";
+    updateFranchiseTrigger(frVal);
+    updateChipSelection(frVal);
+    updateFranchiseDimming(getSegValue("league-seg", "league") || "all");
     if (u.hl) { u.hl.split(",").forEach(id => addHighlight(id.trim())); }
     if (u.hv === "1") {
         hvEncodingEnabled = true;
@@ -819,7 +791,6 @@ function writeUrlState(state) {
             lg: state.league,
             bt: state.bats,
             co: state.country,
-            tm: state.team,
             fr: state.franchise,
             hl: [...careerHighlights.keys()].join(","),
             hv: hvEncodingEnabled ? "1" : "0",
@@ -922,15 +893,8 @@ function applyModeConfig(mode) {
     if (parseInt(slider.value) > cfg.max) slider.value = 0;
     document.getElementById("pa-min-value").textContent = parseInt(slider.value).toLocaleString();
 
-    const row = document.querySelector(".preset-row:not(.year-preset-row)");
-    row.innerHTML = cfg.presets
-        .map(p => `<button type="button" class="preset" data-pa="${p.val}">${p.label}</button>`)
-        .join("");
-    setupPaPresets(); // rewire fresh buttons
-    syncPresetActive(parseInt(slider.value));
-
-    const hintEl = document.getElementById("threshold-hint");
-    if (hintEl) hintEl.textContent = cfg.hint;
+    // PA preset buttons and hint have been removed from the UI — only the
+    // slider remains, so no DOM updates needed here beyond the output above.
 }
 
 // Aggregate one player's selected seasons into a single career-totals row.
@@ -1425,28 +1389,6 @@ function updateYearHint(sYear, eYear) {
     }
 }
 
-function populateTeamSelect(points, sYear, eYear, league, currentTeam) {
-    const sel = document.getElementById("team-select");
-    if (!sel) return;
-    const franchise = document.getElementById("franchise-select")?.value || "all";
-    const teamSet = new Set();
-    for (const p of points) {
-        if (p.yearID < sYear || p.yearID > eYear) continue;
-        if (league !== "all" && p.lgID !== league) continue;
-        if (franchise !== "all") {
-            const fid = FRANCHISE_BY_TEAM.get(p.teamID);
-            if (fid !== franchise) continue;
-        }
-        if (p.teamID && p.teamID !== "—") teamSet.add(p.teamID);
-    }
-    const teams = [...teamSet].sort();
-    const prev = sel.value;
-    sel.innerHTML = `<option value="all">All teams</option>` +
-        teams.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join("");
-    // Restore selection if still valid
-    if (teams.includes(prev)) sel.value = prev;
-    else sel.value = "all";
-}
 
 function populateFranchiseSelect() {
     const sel = document.getElementById("franchise-select");
@@ -1457,6 +1399,16 @@ function populateFranchiseSelect() {
             return `<option value="${escapeHtml(f.id)}">${escapeHtml(f.name)}${escapeHtml(note)}</option>`;
         }).join("");
 }
+
+function updateFranchiseDimming(league) {
+    document.querySelectorAll("#franchise-panel .franchise-division-cell").forEach(cell => {
+        const label = cell.querySelector(".franchise-division-label")?.textContent || "";
+        const dim = (league === "AL" && label.startsWith("NL ")) ||
+                    (league === "NL" && label.startsWith("AL "));
+        cell.classList.toggle("franchise-division-cell--dimmed", dim);
+    });
+}
+
 
 function updateFranchiseTrigger(id) {
     const trigger = document.getElementById("franchise-trigger");
@@ -1497,16 +1449,6 @@ function buildFranchisePicker() {
     });
     leagueRow.appendChild(leagueSeg);
     panel.appendChild(leagueRow);
-
-    // "All" reset chip
-    const allChip = document.createElement("button");
-    allChip.type = "button";
-    allChip.className = "franchise-chip franchise-chip--all franchise-chip--selected";
-    allChip.setAttribute("role", "option");
-    allChip.setAttribute("aria-selected", "true");
-    allChip.dataset.id = "all";
-    allChip.textContent = "All franchises";
-    panel.appendChild(allChip);
 
     // Division grid
     const grid = document.createElement("div");
@@ -1552,15 +1494,113 @@ function buildFranchisePicker() {
     panel.addEventListener("click", e => {
         const chip = e.target.closest(".franchise-chip");
         if (!chip) return;
-        setFranchise(chip.dataset.id || "all");
+        const current = document.getElementById("franchise-select")?.value || "all";
+        // Toggle: clicking the selected chip deselects (= all franchises)
+        setFranchise(chip.dataset.id === current ? "all" : chip.dataset.id);
     });
+
+    // Attach dimming to each league button (in addition to the seg-group refresh wiring).
+    panel.querySelectorAll(".seg-btn[data-league]").forEach(btn => {
+        btn.addEventListener("click", () => {
+            const league = btn.dataset.league;
+            updateFranchiseDimming(league);
+            // Auto-reset franchise if its division is now dimmed.
+            const currentFr = FRANCHISE_BY_ID.get(document.getElementById("franchise-select")?.value);
+            if (currentFr && league !== "all") {
+                const frLeague = currentFr.division.startsWith("AL") ? "AL" : "NL";
+                if (frLeague !== league) setFranchise("all");
+            }
+        });
+    });
+    updateFranchiseDimming("all");
 }
 
-function populatePlayerDatalist() {
-    const dl = document.getElementById("player-datalist");
-    if (!dl || !playerIndex) return;
-    const names = [...playerIndex.keys()].sort();
-    dl.innerHTML = names.map(n => `<option value="${escapeHtml(n)}">`).join("");
+function populatePlayerDatalist() { /* replaced by setupPlayerSearch — no-op */ }
+
+function setupPlayerSearch() {
+    const input = document.getElementById("player-search");
+    const box   = document.getElementById("player-suggestions");
+    if (!input || !box) return;
+
+    let activeIdx = -1;
+
+    function getSuggestions(q) {
+        if (!q || !playerIndex) return [];
+        const lq = q.toLowerCase();
+        const starts   = [];
+        const contains = [];
+        for (const name of playerIndex.keys()) {
+            const ln = name.toLowerCase();
+            if (ln.startsWith(lq)) starts.push(name);
+            else if (ln.includes(lq)) contains.push(name);
+        }
+        return [...starts.sort(), ...contains.sort()].slice(0, 8);
+    }
+
+    function render(matches, q) {
+        box.innerHTML = "";
+        if (!matches.length) { box.hidden = true; return; }
+        const lq = q.toLowerCase();
+        matches.forEach((name) => {
+            const el = document.createElement("div");
+            el.className = "player-suggestion-item";
+            el.setAttribute("role", "option");
+            const already = careerHighlights.has(name);
+            if (already) el.classList.add("player-suggestion-item--added");
+            el.setAttribute("aria-selected", already ? "true" : "false");
+            // Bold the matching portion
+            const lo = name.toLowerCase().indexOf(lq);
+            if (lo >= 0) {
+                el.appendChild(document.createTextNode(name.slice(0, lo)));
+                const mark = document.createElement("mark");
+                mark.textContent = name.slice(lo, lo + lq.length);
+                el.appendChild(mark);
+                el.appendChild(document.createTextNode(name.slice(lo + lq.length)));
+            } else {
+                el.textContent = name;
+            }
+            el.addEventListener("mousedown", e => { e.preventDefault(); if (!already) pick(name); });
+            box.appendChild(el);
+        });
+        box.hidden = false;
+        activeIdx = -1;
+    }
+
+    function hide() { box.hidden = true; activeIdx = -1; }
+
+    function pick(name) {
+        if (playerIndex?.has(name)) {
+            addHighlight(name);
+            syncPlayerHint();
+            refreshChart();
+        }
+        input.value = "";
+        hide();
+    }
+
+    function setActive(idx) {
+        const items = box.querySelectorAll(".player-suggestion-item");
+        activeIdx = Math.max(-1, Math.min(idx, items.length - 1));
+        items.forEach((el, i) => el.classList.toggle("player-suggestion-item--active", i === activeIdx));
+    }
+
+    function refresh() { const q = input.value.trim(); render(getSuggestions(q), q); }
+    input.addEventListener("input", refresh);
+    input.addEventListener("blur", () => setTimeout(hide, 150));
+    input.addEventListener("focus", () => { if (input.value.trim()) refresh(); });
+    input.addEventListener("keydown", e => {
+        const items = box.querySelectorAll(".player-suggestion-item");
+        if (e.key === "ArrowDown") { e.preventDefault(); setActive(activeIdx + 1); }
+        else if (e.key === "ArrowUp") { e.preventDefault(); setActive(activeIdx - 1); }
+        else if (e.key === "Enter") {
+            if (activeIdx >= 0 && items[activeIdx]) { pick(items[activeIdx].textContent); }
+            else {
+                const exact = [...(playerIndex?.keys() || [])].find(n => n.toLowerCase() === input.value.trim().toLowerCase());
+                if (exact) pick(exact);
+            }
+        }
+        else if (e.key === "Escape") hide();
+    });
 }
 
 function syncPlayerHint() {
@@ -1619,13 +1659,24 @@ function setupYearPresets() {
 
 function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode = "season", filters = {}) {
     const svg = d3.select("#scatter-plot");
+    // FLIP: snapshot current dot positions so we can morph to the new layout.
+    // During animation playback (400ms ticks), use a shorter duration so transitions
+    // complete before the next tick; D3 interrupts gracefully if they overlap.
+    const FLIP_DURATION = animTimer ? 350 : 280;
+    const flipPos = new Map();
+    if (FLIP_DURATION > 0) {
+        svg.selectAll(".regular-point, .special-point").each(function(d) {
+            if (!d || !d.playerID) return;
+            const key = d.playerID + "|" + (d.year ?? d.yearID ?? "");
+            flipPos.set(key, { cx: +this.getAttribute("cx"), cy: +this.getAttribute("cy") });
+        });
+    }
     svg.selectAll("*").remove();
     d3.select("#tooltip").attr("data-visible", "false");
 
     const league = filters.league || "all";
     const bats = filters.bats || "all";
     const country   = filters.country   || "all";
-    const team      = filters.team      || "all";
     const franchise = filters.franchise || "all";
 
     // Cache meta lookups per playerID across the filter pass.
@@ -1640,7 +1691,6 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const seasonMatches = (p) => {
         if (p.yearID < sYear || p.yearID > eYear) return false;
         if (league !== "all" && p.lgID !== league) return false;
-        if (team !== "all" && p.teamID !== team) return false;
         if (franchise !== "all" && FRANCHISE_BY_TEAM.get(p.teamID) !== franchise) return false;
         if (bats !== "all" || country !== "all") {
             const m = getMeta(p.playerID);
@@ -1769,8 +1819,54 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // Data extents are computed up front so brush coordinates always resolve
     // against the full universe. The visible scale domain is either the
     // current viewDomain (brush result) or the data extent.
-    const xExtent = d3.extent(unique, d => d.x);
-    const yExtent = d3.extent(unique, d => d.y);
+    // During animation, lock axes to the full-range extents so the frontier grows
+    // visibly outward. Season mode uses raw points (all years). Career mode must
+    // aggregate careers for ALL years first — that result is cached per session
+    // so it only runs once, not on every 400ms tick.
+    let xExtent, yExtent;
+    if (animTimer) {
+        const animKey = `${xDim}|${yDim}|${mode}|${league}|${bats}|${country}|${franchise}`;
+        if (animExtentCache?.key !== animKey) animExtentCache = null;
+        if (!animExtentCache) {
+            let ex, ey;
+            if (mode === "career") {
+                // Aggregate every player's full career (all years, current non-year filters).
+                const allByPlayer = new Map();
+                for (const p of points) {
+                    if (league !== "all" && p.lgID !== league) continue;
+                    if (franchise !== "all" && FRANCHISE_BY_TEAM.get(p.teamID) !== franchise) continue;
+                    if (bats !== "all" || country !== "all") {
+                        const m = getMeta(p.playerID);
+                        if (!m) continue;
+                        if (bats !== "all" && m.bats !== bats) continue;
+                        if (country !== "all" && m.country !== country) continue;
+                    }
+                    let arr = allByPlayer.get(p.playerID);
+                    if (!arr) { arr = []; allByPlayer.set(p.playerID, arr); }
+                    arr.push(p);
+                }
+                const fullCareer = [];
+                for (const seasons of allByPlayer.values()) {
+                    seasons.sort((a, b) => a.yearID - b.yearID);
+                    const agg = aggregateCareer(seasons, datasetKey);
+                    agg.x = agg[xDim]; agg.y = agg[yDim];
+                    if (!isNaN(agg.x) && !isNaN(agg.y)) fullCareer.push(agg);
+                }
+                ex = d3.extent(fullCareer, d => d.x);
+                ey = d3.extent(fullCareer, d => d.y);
+            } else {
+                ex = d3.extent(points, d => { const v = +d[xDim]; return isFinite(v) ? v : undefined; });
+                ey = d3.extent(points, d => { const v = +d[yDim]; return isFinite(v) ? v : undefined; });
+            }
+            animExtentCache = { key: animKey, x: ex, y: ey };
+        }
+        xExtent = animExtentCache.x;
+        yExtent = animExtentCache.y;
+    } else {
+        animExtentCache = null;
+        xExtent = d3.extent(unique, d => d.x);
+        yExtent = d3.extent(unique, d => d.y);
+    }
     const xDomain = (viewDomain && viewDomain.x) || xExtent;
     const yDomain = (viewDomain && viewDomain.y) || yExtent;
     const xScale = d3.scaleLinear().domain(xDomain).nice().range([0, plotW]);
@@ -1831,6 +1927,26 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             }
         }
         scPts.push([xScale(last.x), plotH]);
+
+        // Hypervolume shading: gradient fill of the dominated region beneath the staircase.
+        // Gradient runs from the frontier corner (most dominated by the frontier)
+        // to the opposite corner (farthest from the frontier).
+        const hvColor = showWorstFrontier ? "#8b5cf6" : "#002D72";
+        const defs = svg.select("defs").empty() ? svg.append("defs") : svg.select("defs");
+        defs.select("#hv-shade-grad").remove();
+        const grad = defs.append("linearGradient")
+            .attr("id", "hv-shade-grad")
+            .attr("gradientUnits", "userSpaceOnUse")
+            .attr("x1", showWorstFrontier ? 0 : plotW).attr("y1", showWorstFrontier ? plotH : 0)
+            .attr("x2", showWorstFrontier ? plotW : 0).attr("y2", showWorstFrontier ? 0 : plotH);
+        grad.append("stop").attr("offset", "0%").attr("stop-color", hvColor).attr("stop-opacity", 0.10);
+        grad.append("stop").attr("offset", "100%").attr("stop-color", hvColor).attr("stop-opacity", 0.01);
+
+        g.append("path")
+            .attr("class", "hv-shade")
+            .attr("d", "M 0," + plotH + " L " + scPts.map(p => p.join(",")).join(" L ") + " Z")
+            .style("fill", "url(#hv-shade-grad)");
+
         g.append("path")
             .attr("class", "frontier-staircase")
             .attr("d", "M " + scPts.map(p => p.join(",")).join(" L "))
@@ -1964,6 +2080,38 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             return (COLOR_PALETTES.league[d.lgID] || COLOR_PALETTES.league.unknown).dark;
         });
 
+    // FLIP: animate dots from their previous screen positions to the new ones.
+    // Hit circles (tooltip targets) are updated instantly — they must match the
+    // final dot positions, not the animated intermediate ones.
+    if (FLIP_DURATION > 0 && flipPos.size > 0) {
+        svg.selectAll(".regular-point, .special-point").each(function(d) {
+            if (!d || !d.playerID) return;
+            const key = d.playerID + "|" + (d.year ?? d.yearID ?? "");
+            const old = flipPos.get(key);
+            if (!old) return;
+            const newCx = +this.getAttribute("cx");
+            const newCy = +this.getAttribute("cy");
+            if (Math.abs(newCx - old.cx) < 0.5 && Math.abs(newCy - old.cy) < 0.5) return;
+            d3.select(this)
+                .attr("cx", old.cx).attr("cy", old.cy)
+                .transition().duration(FLIP_DURATION).ease(d3.easeCubicOut)
+                .attr("cx", newCx).attr("cy", newCy);
+        });
+    }
+
+    // Fade in staircase and shade on interactive changes only — during animation
+    // playback the boundary updates every 400ms so fading from 0 each tick strobe.
+    if (FLIP_DURATION > 0 && !animTimer) {
+        svg.selectAll("path.frontier-staircase")
+            .style("opacity", 0)
+            .transition().duration(FLIP_DURATION).ease(d3.easeCubicOut)
+            .style("opacity", 0.55);
+        svg.selectAll("path.hv-shade")
+            .style("opacity", 0)
+            .transition().duration(FLIP_DURATION).ease(d3.easeCubicOut)
+            .style("opacity", 1);
+    }
+
     // On-chart frontier labels: greedy collision avoidance, mobile shows
     // only the two extreme endpoints so small viewports stay readable.
     // HV radius applies only to .special-point; career-trail dots stay at the
@@ -1976,7 +2124,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         .selectAll("text")
         .data(labels).enter()
         .append("text")
-        .attr("class", "frontier-label")
+        .attr("class", d => d.small ? "frontier-label frontier-label--mobile" : "frontier-label")
         .attr("x", d => d.x)
         .attr("y", d => d.y)
         .attr("text-anchor", d => d.anchor)
@@ -2271,13 +2419,18 @@ function lastNameOf(playerID) {
 function layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, pointR, isSmall) {
     if (!frontier.length) return [];
 
-    // On narrow phones, only label the two extreme endpoints to avoid clutter.
-    let candidates;
-    if (isSmall && frontier.length > 2) {
-        candidates = [frontier[0], frontier[frontier.length - 1]];
-    } else {
-        candidates = frontier;
+    // On narrow phones: show all frontier points with abbreviated names below each dot.
+    if (isSmall) {
+        return frontier.map(p => ({
+            text: lastNameOf(p.playerID).slice(0, 4),
+            x: xScale(p.x),
+            y: yScale(p.y) + pointR + 10,
+            anchor: "middle",
+            small: true,
+        }));
     }
+
+    let candidates = frontier;
 
     const CHAR_W = 6.2;
     const H = 12;

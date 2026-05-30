@@ -158,47 +158,29 @@
                             <button type="button" class="mode-btn" data-mode="career">Career</button>
                         </div>
                     </div>
-                    <div class="toggle-cell">
-                        <span class="toggle-cell-label">Frontier</span>
-                        <div class="mode-toggle compact" role="group" aria-label="Frontier type">
-                            <button type="button" class="frontier-btn mode-btn active" data-mode="best">Best</button>
-                            <button type="button" class="frontier-btn mode-btn" data-mode="worst">Worst</button>
-                        </div>
-                    </div>
                 </div>
                 <p class="control-hint" id="mode-hint" hidden>Each dot is one player's single season.</p>
 
                 <fieldset class="control-group">
-                    <legend>Axes</legend>
+                    <legend class="sr-only">Axes</legend>
                     <div class="field-row">
-                        <label class="field-label">
-                            <span>X
-                                <button type="button" class="glossary-btn" data-target="x-axis-select" aria-label="What does this stat mean?">?</button>
-                            </span>
-                            <select id="x-axis-select" class="field"></select>
-                        </label>
-                        <label class="field-label">
-                            <span>Y
-                                <button type="button" class="glossary-btn" data-target="y-axis-select" aria-label="What does this stat mean?">?</button>
-                            </span>
-                            <select id="y-axis-select" class="field"></select>
-                        </label>
+                        <span class="axis-inline-label">X <button type="button" class="glossary-btn" data-target="x-axis-select" aria-label="What does this stat mean?">?</button></span>
+                        <select id="x-axis-select" class="field" aria-label="X axis statistic"></select>
+                        <span class="axis-inline-label">Y <button type="button" class="glossary-btn" data-target="y-axis-select" aria-label="What does this stat mean?">?</button></span>
+                        <select id="y-axis-select" class="field" aria-label="Y axis statistic"></select>
+                        <div class="mode-toggle compact" role="group" aria-label="Frontier direction">
+                            <button type="button" class="frontier-btn mode-btn active" data-mode="best">Best</button>
+                            <button type="button" class="frontier-btn mode-btn" data-mode="worst">Worst</button>
+                        </div>
                     </div>
                 </fieldset>
 
                 <fieldset class="control-group">
                     <legend>
                         <span id="threshold-label">Min Plate Appearances</span>
-                        <output id="pa-min-value" for="pa-min-select" class="legend-value">0</output>
+                        <output id="pa-min-value" for="pa-min-select" class="legend-value">502</output>
                     </legend>
-                    <input type="range" id="pa-min-select" class="slider" min="0" max="600" step="1" value="0">
-                    <div class="preset-row" role="group" aria-label="Threshold presets">
-                        <button type="button" class="preset" data-pa="0">All</button>
-                        <button type="button" class="preset" data-pa="100">100</button>
-                        <button type="button" class="preset" data-pa="300">300</button>
-                        <button type="button" class="preset" data-pa="502">502</button>
-                    </div>
-                    <p class="control-hint" id="threshold-hint">502 PA qualifies for the batting title.</p>
+                    <input type="range" id="pa-min-select" class="slider" min="0" max="600" step="1" value="502">
                 </fieldset>
 
                 <fieldset class="control-group">
@@ -212,17 +194,7 @@
                             <svg id="anim-icon-stop" width="10" height="10" viewBox="0 0 10 10" fill="currentColor" hidden><rect width="10" height="10" rx="1"/></svg>
                         </button>
                     </div>
-                    <div class="preset-row year-preset-row" role="group" aria-label="Era presets">
-                        <button type="button" class="preset" data-sy="1920">Default</button>
-                        <button type="button" class="preset" data-sy="1871" data-ey="2025">All</button>
-                        <button type="button" class="preset" data-sy="1900" data-ey="1919">Dead Ball</button>
-                        <button type="button" class="preset" data-sy="1920" data-ey="1941">Live Ball</button>
-                        <button type="button" class="preset" data-sy="1942" data-ey="1968">Integration</button>
-                        <button type="button" class="preset" data-sy="1969" data-ey="1992">Free Agency</button>
-                        <button type="button" class="preset" data-sy="1993" data-ey="2005">Steroid</button>
-                        <button type="button" class="preset" data-sy="2006" data-ey="2025">Modern</button>
-                    </div>
-                    <p class="control-hint" id="year-hint" hidden></p>
+
                 </fieldset>
 
                 <fieldset class="control-group">
@@ -230,17 +202,6 @@
                     <div id="franchise-row">
                         <div id="franchise-panel" class="franchise-panel" role="listbox" aria-label="Select franchise"></div>
                         <select id="franchise-select" hidden aria-hidden="true" tabindex="-1"></select>
-                    </div>
-                    <div class="filter-row" id="scope-row">
-                        <span class="filter-label">Scope</span>
-                        <div class="mode-toggle compact" role="group" id="scope-toggle">
-                            <button type="button" class="mode-btn active" data-scope="franchise">Franchise</button>
-                            <button type="button" class="mode-btn" data-scope="team">Team</button>
-                        </div>
-                    </div>
-                    <div id="team-row" hidden>
-                        <select id="team-select" class="field" aria-label="Team"></select>
-                        <p class="control-hint">Teams shown for selected year range.</p>
                     </div>
                     <div class="filter-row">
                         <span class="filter-label">Bats</span>
@@ -255,9 +216,9 @@
                         <div id="country-panel" class="country-panel" role="listbox" aria-label="Country of birth"></div>
                         <select id="country-select" hidden aria-hidden="true" tabindex="-1"></select>
                     </div>
-                    <div class="filter-row">
-                        <input type="text" id="player-search" list="player-datalist" class="field" placeholder="Search player…" autocomplete="off" aria-label="Highlight player seasons">
-                        <datalist id="player-datalist"></datalist>
+                    <div class="filter-row player-search-row">
+                        <input type="text" id="player-search" class="field" placeholder="Search player…" autocomplete="off" aria-label="Highlight player seasons" aria-autocomplete="list" aria-controls="player-suggestions">
+                        <div id="player-suggestions" class="player-suggestions" hidden role="listbox" aria-label="Player suggestions"></div>
                     </div>
                     <div class="player-chips" id="player-hint" hidden></div>
                     <div class="filter-row">
