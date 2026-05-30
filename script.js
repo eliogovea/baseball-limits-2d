@@ -554,10 +554,6 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             tooltipPinned = false;
             document.getElementById("tooltip").setAttribute("data-visible", "false");
         }
-        if (isolationPinned) {
-            isolationPinned = null;
-            dirty = true;
-        }
         if (careerHighlights.size > 0) {
             clearHighlights();
             syncPlayerHint();
@@ -1708,7 +1704,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                 .attr("x", labelX + 8)
                 .attr("y", labelY - 8)
                 .attr("text-anchor", "start")
-                .text(`−${(fraction * 100).toFixed(1)}%`);
+                .text(`−${(fraction * 100).toFixed(1)}% of frontier area`);
         }
     }
 
@@ -1839,17 +1835,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
 
     const ringGroup = g.append("g").attr("class", "isolation-ring-group");
 
-    // Restore pinned isolation ring across redraws.
-    if (isolationPinned) {
-        const match = frontier.find(p =>
-            p.x === isolationPinned.x && p.y === isolationPinned.y &&
-            p.playerID === isolationPinned.playerID);
-        if (match) {
-            drawIsolationRingPinned(ringGroup, isolationMap.get(match), isoRingColor(match), plotW, plotH);
-        } else {
-            isolationPinned = null;
-        }
-    }
+
 
     // When players are career-highlighted, show the combined polygon for what
     // the frontier loses if all their seasons were removed.
@@ -1874,13 +1860,11 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         let hvLine = "";
         if (frontierSet.has(d) && hvByPoint.has(d)) {
             const it = hvByPoint.get(d);
-            const rateStats = activeDataset().rateStats || new Set();
-            const formatHv = (v) => (rateStats.has(xDim) || rateStats.has(yDim)) ? v.toFixed(4) : v.toLocaleString(undefined, { maximumFractionDigits: 1 });
-            hvLine = `<div class="tooltip-subheader">HV contribution: ${formatHv(it.contribution)} (${(it.fraction * 100).toFixed(1)}%)</div>`;
+            hvLine = `<div class="tooltip-subheader">Controls ${(it.fraction * 100).toFixed(1)}% of the frontier area</div>`;
             const nSeasons = frontierSeasonCount.get(d.playerID) || 0;
             if (nSeasons > 1) {
                 const pi = hvPlayerMap.get(d.playerID);
-                if (pi) hvLine += `<div class="tooltip-subheader">All ${nSeasons} frontier seasons: −${(pi.fraction * 100).toFixed(1)}% if removed</div>`;
+                if (pi) hvLine += `<div class="tooltip-subheader">All ${nSeasons} seasons combined: ${(pi.fraction * 100).toFixed(1)}%</div>`;
             }
         }
         const visible = seasons.slice(0, 6);
@@ -1901,10 +1885,10 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         tooltip.innerHTML = head + hvLine + body + more;
         tooltip.setAttribute("data-visible", "true");
         positionTooltip(event, tooltip);
-        // Show hover ring for frontier points (skip if a pin is already shown)
+        // Show hover ring for frontier points (hover only, not when tooltip is pinned by click)
         ringGroup.select(".isolation-ring--hover").remove();
         hvRectGroup.selectAll(".hv-contrib-overlay--hover").remove();
-        if (!isolationPinned && frontierSet.has(d)) {
+        if (!tooltipPinned && frontierSet.has(d)) {
             const iso = isolationMap.get(d);
             if (iso && iso.r > 0) {
                 ringGroup.append("circle")
@@ -1922,10 +1906,8 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const hideTooltip = (force = false) => {
         if (tooltipPinned && !force) return;
         tooltip.setAttribute("data-visible", "false");
-        if (!isolationPinned) {
-            ringGroup.select(".isolation-ring--hover").remove();
-            hvRectGroup.selectAll(".hv-contrib-overlay--hover").remove();
-        }
+        ringGroup.select(".isolation-ring--hover").remove();
+        hvRectGroup.selectAll(".hv-contrib-overlay--hover").remove();
     };
 
     // Brush layer: drag a rectangle on empty chart area to zoom in. Mounted
@@ -2008,17 +1990,8 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             tooltipPinned = true;
             event.stopPropagation();
             if (frontierSet.has(d)) {
-                const iso = isolationMap.get(d);
-                // Toggle pin: clicking the same frontier point again unpins
-                const alreadyPinned = isolationPinned &&
-                    isolationPinned.x === d.x && isolationPinned.y === d.y &&
-                    isolationPinned.playerID === d.playerID;
-                isolationPinned = alreadyPinned ? null : d;
-                // Redraw ring immediately without a full chart refresh
-                ringGroup.selectAll(".isolation-ring--pinned,.isolation-ring--hover,.isolation-ring-label,.isolation-ring-spoke,.isolation-ring-neighbour").remove();
-                if (isolationPinned && iso && iso.r > 0) {
-                    drawIsolationRingPinned(ringGroup, iso, isoRingColor(d), plotW, plotH);
-                }
+                // Clear any hover ring when clicking
+                ringGroup.selectAll(".isolation-ring--hover").remove();
                 // Season mode: also add career highlight
                 if (mode === "season") {
                     const seasons = filtered
@@ -2204,7 +2177,7 @@ function renderFrontierCards(frontier, xDim, yDim, formatStat, totalUnits, mode 
                 <div class="frontier-card-year">${yearLabel}</div>
                 <div class="frontier-card-team">${subLine}</div>
                 <div class="frontier-card-stats">${xDim} ${formatStat(xDim, p.x)} · ${yDim} ${formatStat(yDim, p.y)}</div>
-                ${hvByPoint && hvByPoint.has(p) ? `<div class="frontier-card-hv">Owns ${(hvByPoint.get(p).fraction * 100).toFixed(1)}% of dominated area</div>` : ""}
+                ${hvByPoint && hvByPoint.has(p) ? `<div class="frontier-card-hv">Controls ${(hvByPoint.get(p).fraction * 100).toFixed(1)}% of the frontier area</div>` : ""}
                 <div class="frontier-card-era">${era ? era.name : "—"}</div>
             </article>
         `;
