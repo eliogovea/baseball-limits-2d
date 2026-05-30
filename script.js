@@ -1650,13 +1650,26 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             .on("mouseleave", function() { if (glossaryHide) glossaryHide(); });
     }
 
-    // Frontier connecting line first (under points).
-    if (frontier.length > 1) {
-        const line = d3.line().x(d => xScale(d.x)).y(d => yScale(d.y));
+    // Frontier staircase: the true Pareto boundary — horizontal and vertical
+    // segments only. At each frontier point, drop to the next point's y at this
+    // point's x, then go right to the next point's x.
+    // Left: extends horizontally to chart left at frontier[0].y (nothing to the
+    //   left with y ≤ F0.y is non-dominated).
+    // Right: drops vertically to chart bottom at frontier[-1].x (nothing to the
+    //   right of the last point is dominated by any frontier point).
+    if (frontier.length > 0) {
+        const last = frontier[frontier.length - 1];
+        const scPts = [[0, yScale(frontier[0].y)]];
+        for (let i = 0; i < frontier.length; i++) {
+            scPts.push([xScale(frontier[i].x), yScale(frontier[i].y)]);
+            if (i < frontier.length - 1) {
+                scPts.push([xScale(frontier[i].x), yScale(frontier[i + 1].y)]);
+            }
+        }
+        scPts.push([xScale(last.x), plotH]);
         g.append("path")
-            .datum(frontier)
-            .attr("class", "frontier-line")
-            .attr("d", line)
+            .attr("class", "frontier-staircase")
+            .attr("d", "M " + scPts.map(p => p.join(",")).join(" L "))
             .style("stroke", showWorstFrontier ? "#8b5cf6" : null);
     }
 
@@ -1841,18 +1854,24 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                 //    vertical to its y.  Extend left/right to chart edges so both
                 //    paths share the same horizontal extent.
                 const leftX = 0, rightX = plotW;
+                // Build staircase path points: extend to left edge at first y,
+                // drop to NEXT point's y at EACH point's x (the correct Pareto
+                // step direction), then drop to plotH at the last point's x so
+                // the polygon closes at the chart bottom for extreme points.
                 function staircasePts(fr) {
                     if (!fr.length) return [[leftX, plotH], [rightX, plotH]];
                     const pts = [];
-                    let curY = yScale(fr[0].y);
-                    pts.push([leftX, curY]);
-                    for (const p of fr) {
-                        const sx = xScale(p.x), sy = yScale(p.y);
-                        pts.push([sx, curY]);
-                        pts.push([sx, sy]);
-                        curY = sy;
+                    pts.push([leftX, yScale(fr[0].y)]);
+                    for (let i = 0; i < fr.length; i++) {
+                        const sx = xScale(fr[i].x), sy = yScale(fr[i].y);
+                        pts.push([sx, sy]);                              // the frontier point
+                        if (i < fr.length - 1) {
+                            pts.push([sx, yScale(fr[i + 1].y)]);        // drop to next y at this x
+                        } else {
+                            pts.push([sx, plotH]);                       // last point: drop to bottom
+                        }
                     }
-                    pts.push([rightX, curY]);
+                    pts.push([rightX, plotH]);
                     return pts;
                 }
 
@@ -2179,12 +2198,10 @@ function renderFrontierCards(frontier, xDim, yDim, formatStat, totalUnits, mode 
     }).join("");
 }
 
-// Leave-one-out hypervolume contribution for a 2D Pareto frontier.
-// Returns per-point exclusive rectangle area relative to a reference point.
-// Invariants: Σ items[i].contribution === totalHv (within FP tolerance);
-// for n=1, items[0].contribution === totalHv;
-// removing items[i].point and recomputing yields totalHv − items[i].contribution.
-// O(F), F = frontier.length.
+// Exact leave-one-out hypervolume contribution for a 2D Pareto frontier.
+// For each frontier point, re-sweeps `unique` excluding that point to find
+// the actual replacement frontier (cloud points may fill in), then takes
+// ΔHV = totalHv − altHv. O(F × N), F = frontier length, N = unique points.
 function computeHvContributions(frontier, xSign, ySign, unique) {
     if (!frontier || frontier.length === 0) {
         return { refPoint: { x: 0, y: 0 }, totalHv: 0, items: [] };
@@ -2204,34 +2221,39 @@ function computeHvContributions(frontier, xSign, ySign, unique) {
     const Ry = yMinS - epsY;
     const refPoint = { x: Rx * xSign, y: Ry * ySign };
 
-    // frontier is x-asc, y non-increasing in signed space (post-sweep).
+    // 2D hypervolume via vertical strip decomposition.
+    // fr must be sorted by x*xSign ascending, y*ySign non-increasing.
+    function hvOf(fr) {
+        let hv = 0, xPrev = Rx;
+        for (const p of fr) {
+            hv += (p.x * xSign - xPrev) * (p.y * ySign - Ry);
+            xPrev = p.x * xSign;
+        }
+        return hv;
+    }
+
+    // Re-sweep universe excluding `skip` — same algorithm as the main sweep.
+    function sweepExcluding(skip) {
+        const fr = [];
+        for (const p of universe) {
+            if (p === skip) continue;
+            const py = p.y * ySign;
+            while (fr.length && fr[fr.length - 1].y * ySign < py) fr.pop();
+            if (fr.length && fr[fr.length - 1].y === p.y &&
+                fr[fr.length - 1].x * xSign < p.x * xSign) fr.pop();
+            fr.push(p);
+        }
+        return fr;
+    }
+
+    const totalHv = hvOf(frontier);
     const n = frontier.length;
     const items = new Array(n);
-    let totalHv = 0;
     for (let i = 0; i < n; i++) {
         const p = frontier[i];
-        const xsI = p.x * xSign;
-        const ysI = p.y * ySign;
-        const xsPrev = i === 0 ? Rx : frontier[i - 1].x * xSign;
-        const ysNext = i === n - 1 ? Ry : frontier[i + 1].y * ySign;
-        const w = xsI - xsPrev;
-        const h = ysI - ysNext;
-        const contribution = w * h;
-        totalHv += contribution;
-        // Reconstruct rect in original (un-signed) coords.
-        const xPrev = xsPrev * xSign;
-        const yNext = ysNext * ySign;
-        items[i] = {
-            point: p,
-            contribution,
-            fraction: 0,  // filled in once totalHv is known
-            rect: {
-                x0: Math.min(xPrev, p.x),
-                x1: Math.max(xPrev, p.x),
-                y0: Math.min(yNext, p.y),
-                y1: Math.max(yNext, p.y),
-            },
-        };
+        const altFrontier = sweepExcluding(p);
+        const contribution = totalHv - hvOf(altFrontier);
+        items[i] = { point: p, contribution, fraction: 0 };
     }
     if (totalHv > 0) {
         for (const it of items) it.fraction = it.contribution / totalHv;

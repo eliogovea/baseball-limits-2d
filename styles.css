@@ -252,10 +252,10 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     stroke-width: 1.5;
     transition: r var(--transition);
 }
-.frontier-line {
+.frontier-staircase {
+    fill: none;
     stroke: var(--mlb-red);
     stroke-width: 2;
-    fill: none;
     opacity: 0.55;
     pointer-events: none;
 }
