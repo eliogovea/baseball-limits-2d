@@ -79,7 +79,7 @@ Status convention: `- [ ]` open, `- [x] *(shipped <sha>)*` shipped. Items with a
 
 - [ ] **"Almost frontier" band** — a faint second layer just inside the frontier showing seasons within, say, 5% of both axis values simultaneously. Shows how deep the talent pool is right behind the record-holders and makes the frontier's exclusivity visible.
 
-- [x] **Distance-to-frontier for non-frontier points** — for every season *off* the frontier, compute the shortest objective-space distance to the nearest red dot (Euclidean, dominance distance, or an additive/multiplicative epsilon indicator). Encode as cloud-dot opacity or surface as a "regret" tooltip line — e.g. "Mike Trout 2018 was 4 HR and 0.012 AVG away from the frontier." Turns the background cloud into a heatmap of near-misses. *(shipped pending commit)*
+- [x] **Distance-to-frontier for non-frontier points** — for every season *off* the frontier, compute the shortest objective-space distance to the nearest red dot (Euclidean, dominance distance, or an additive/multiplicative epsilon indicator). Encode as cloud-dot opacity or surface as a "regret" tooltip line — e.g. "Mike Trout 2018 was 4 HR and 0.012 AVG away from the frontier." Turns the background cloud into a heatmap of near-misses. *(shipped 7b9a80e)*
 
 - [ ] **Knee-point / curvature highlight** — flag frontier seasons where the curve bends sharpest. Knee points are the "sweet spot" records: small sacrifice on either axis for a large gain on the other, often the most interesting tradeoffs in a discussion. Compute via local curvature or the angle between adjacent frontier segments and emphasise those dots with a halo or label.
 
