@@ -57,41 +57,48 @@ const COUNTRY_FLAGS = {
 // Current 30 MLB franchises with every historical Lahman teamID that belongs
 // to the same franchise. Used for the franchise filter dropdown.
 const FRANCHISES = [
-    { id: "ari", name: "Arizona Diamondbacks",                         teams: ["ARI"] },
-    { id: "atl", name: "Atlanta Braves",        note: "incl. Boston & Milwaukee",      teams: ["BSN","BS1","BS2","ML1","ATL"] },
-    { id: "bal", name: "Baltimore Orioles",     note: "incl. St. Louis Browns",        teams: ["SLA","SL4","BAL"] },
-    { id: "bos", name: "Boston Red Sox",                               teams: ["BOS"] },
-    { id: "chc", name: "Chicago Cubs",          note: "incl. White Stockings era",     teams: ["CHN","CH1","CH2"] },
-    { id: "cws", name: "Chicago White Sox",                            teams: ["CHA"] },
-    { id: "cin", name: "Cincinnati Reds",                              teams: ["CIN","CN1","CN2","CN3","CNU"] },
-    { id: "cle", name: "Cleveland Guardians",   note: "incl. Indians/Spiders/Blues",   teams: ["CL1","CL2","CL3","CL4","CL5","CL6","CLE"] },
-    { id: "col", name: "Colorado Rockies",                             teams: ["COL"] },
-    { id: "det", name: "Detroit Tigers",                               teams: ["DET"] },
-    { id: "hou", name: "Houston Astros",                               teams: ["HOU"] },
-    { id: "kc",  name: "Kansas City Royals",                           teams: ["KCA"] },
-    { id: "laa", name: "Los Angeles Angels",    note: "incl. California & Anaheim",    teams: ["CAL","ANA","LAA"] },
-    { id: "lad", name: "Los Angeles Dodgers",   note: "incl. Brooklyn",                teams: ["BRO","LAN"] },
-    { id: "mia", name: "Miami Marlins",         note: "incl. Florida Marlins",         teams: ["FLO","MIA"] },
-    { id: "mil", name: "Milwaukee Brewers",                                           teams: ["MIL"] },
-    { id: "min", name: "Minnesota Twins",       note: "incl. Washington Senators",     teams: ["WS1","MIN"] },
-    { id: "nym", name: "New York Mets",                                teams: ["NYN"] },
-    { id: "nyy", name: "New York Yankees",      note: "incl. Highlanders",             teams: ["NYA"] },
-    { id: "oak", name: "Oakland Athletics",     note: "incl. Philadelphia & KC A's",   teams: ["PHA","KC1","KC2","OAK"] },
-    { id: "phi", name: "Philadelphia Phillies",                        teams: ["PHI","PHP"] },
-    { id: "pit", name: "Pittsburgh Pirates",                           teams: ["PIT"] },
-    { id: "sd",  name: "San Diego Padres",                             teams: ["SDN"] },
-    { id: "sea", name: "Seattle Mariners",                             teams: ["SEA"] },
-    { id: "sf",  name: "San Francisco Giants",  note: "incl. New York Giants",         teams: ["NY1","SFN"] },
-    { id: "stl", name: "St. Louis Cardinals",                          teams: ["SLN","SL1","SL5"] },
-    { id: "tb",  name: "Tampa Bay Rays",        note: "orig. Devil Rays",              teams: ["TBA"] },
-    { id: "tex", name: "Texas Rangers",         note: "incl. Washington Senators '61", teams: ["WS2","TEX"] },
-    { id: "tor", name: "Toronto Blue Jays",                            teams: ["TOR"] },
-    { id: "was", name: "Washington Nationals",  note: "incl. Montreal Expos",          teams: ["MON","WAS"] },
+    { id: "ari", abbr: "ARI", color: "#A71930", division: "NL West",    name: "Arizona Diamondbacks",                         teams: ["ARI"] },
+    { id: "atl", abbr: "ATL", color: "#CE1141", division: "NL East",    name: "Atlanta Braves",        note: "incl. Boston & Milwaukee",      teams: ["BSN","BS1","BS2","ML1","ATL"] },
+    { id: "bal", abbr: "BAL", color: "#DF4601", division: "AL East",    name: "Baltimore Orioles",     note: "incl. St. Louis Browns",        teams: ["SLA","SL4","BAL"] },
+    { id: "bos", abbr: "BOS", color: "#BD3039", division: "AL East",    name: "Boston Red Sox",                               teams: ["BOS"] },
+    { id: "chc", abbr: "CHC", color: "#0E3386", division: "NL Central", name: "Chicago Cubs",          note: "incl. White Stockings era",     teams: ["CHN","CH1","CH2"] },
+    { id: "cws", abbr: "CWS", color: "#27251F", division: "AL Central", name: "Chicago White Sox",                            teams: ["CHA"] },
+    { id: "cin", abbr: "CIN", color: "#C6011F", division: "NL Central", name: "Cincinnati Reds",                              teams: ["CIN","CN1","CN2","CN3","CNU"] },
+    { id: "cle", abbr: "CLE", color: "#00385D", division: "AL Central", name: "Cleveland Guardians",   note: "incl. Indians/Spiders/Blues",   teams: ["CL1","CL2","CL3","CL4","CL5","CL6","CLE"] },
+    { id: "col", abbr: "COL", color: "#33006F", division: "NL West",    name: "Colorado Rockies",                             teams: ["COL"] },
+    { id: "det", abbr: "DET", color: "#0C2C56", division: "AL Central", name: "Detroit Tigers",                               teams: ["DET"] },
+    { id: "hou", abbr: "HOU", color: "#002D62", division: "AL West",    name: "Houston Astros",                               teams: ["HOU"] },
+    { id: "kc",  abbr: "KC",  color: "#004687", division: "AL Central", name: "Kansas City Royals",                           teams: ["KCA"] },
+    { id: "laa", abbr: "LAA", color: "#BA0021", division: "AL West",    name: "Los Angeles Angels",    note: "incl. California & Anaheim",    teams: ["CAL","ANA","LAA"] },
+    { id: "lad", abbr: "LAD", color: "#005A9C", division: "NL West",    name: "Los Angeles Dodgers",   note: "incl. Brooklyn",                teams: ["BRO","LAN"] },
+    { id: "mia", abbr: "MIA", color: "#00A3E0", division: "NL East",    name: "Miami Marlins",         note: "incl. Florida Marlins",         teams: ["FLO","MIA"] },
+    { id: "mil", abbr: "MIL", color: "#12284B", division: "NL Central", name: "Milwaukee Brewers",                                           teams: ["MIL"] },
+    { id: "min", abbr: "MIN", color: "#002B5C", division: "AL Central", name: "Minnesota Twins",       note: "incl. Washington Senators",     teams: ["WS1","MIN"] },
+    { id: "nym", abbr: "NYM", color: "#002D72", division: "NL East",    name: "New York Mets",                                teams: ["NYN"] },
+    { id: "nyy", abbr: "NYY", color: "#0C2340", division: "AL East",    name: "New York Yankees",      note: "incl. Highlanders",             teams: ["NYA"] },
+    { id: "oak", abbr: "OAK", color: "#003831", division: "AL West",    name: "Oakland Athletics",     note: "incl. Philadelphia & KC A's",   teams: ["PHA","KC1","KC2","OAK"] },
+    { id: "phi", abbr: "PHI", color: "#E81828", division: "NL East",    name: "Philadelphia Phillies",                        teams: ["PHI","PHP"] },
+    { id: "pit", abbr: "PIT", color: "#FDB827", division: "NL Central", name: "Pittsburgh Pirates",                           teams: ["PIT"] },
+    { id: "sd",  abbr: "SD",  color: "#2F241D", division: "NL West",    name: "San Diego Padres",                             teams: ["SDN"] },
+    { id: "sea", abbr: "SEA", color: "#0C2C56", division: "AL West",    name: "Seattle Mariners",                             teams: ["SEA"] },
+    { id: "sf",  abbr: "SF",  color: "#FD5A1E", division: "NL West",    name: "San Francisco Giants",  note: "incl. New York Giants",         teams: ["NY1","SFN"] },
+    { id: "stl", abbr: "STL", color: "#C41E3A", division: "NL Central", name: "St. Louis Cardinals",                          teams: ["SLN","SL1","SL5"] },
+    { id: "tb",  abbr: "TB",  color: "#092C5C", division: "AL East",    name: "Tampa Bay Rays",        note: "orig. Devil Rays",              teams: ["TBA"] },
+    { id: "tex", abbr: "TEX", color: "#003278", division: "AL West",    name: "Texas Rangers",         note: "incl. Washington Senators '61", teams: ["WS2","TEX"] },
+    { id: "tor", abbr: "TOR", color: "#134A8E", division: "AL East",    name: "Toronto Blue Jays",                            teams: ["TOR"] },
+    { id: "was", abbr: "WSH", color: "#AB0003", division: "NL East",    name: "Washington Nationals",  note: "incl. Montreal Expos",          teams: ["MON","WAS"] },
 ];
-// Fast lookup: teamID → franchise id
-const FRANCHISE_BY_TEAM = new Map(
-    FRANCHISES.flatMap(f => f.teams.map(t => [t, f.id]))
-);
+// Fast lookups
+const FRANCHISE_BY_TEAM = new Map(FRANCHISES.flatMap(f => f.teams.map(t => [t, f.id])));
+const FRANCHISE_BY_ID   = new Map(FRANCHISES.map(f => [f.id, f]));
+const DIVISIONS = [
+    { label: "AL East",    ids: ["nyy","bos","tb","tor","bal"] },
+    { label: "AL Central", ids: ["cle","cws","det","kc","min"] },
+    { label: "AL West",    ids: ["hou","laa","oak","sea","tex"] },
+    { label: "NL East",    ids: ["atl","mia","nym","phi","was"] },
+    { label: "NL Central", ids: ["chc","cin","mil","pit","stl"] },
+    { label: "NL West",    ids: ["ari","col","lad","sd","sf"] },
+];
 
 // Career-highlight state. Set when the user clicks a frontier point; cleared
 // on outside click, Escape, or any filter change.
@@ -338,6 +345,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     populateSelectorsForActive();
     populateCountrySelect(datasetState.batting.playerIndex);
     populateFranchiseSelect();
+    buildFranchisePicker();
     populatePlayerDatalist();
     setupControlsToggle();
     setupPaPresets();
@@ -396,6 +404,8 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             teamRow.hidden = false;
             const frSel = document.getElementById("franchise-select");
             if (frSel) frSel.value = "all";
+            updateFranchiseTrigger("all");
+            updateChipSelection("all");
         }
         clearHighlights();
         syncPlayerHint();
@@ -622,26 +632,76 @@ function buildMetaFromPeopleCsv(rows) {
 }
 
 
+function updateCountrySelection(country) {
+    const panel = document.getElementById("country-panel");
+    if (!panel) return;
+    panel.querySelectorAll(".country-chip").forEach(chip => {
+        const selected = (chip.dataset.country || "all") === (country || "all");
+        chip.classList.toggle("country-chip--selected", selected);
+        chip.setAttribute("aria-selected", selected ? "true" : "false");
+    });
+}
+
 function populateCountrySelect(playerIdx) {
-    const sel = document.getElementById("country-select");
-    if (!sel) return;
+    const panel = document.getElementById("country-panel");
+    const sel   = document.getElementById("country-select");
+    if (!panel || !sel) return;
+
     const counts = new Map();
     for (const playerID of playerIdx.keys()) {
         const m = metaFor(playerID);
         if (!m || !m.country) continue;
         counts.set(m.country, (counts.get(m.country) || 0) + 1);
     }
-    // Show "All" first, then countries with at least 5 players, sorted alphabetically.
+    // Sort by count descending; show countries with ≥5 players.
     const list = [...counts.entries()]
         .filter(([, n]) => n >= 5)
-        .map(([c, n]) => ({ c, n }))
-        .sort((a, b) => a.c.localeCompare(b.c));
-    sel.innerHTML = `<option value="all">All countries</option>` +
-        list.map(({ c, n }) => {
-            const flag = COUNTRY_FLAGS[c] ? COUNTRY_FLAGS[c] + " " : "";
-            return `<option value="${escapeHtml(c)}">${flag}${escapeHtml(c)} (${n.toLocaleString()})</option>`;
-        }).join("");
+        .sort((a, b) => b[1] - a[1])
+        .map(([c, n]) => ({ c, n }));
+
+    // Populate hidden <select> for applyUrlState / setSelect compatibility.
+    sel.innerHTML = `<option value="all">All</option>` +
+        list.map(({ c }) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
     sel.value = "all";
+
+    // Build chip panel.
+    panel.innerHTML = "";
+
+    const allChip = document.createElement("button");
+    allChip.type = "button";
+    allChip.className = "country-chip country-chip--all country-chip--selected";
+    allChip.setAttribute("role", "option");
+    allChip.setAttribute("aria-selected", "true");
+    allChip.dataset.country = "all";
+    allChip.textContent = "All countries";
+    panel.appendChild(allChip);
+
+    const grid = document.createElement("div");
+    grid.className = "country-chip-grid";
+    for (const { c, n } of list) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "country-chip";
+        chip.setAttribute("role", "option");
+        chip.setAttribute("aria-selected", "false");
+        chip.setAttribute("aria-label", `${c} (${n.toLocaleString()} players)`);
+        chip.dataset.country = c;
+        const flag = COUNTRY_FLAGS[c] || "";
+        chip.innerHTML = flag
+            ? `<span class="country-flag" aria-hidden="true">${flag}</span><span class="country-name">${escapeHtml(c)}</span>`
+            : `<span class="country-name">${escapeHtml(c)}</span>`;
+        grid.appendChild(chip);
+    }
+    panel.appendChild(grid);
+
+    panel.addEventListener("click", e => {
+        const chip = e.target.closest(".country-chip");
+        if (!chip) return;
+        const val = chip.dataset.country || "all";
+        sel.value = val;
+        updateCountrySelection(val);
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+    });
 }
 
 
@@ -723,6 +783,7 @@ function applyUrlState() {
     setSeg("league-seg", "league", u.lg);
     setSeg("bats-seg", "bats", u.bt);
     setSelect("country-select", u.co);
+    updateCountrySelection(document.getElementById("country-select")?.value || "all");
     if (u.tm && u.tm !== "all") {
         // Restore team scope toggle
         document.querySelectorAll("#scope-toggle .mode-btn").forEach(b =>
@@ -732,6 +793,9 @@ function applyUrlState() {
         setSelect("team-select", u.tm);
     } else {
         setSelect("franchise-select", u.fr);
+        const frVal = document.getElementById("franchise-select")?.value || "all";
+        updateFranchiseTrigger(frVal);
+        updateChipSelection(frVal);
     }
     if (u.hl) { u.hl.split(",").forEach(id => addHighlight(id.trim())); }
     if (u.hv === "1") {
@@ -1392,6 +1456,104 @@ function populateFranchiseSelect() {
             const note = f.note ? ` (${f.note})` : "";
             return `<option value="${escapeHtml(f.id)}">${escapeHtml(f.name)}${escapeHtml(note)}</option>`;
         }).join("");
+}
+
+function updateFranchiseTrigger(id) {
+    const trigger = document.getElementById("franchise-trigger");
+    if (!trigger) return;
+    const f = FRANCHISE_BY_ID.get(id);
+    trigger.querySelector(".franchise-trigger-label").textContent = f ? f.name : "All franchises";
+}
+
+function updateChipSelection(id) {
+    const panel = document.getElementById("franchise-panel");
+    if (!panel) return;
+    panel.querySelectorAll(".franchise-chip").forEach(chip => {
+        const selected = (chip.dataset.id || "all") === (id || "all");
+        chip.classList.toggle("franchise-chip--selected", selected);
+        chip.setAttribute("aria-selected", selected ? "true" : "false");
+    });
+}
+
+function buildFranchisePicker() {
+    const panel = document.getElementById("franchise-panel");
+    if (!panel) return;
+
+    // League filter (All / AL / NL) at top of panel
+    const leagueRow = document.createElement("div");
+    leagueRow.className = "franchise-league-row";
+    const leagueSeg = document.createElement("div");
+    leagueSeg.className = "seg-group";
+    leagueSeg.id = "league-seg";
+    leagueSeg.setAttribute("role", "group");
+    leagueSeg.setAttribute("aria-label", "League");
+    [["all","All"],["AL","AL"],["NL","NL"]].forEach(([val, label], i) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "seg-btn" + (i === 0 ? " active" : "");
+        btn.dataset.league = val;
+        btn.textContent = label;
+        leagueSeg.appendChild(btn);
+    });
+    leagueRow.appendChild(leagueSeg);
+    panel.appendChild(leagueRow);
+
+    // "All" reset chip
+    const allChip = document.createElement("button");
+    allChip.type = "button";
+    allChip.className = "franchise-chip franchise-chip--all franchise-chip--selected";
+    allChip.setAttribute("role", "option");
+    allChip.setAttribute("aria-selected", "true");
+    allChip.dataset.id = "all";
+    allChip.textContent = "All franchises";
+    panel.appendChild(allChip);
+
+    // Division grid
+    const grid = document.createElement("div");
+    grid.className = "franchise-division-grid";
+    for (const div of DIVISIONS) {
+        const cell = document.createElement("div");
+        cell.className = "franchise-division-cell";
+        const label = document.createElement("span");
+        label.className = "franchise-division-label";
+        label.textContent = div.label;
+        cell.appendChild(label);
+        const row = document.createElement("div");
+        row.className = "franchise-chips-row";
+        for (const fid of div.ids) {
+            const f = FRANCHISE_BY_ID.get(fid);
+            if (!f) continue;
+            const chip = document.createElement("button");
+            chip.type = "button";
+            chip.className = "franchise-chip";
+            chip.setAttribute("role", "option");
+            chip.setAttribute("aria-selected", "false");
+            chip.setAttribute("aria-label", f.name);
+            chip.dataset.id = f.id;
+            chip.innerHTML =
+                `<span class="franchise-swatch" style="background:${f.color}" aria-hidden="true"></span>` +
+                `<span class="franchise-abbr">${escapeHtml(f.abbr)}</span>`;
+            row.appendChild(chip);
+        }
+        cell.appendChild(row);
+        grid.appendChild(cell);
+    }
+    panel.appendChild(grid);
+
+    function setFranchise(id) {
+        const sel = document.getElementById("franchise-select");
+        if (!sel) return;
+        sel.value = id;
+        updateFranchiseTrigger(id);
+        updateChipSelection(id);
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
+    panel.addEventListener("click", e => {
+        const chip = e.target.closest(".franchise-chip");
+        if (!chip) return;
+        setFranchise(chip.dataset.id || "all");
+    });
 }
 
 function populatePlayerDatalist() {
