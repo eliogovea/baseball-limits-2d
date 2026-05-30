@@ -109,7 +109,7 @@ Status convention: `- [ ]` open, `- [x] *(shipped <sha>)*` shipped. Items with a
 
 - [ ] **World map birthplace view** — a companion mini-map showing where frontier (or highlighted) players were born, one dot per player. Leverages the existing country/birthplace data already in the dataset.
 
-- [ ] **Player search box** — a typeahead in the filter panel that jumps the view to a specific player and pins their career highlight. The disambiguated display names already exist in `playerIndex`; just needs an autocomplete index over the existing map. Replaces the current "scroll the frontier card list and hope they're on it" flow with a direct lookup.
+- [x] **Player search box** *(shipped 7752a0f)* — a typeahead in the filter panel that highlights a player's seasons (colored dots, dimmed cloud) and pins them as a chip. Uses the disambiguated display names already in `playerIndex`. Replaces the "scroll the frontier card list and hope they're on it" flow with a direct lookup. (The box existed earlier but didn't highlight — `pick()` called the closure-scoped `refreshChart`; `7752a0f` routes it through the `bl2d:refresh` event.)
 
 - [ ] **Reduced-motion support** — honour `prefers-reduced-motion` to skip the frontier ▶ animation's per-step transitions and disable any future animated filter morphs. The current CSS has no `@media (prefers-reduced-motion)` block, so motion-sensitive users get the full animation either way. Easy a11y win.
 
