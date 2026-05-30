@@ -21,9 +21,9 @@ const COLOR_PALETTES = {
         unknown: { color: "#94a3b8", name: "Unknown" },
     },
     league: {
-        AL: { color: "#c8102e", name: "American" },
-        NL: { color: "#002d72", name: "National" },
-        unknown: { color: "#94a3b8", name: "Other" },
+        AL: { color: "#c8102e", dark: "#c8102e", name: "American" },
+        NL: { color: "#002d72", dark: "#002d72", name: "National" },
+        unknown: { color: "#94a3b8", dark: "#0f172a", name: "Other" },
     },
 };
 
@@ -1019,8 +1019,8 @@ function buildExportSvgString() {
 <style>
 svg { background: ${bg}; }
 .regular-point { fill-opacity: 0.4; }
-.special-point { fill: ${v("--mlb-red")}; stroke: #fff; stroke-width: 1.5; }
-.frontier-line { stroke: ${v("--mlb-red")}; stroke-width: 2; fill: none; opacity: 0.55; }
+.special-point { fill: ${v("--frontier-color")}; stroke: #fff; stroke-width: 1.5; }
+.frontier-line { stroke: ${v("--frontier-color")}; stroke-width: 2; fill: none; opacity: 0.55; }
 .career-point { fill: #f59e0b; stroke: #fff; stroke-width: 1.5; }
 .axis text { font-family: ${font}; font-size: 11px; fill: ${v("--text-muted")}; }
 .axis line, .axis path { stroke: ${v("--border")}; fill: none; }
@@ -1793,7 +1793,12 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         .attr("cx", d => xScale(d.x))
         .attr("cy", d => yScale(d.y))
         .attr("r", radiusFor)
-        .style("fill", d => careerHighlights.get(d.playerID) || frontierColor);
+        .style("fill", d => {
+            const careerColor = careerHighlights.get(d.playerID);
+            if (careerColor) return careerColor;
+            if (frontierColor) return frontierColor;
+            return (COLOR_PALETTES.league[d.lgID] || COLOR_PALETTES.league.unknown).dark;
+        });
 
     // On-chart frontier labels: greedy collision avoidance, mobile shows
     // only the two extreme endpoints so small viewports stay readable.
@@ -1815,7 +1820,8 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
 
     // Isolation ring: precompute nearest-neighbour distance (pixel space) for each
     // frontier point. Drawn on hover; locked in place by click.
-    const isoRingColor = showWorstFrontier ? "#8b5cf6" : "var(--mlb-red)";
+    const isoRingColor = d => showWorstFrontier ? "#8b5cf6"
+        : (COLOR_PALETTES.league[d.lgID] || COLOR_PALETTES.league.unknown).dark;
     const isolationMap = new Map();
     for (const fp of frontier) {
         const fpx = xScale(fp.x), fpy = yScale(fp.y);
@@ -1839,7 +1845,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             p.x === isolationPinned.x && p.y === isolationPinned.y &&
             p.playerID === isolationPinned.playerID);
         if (match) {
-            drawIsolationRingPinned(ringGroup, isolationMap.get(match), isoRingColor, plotW, plotH);
+            drawIsolationRingPinned(ringGroup, isolationMap.get(match), isoRingColor(match), plotW, plotH);
         } else {
             isolationPinned = null;
         }
@@ -1904,7 +1910,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                 ringGroup.append("circle")
                     .attr("class", "isolation-ring isolation-ring--hover")
                     .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
-                    .style("stroke", isoRingColor);
+                    .style("stroke", isoRingColor(d));
             }
             // Re-sweep without d, shade the polygon of area d exclusively controls.
             if (hvByPoint.has(d)) {
@@ -2011,7 +2017,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                 // Redraw ring immediately without a full chart refresh
                 ringGroup.selectAll(".isolation-ring--pinned,.isolation-ring--hover,.isolation-ring-label,.isolation-ring-spoke,.isolation-ring-neighbour").remove();
                 if (isolationPinned && iso && iso.r > 0) {
-                    drawIsolationRingPinned(ringGroup, iso, isoRingColor, plotW, plotH);
+                    drawIsolationRingPinned(ringGroup, iso, isoRingColor(d), plotW, plotH);
                 }
                 // Season mode: also add career highlight
                 if (mode === "season") {
@@ -2040,11 +2046,11 @@ function positionTooltip(event, tooltip) {
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     let x = event.clientX + pad;
-    let y = event.clientY + pad;
+    let y = event.clientY - ttRect.height - pad;
     if (x + ttRect.width + pad > vw) x = event.clientX - ttRect.width - pad;
-    if (y + ttRect.height + pad > vh) y = event.clientY - ttRect.height - pad;
+    if (y < pad) y = event.clientY + pad;
     if (x < pad) x = pad;
-    if (y < pad) y = pad;
+    if (y + ttRect.height + pad > vh) y = vh - ttRect.height - pad;
     tooltip.style.left = x + "px";
     tooltip.style.top = y + "px";
 }

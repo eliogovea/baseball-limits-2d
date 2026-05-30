@@ -3,6 +3,7 @@
     --mlb-blue-light: rgba(0, 45, 114, 0.35);
     --mlb-blue-hover: #001a44;
     --mlb-red: #c8102e;
+    --frontier-color: #0f172a;
 
     --bg: #f6f7f9;
     --panel: #ffffff;
@@ -242,19 +243,19 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
 
 .regular-point {
     /* Fill set inline per dot from the era color; opacity here keeps the
-       cloud subtle so frontier red and career gold still dominate. */
+       cloud subtle so frontier gold and career trail still dominate. */
     fill-opacity: 0.4;
     transition: r var(--transition);
 }
 .special-point {
-    fill: var(--mlb-red);
+    fill: var(--frontier-color);
     stroke: #ffffff;
     stroke-width: 1.5;
     transition: r var(--transition);
 }
 .frontier-staircase {
     fill: none;
-    stroke: var(--mlb-red);
+    stroke: var(--frontier-color);
     stroke-width: 2;
     opacity: 0.55;
     pointer-events: none;
@@ -366,7 +367,7 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     border-radius: 50%;
     display: inline-block;
 }
-.legend-dot--frontier { background: var(--mlb-red); }
+.legend-dot--frontier { background: var(--frontier-color); }
 .legend-dot--season   { background: var(--mlb-blue-light); }
 
 .chart-toolbar {
@@ -1200,7 +1201,7 @@ input[type="number"].field::-webkit-outer-spin-button {
     padding: 8px 10px;
     background: var(--bg);
     border: 1px solid var(--border);
-    border-left: 3px solid var(--mlb-red);
+    border-left: 3px solid var(--frontier-color);
     border-radius: var(--radius-sm);
     display: grid;
     grid-template-columns: 1fr auto;
@@ -1235,27 +1236,27 @@ input[type="number"].field::-webkit-outer-spin-button {
     margin-bottom: 4px;
 }
 .hv-contrib-rect {
-    fill: var(--mlb-red);
+    fill: var(--frontier-color);
     fill-opacity: 0.18;
-    stroke: var(--mlb-red);
+    stroke: var(--frontier-color);
     stroke-width: 1.2;
     stroke-dasharray: 4 3;
     pointer-events: none;
 }
 .hv-contrib-poly {
-    fill: var(--mlb-red);
+    fill: var(--frontier-color);
     fill-opacity: 0.22;
     stroke: none;
     pointer-events: none;
 }
 .hv-contrib-poly.hv-contrib-overlay--pinned {
     fill-opacity: 0.32;
-    stroke: var(--mlb-red);
+    stroke: var(--frontier-color);
     stroke-width: 1;
     stroke-opacity: 0.45;
 }
 .hv-alt-frontier {
-    stroke: var(--mlb-red);
+    stroke: var(--frontier-color);
     stroke-width: 1.5;
     stroke-dasharray: 6 4;
     stroke-opacity: 0.7;
@@ -1263,14 +1264,14 @@ input[type="number"].field::-webkit-outer-spin-button {
     pointer-events: none;
 }
 .hv-with-frontier {
-    stroke: var(--mlb-red);
+    stroke: var(--frontier-color);
     stroke-width: 2;
     stroke-opacity: 0.8;
     fill: none;
     pointer-events: none;
 }
 .hv-contrib-label {
-    fill: var(--mlb-red);
+    fill: var(--frontier-color);
     font-size: 14px;
     font-weight: 700;
     pointer-events: none;
