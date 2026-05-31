@@ -10,7 +10,7 @@ The same code also packs into a self-contained `dist/index.html` with all data i
 
 ## Data sources & license
 
-All stats come from the [SABR Lahman Baseball Database](https://sabr.org/lahman-database/) (1871–2025 release) under [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/). The derived CSVs in `data/` and the binary blobs inlined in `dist/index.html` inherit that license; the source code is MIT (see `LICENSE`). Full text in `DATA-LICENSE.md`.
+All stats come from the [SABR Lahman Baseball Database](https://sabr.org/lahman-database/) (1871–2025 release) under [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/). The derived CSVs in `data/` and the binary blobs inlined in `dist/index.html` inherit that license; the source code is MIT (see `LICENSE`). Full text in `LICENSE-DATA.md`.
 
 No in-progress-season data ships — `README.md` explains the licensing reasons (BBRef terms, MLB Stats API's "non-bulk" restriction). Lahman is updated by SABR roughly once a year; the canonical refresh procedure is in `README.md`.
 

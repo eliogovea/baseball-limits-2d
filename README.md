@@ -17,7 +17,7 @@ Three tables are used:
 
 Why nothing from the in-progress current season? Lahman publishes once a year (~December/January), so we're current through the most recent completed season. Other public sources (MLB Stats API, Baseball Reference, FanGraphs) either restrict bulk redistribution or prohibit scraping — none of them is compatible with shipping the data inside this open-source site. We'll pick up the next season when SABR releases the following year's Lahman snapshot.
 
-The CC BY-SA license carries over to derivative data we ship, including the canonical `data/*_limits_*.csv` files and the binary blobs inlined in `dist/index.html`. See [DATA-LICENSE.md](DATA-LICENSE.md) for the full attribution + license text. The source code (everything outside `data/` and the inline binary in the bundle) is MIT-licensed; see [LICENSE](LICENSE).
+The CC BY-SA license carries over to derivative data we ship, including the canonical `data/*_limits_*.csv` files and the binary blobs inlined in `dist/index.html`. See [LICENSE-DATA.md](LICENSE-DATA.md) for the full attribution + license text. The source code (everything outside `data/` and the inline binary in the bundle) is MIT-licensed; see [LICENSE](LICENSE).
 
 ## Update data
 
