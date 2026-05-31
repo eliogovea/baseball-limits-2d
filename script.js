@@ -455,7 +455,6 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         if (tSec) tSec.hidden = !usesRate;
         if (tDiv) tDiv.hidden = !usesRate;
 
-        updateColorLegend();
         updateYearHint(sYear, eYear);
         syncPlayerHint();
 
@@ -1482,16 +1481,6 @@ function setupGlossary() {
 }
 
 
-
-function updateColorLegend() {
-    const el = document.getElementById("legend-eras");
-    if (!el) return;
-    const palette = COLOR_PALETTES.league;
-    el.innerHTML = ["AL", "NL"].map(k => {
-        const e = palette[k];
-        return `<span class="legend-era" style="background:${e.color}" title="${escapeHtml(e.name)} League"></span>`;
-    }).join("");
-}
 
 function updateYearHint(sYear, eYear) {
     const hint = document.getElementById("year-hint");

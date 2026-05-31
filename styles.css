@@ -368,25 +368,37 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     gap: 12px;
 }
 .legend-item { display: inline-flex; align-items: center; gap: 5px; }
-.legend-eras {
-    display: flex;
-    gap: 2px;
-    height: 6px;
-}
-.legend-era {
-    flex: 1;
-    border-radius: 1px;
-    cursor: help;
-    min-width: 14px;
+.legend-note {
+    font-size: 10px;
+    color: var(--text-muted);
+    opacity: 0.85;
 }
 .legend-dot {
     width: 8px;
     height: 8px;
     border-radius: 50%;
     display: inline-block;
+    flex-shrink: 0;
 }
-.legend-dot--frontier { background: var(--frontier-color); }
-.legend-dot--season   { background: var(--mlb-blue-light); }
+/* Color = league */
+.legend-dot--al { background: #c8102e; }
+.legend-dot--nl { background: #002d72; }
+/* Frontier markers are larger and white-ringed (size encodes area owned);
+   season dots are small and faded. Neutral fill — the league row above
+   already conveys the colour axis. */
+.legend-dot--frontier {
+    width: 11px;
+    height: 11px;
+    background: var(--text);
+    border: 1.5px solid #ffffff;
+    box-shadow: 0 0 0 1px var(--border);
+}
+.legend-dot--season {
+    width: 7px;
+    height: 7px;
+    background: var(--text-muted);
+    opacity: 0.5;
+}
 
 .chart-toolbar {
     /* Hidden for now — the SVG-based zoom path is laggy on the larger
