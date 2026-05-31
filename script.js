@@ -1386,7 +1386,9 @@ function setupExplainer() {
     const helpBtn = document.getElementById("help-btn");
     if (!backdrop || !dismiss || !helpBtn) return;
 
-    const show = () => { backdrop.hidden = false; dismiss.focus(); };
+    // preventScroll so focusing the button doesn't scroll a tall modal past
+    // its heading on short phone screens.
+    const show = () => { backdrop.hidden = false; dismiss.focus({ preventScroll: true }); };
     const hide = () => {
         backdrop.hidden = true;
         try { localStorage.setItem(EXPLAINER_KEY, "1"); } catch (_) { /* private mode */ }
@@ -2544,15 +2546,33 @@ function lastNameOf(playerID) {
 function layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, pointR, isSmall) {
     if (!frontier.length) return [];
 
-    // On narrow phones: show all frontier points with abbreviated names below each dot.
+    // On narrow phones: show full last names below each dot. To keep them
+    // readable we lay them out left-to-right across two staggered rows,
+    // skipping a label only when it would still collide horizontally with an
+    // already-placed one in both rows.
     if (isSmall) {
-        return frontier.map(p => ({
-            text: lastNameOf(p.playerID).slice(0, 4),
-            x: xScale(p.x),
-            y: yScale(p.y) + pointR + 10,
-            anchor: "middle",
-            small: true,
-        }));
+        const CHAR_W = 5.4;     // ~9px label font
+        const ROW_DY = 11;
+        const sorted = [...frontier].sort((a, b) => xScale(a.x) - xScale(b.x));
+        const rowRight = [-Infinity, -Infinity];
+        const out = [];
+        for (const p of sorted) {
+            const text = lastNameOf(p.playerID);
+            const halfW = (text.length * CHAR_W) / 2;
+            const cx = xScale(p.x);
+            const left = cx - halfW;
+            const row = left >= rowRight[0] + 2 ? 0 : (left >= rowRight[1] + 2 ? 1 : -1);
+            if (row === -1) continue;   // too crowded here → drop this label
+            out.push({
+                text,
+                x: cx,
+                y: yScale(p.y) + pointR + 10 + row * ROW_DY,
+                anchor: "middle",
+                small: true,
+            });
+            rowRight[row] = cx + halfW;
+        }
+        return out;
     }
 
     let candidates = frontier;

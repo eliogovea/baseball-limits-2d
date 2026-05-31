@@ -714,7 +714,16 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     box-shadow: 0 20px 50px rgba(15, 23, 42, 0.25);
     max-width: 460px;
     width: 100%;
-    padding: 24px;
+    /* Cap to the viewport and scroll internally so the heading and the
+       dismiss button are always reachable on short phone screens. dvh tracks
+       the visible area as mobile browser chrome shows/hides. */
+    max-height: calc(100vh - 40px);
+    max-height: calc(100dvh - 40px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    /* No bottom padding: the sticky dismiss button sits flush at the bottom so
+       no scrolled text peeks beneath it. */
+    padding: 24px 24px 0;
     animation: explainer-pop 0.22s cubic-bezier(0.34, 1.4, 0.56, 1);
 }
 @keyframes explainer-pop {
@@ -748,6 +757,11 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     font-weight: 600;
     font-size: 14px;
     transition: background var(--transition);
+    /* Pin to the bottom of the (scrollable) modal so the CTA is always visible
+       on short phones; fade the scrolling text into the panel just above it. */
+    position: sticky;
+    bottom: 0;
+    box-shadow: 0 -14px 14px -6px var(--panel);
 }
 .explainer-dismiss:hover {
     background: var(--mlb-blue-hover);
@@ -1212,7 +1226,7 @@ input[type="number"].field::-webkit-outer-spin-button {
 .preset--utility { color: var(--text); font-weight: 600; }
 
 /* Mobile frontier labels — abbreviated, below each dot */
-.frontier-label--mobile { font-size: 8px; }
+.frontier-label--mobile { font-size: 9px; }
 
 /* Axes legend with Best/Worst toggle inline */
 /* Best/Worst toggle sits inside .field-row — override text-transform inherited from legend */
@@ -1740,4 +1754,11 @@ input[type="number"].field::-webkit-outer-spin-button {
     .attribution { font-size: 11px; gap: 6px; }
     .legend { top: 8px; right: 8px; padding: 4px 8px; font-size: 10px; }
     .tooltip { max-width: 260px; }
+
+    /* Tighten the welcome modal so it needs little or no scrolling on phones. */
+    .explainer-backdrop { padding: 12px; }
+    .explainer { padding: 18px 18px 0; max-height: calc(100dvh - 24px); }
+    .explainer h2 { font-size: 16px; margin-bottom: 10px; }
+    .explainer p { margin-bottom: 9px; line-height: 1.45; font-size: 14px; }
+    .explainer p:last-of-type { margin-bottom: 14px; }
 }
