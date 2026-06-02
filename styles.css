@@ -399,6 +399,14 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     background: var(--text-muted);
     opacity: 0.5;
 }
+/* Dashed swatch for the global reference frontier (shown only while an
+   attribute filter is active). Mirrors the dashed staircase on the chart. */
+.legend-line--global {
+    width: 14px;
+    height: 0;
+    flex-shrink: 0;
+    border-top: 1.5px dashed #8a93a6;
+}
 
 .chart-toolbar {
     /* Hidden for now — the SVG-based zoom path is laggy on the larger

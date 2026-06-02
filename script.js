@@ -1841,43 +1841,6 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const thresholdField = filters.thresholdField || "PA";
     const datasetKey = filters.dataset || "batting";
 
-    let workingPoints;
-    if (mode === "career") {
-        const byPlayer = new Map();
-        for (const p of points) {
-            if (!seasonMatches(p)) continue;
-            let arr = byPlayer.get(p.playerID);
-            if (!arr) { arr = []; byPlayer.set(p.playerID, arr); }
-            arr.push(p);
-        }
-        workingPoints = [];
-        for (const seasons of byPlayer.values()) {
-            seasons.sort((a, b) => a.yearID - b.yearID);
-            workingPoints.push(aggregateCareer(seasons, datasetKey));
-        }
-    } else {
-        workingPoints = points.filter(seasonMatches);
-    }
-
-    const filtered = [];
-    for (const p of workingPoints) {
-        const x = p[xDim];
-        const y = p[yDim];
-        if (isNaN(x) || isNaN(y)) continue;
-        if (p[thresholdField] < minPa) continue;
-        filtered.push({
-            x, y,
-            year: p.yearID,
-            yearLast: p.yearLast || p.yearID,
-            seasonsCount: p.seasonsCount || 1,
-            PA: p[thresholdField],
-            playerID: p.playerID,
-            teamID: p.teamID,
-            lgID: p.lgID,
-            orig: p,  // for size-by lookups (PA / G / AB)
-        });
-    }
-
     // For "lower is better" axes, negate the value for sorting and sweep so the
     // algorithm always maximises — finding the best (lowest) value on that axis.
     // When showWorstFrontier is true, invert the signs to find the lower-left envelope.
@@ -1886,36 +1849,91 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     let ySign = datasetDef.lowerIsBetter?.has(yDim) ? -1 : 1;
     if (showWorstFrontier) { xSign *= -1; ySign *= -1; }
 
-    filtered.sort((a, b) => {
-        const ax = a.x * xSign, bx = b.x * xSign;
-        const ay = a.y * ySign, by = b.y * ySign;
-        if (ax !== bx) return ax - bx;
-        if (ay !== by) return ay - by;
-        return b.year - a.year; // prefer more recent on ties
-    });
-
-    // Deduplicate exact (x, y) collisions for the rendering pass.
-    const unique = [];
-    for (let i = 0; i < filtered.length; i++) {
-        const p = filtered[i];
-        if (i === 0 || p.x !== filtered[i - 1].x || p.y !== filtered[i - 1].y) {
-            unique.push(p);
+    // Full pipeline — filter → (career aggregate) → threshold → sort → dedup →
+    // Pareto sweep — parameterised by a season-match predicate, so we can build
+    // both the active (attribute-filtered) frontier and the "global" reference
+    // frontier from the same code.
+    function buildFrontier(matchFn) {
+        let workingPoints;
+        if (mode === "career") {
+            const byPlayer = new Map();
+            for (const p of points) {
+                if (!matchFn(p)) continue;
+                let arr = byPlayer.get(p.playerID);
+                if (!arr) { arr = []; byPlayer.set(p.playerID, arr); }
+                arr.push(p);
+            }
+            workingPoints = [];
+            for (const seasons of byPlayer.values()) {
+                seasons.sort((a, b) => a.yearID - b.yearID);
+                workingPoints.push(aggregateCareer(seasons, datasetKey));
+            }
+        } else {
+            workingPoints = points.filter(matchFn);
         }
+
+        const flt = [];
+        for (const p of workingPoints) {
+            const x = p[xDim];
+            const y = p[yDim];
+            if (isNaN(x) || isNaN(y)) continue;
+            if (p[thresholdField] < minPa) continue;
+            flt.push({
+                x, y,
+                year: p.yearID,
+                yearLast: p.yearLast || p.yearID,
+                seasonsCount: p.seasonsCount || 1,
+                PA: p[thresholdField],
+                playerID: p.playerID,
+                teamID: p.teamID,
+                lgID: p.lgID,
+                orig: p,  // for size-by lookups (PA / G / AB)
+            });
+        }
+
+        flt.sort((a, b) => {
+            const ax = a.x * xSign, bx = b.x * xSign;
+            const ay = a.y * ySign, by = b.y * ySign;
+            if (ax !== bx) return ax - bx;
+            if (ay !== by) return ay - by;
+            return b.year - a.year; // prefer more recent on ties
+        });
+
+        // Deduplicate exact (x, y) collisions for the rendering pass.
+        const uniq = [];
+        for (let i = 0; i < flt.length; i++) {
+            const p = flt[i];
+            if (i === 0 || p.x !== flt[i - 1].x || p.y !== flt[i - 1].y) uniq.push(p);
+        }
+
+        // Pareto frontier: sweep left-to-right keeping the best-in-class envelope.
+        // Signed values ensure "lower is better" axes are treated correctly.
+        const fr = [];
+        for (const p of uniq) {
+            const py = p.y * ySign;
+            while (fr.length && fr[fr.length - 1].y * ySign < py) fr.pop();
+            if (fr.length && fr[fr.length - 1].y === p.y &&
+                fr[fr.length - 1].x * xSign < p.x * xSign) fr.pop();
+            fr.push(p);
+        }
+
+        return { filtered: flt, unique: uniq, frontier: fr };
     }
 
-    // Pareto frontier: sweep left-to-right keeping the best-in-class envelope.
-    // Signed values ensure "lower is better" axes are treated correctly.
-    const frontier = [];
-    for (const p of unique) {
-        const py = p.y * ySign;
-        while (frontier.length && frontier[frontier.length - 1].y * ySign < py) frontier.pop();
-        if (frontier.length && frontier[frontier.length - 1].y === p.y &&
-            frontier[frontier.length - 1].x * xSign < p.x * xSign) {
-            frontier.pop();
-        }
-        frontier.push(p);
-    }
+    const { filtered, unique, frontier } = buildFrontier(seasonMatches);
     const frontierSet = new Set(frontier);
+
+    // "Global" reference frontier: same universe (year range + threshold) but
+    // ignoring the attribute filters (league, team, country, handedness). Lets a
+    // filtered view keep perspective on the all-MLB limit — drawn as a faint
+    // dashed staircase, and used to freeze the axes so filtered points hold their
+    // absolute position instead of rescaling to the subset.
+    const attributeFiltered = league !== "all" || franchise !== "all" || country !== "all" || bats !== "all";
+    const globalResult = (attributeFiltered && !animTimer)
+        ? buildFrontier((p) => p.yearID >= sYear && p.yearID <= eYear)
+        : null;
+    const legendGlobalEl = document.getElementById("legend-global");
+    if (legendGlobalEl) legendGlobalEl.hidden = true;
 
     const hvInfo = computeHvContributions(frontier, xSign, ySign, unique);
     const hvByPoint = new Map(hvInfo.items.map(it => [it.point, it]));
@@ -2001,8 +2019,11 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         yExtent = animExtentCache.y;
     } else {
         animExtentCache = null;
-        xExtent = d3.extent(unique, d => d.x);
-        yExtent = d3.extent(unique, d => d.y);
+        // When a global reference frontier is shown, scale to its (broader) extent
+        // so filtered points keep their absolute position and the ghost line fits.
+        const extentSource = globalResult ? globalResult.unique : unique;
+        xExtent = d3.extent(extentSource, d => d.x);
+        yExtent = d3.extent(extentSource, d => d.y);
     }
     const xDomain = (viewDomain && viewDomain.x) || xExtent;
     const yDomain = (viewDomain && viewDomain.y) || yExtent;
@@ -2078,6 +2099,31 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         }
         R.push([P[P.length - 1][0], plotH]);        // bottom drop at last x
         return R.map(reflectScreen);                // involution: reflect back
+    }
+
+    // Global reference frontier (drawn first so it sits behind the active frontier
+    // and the cloud): a faint dashed staircase + muted dots marking the all-MLB
+    // limit for the current universe, ignoring the attribute filters.
+    if (globalResult && globalResult.frontier.length) {
+        const gLine = staircaseScreen(globalResult.frontier);
+        g.append("path")
+            .attr("class", "global-frontier-ghost")
+            .attr("d", "M " + gLine.map(p => p.join(",")).join(" L "))
+            .style("fill", "none")
+            .style("stroke", "#8a93a6")
+            .style("stroke-width", 1.5)
+            .style("stroke-dasharray", "5 4")
+            .style("opacity", 0.7);
+        g.selectAll("circle.global-frontier-ghost-dot")
+            .data(globalResult.frontier)
+            .join("circle")
+            .attr("class", "global-frontier-ghost-dot")
+            .attr("cx", d => xScale(d.x))
+            .attr("cy", d => yScale(d.y))
+            .attr("r", 2.5)
+            .style("fill", "#8a93a6")
+            .style("opacity", 0.65);
+        if (legendGlobalEl) legendGlobalEl.hidden = false;
     }
 
     if (frontier.length > 0) {
