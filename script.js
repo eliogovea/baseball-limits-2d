@@ -155,6 +155,7 @@ let animExtentCache = null;     // { key, x, y } — full-range axis extents cac
 // URL state defaults — params at their default value are omitted from the
 // hash to keep it short.
 const URL_DEFAULTS = {
+    ds: "batting",
     x: "HR", y: "SB", sy: "1920", ey: "2024", pa: "502",
     m: "season", lg: "all", bt: "all", co: "all",
     fr: "all", hl: "",
@@ -768,6 +769,20 @@ function applyUrlState() {
         document.querySelectorAll(`#${groupId} .seg-btn`).forEach(b => b.classList.remove("active"));
         btn.classList.add("active");
     };
+    // Dataset must switch first so the pitching dimension dropdowns exist
+    // before we try to select a pitching-only axis token (e.g. ERA, K/9).
+    if (u.ds === "pitching" && activeDatasetKey !== "pitching") {
+        const stBtn = document.querySelector('#stats-toggle .mode-btn[data-stats="pitching"]');
+        if (stBtn) {
+            document.querySelectorAll('#stats-toggle .mode-btn').forEach(b => b.classList.remove("active"));
+            stBtn.classList.add("active");
+        }
+        activeDatasetKey = "pitching";
+        playerIndex = datasetState[activeDatasetKey].playerIndex;
+        populateSelectorsForActive();
+        resetThresholdToDefault();
+        applyModeConfig("season");
+    }
     setSelect("x-axis-select", u.x);
     setSelect("y-axis-select", u.y);
     if (u.sy) document.getElementById("s-year-select").value = u.sy;
@@ -797,6 +812,7 @@ function writeUrlState(state) {
     clearTimeout(urlWriteTimer);
     urlWriteTimer = setTimeout(() => {
         const params = {
+            ds: activeDatasetKey,
             x: state.xDim,
             y: state.yDim,
             sy: String(state.sYear),
@@ -2038,45 +2054,56 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     }
 
     // Frontier staircase: the true Pareto boundary — horizontal and vertical
-    // segments only. At each frontier point, drop to the next point's y at this
-    // point's x, then go right to the next point's x.
-    // Left: extends horizontally to chart left at frontier[0].y (nothing to the
-    //   left with y ≤ F0.y is non-dominated).
-    // Right: drops vertically to chart bottom at frontier[-1].x (nothing to the
-    //   right of the last point is dominated by any frontier point).
-    if (frontier.length > 0) {
-        const last = frontier[frontier.length - 1];
-        const scPts = [[0, yScale(frontier[0].y)]];
-        for (let i = 0; i < frontier.length; i++) {
-            scPts.push([xScale(frontier[i].x), yScale(frontier[i].y)]);
-            if (i < frontier.length - 1) {
-                scPts.push([xScale(frontier[i].x), yScale(frontier[i + 1].y)]);
-            }
+    // segments only. Drawn sign-aware so the shaded "dominated" region always
+    // falls toward the anti-ideal corner, even when an axis is lower-is-better
+    // (e.g. SO vs TB) or the Worst-frontier toggle has flipped both signs.
+    //
+    // Approach: reflect each frontier vertex's screen point into the canonical
+    // "both higher-is-better" orientation (ideal = top-right), run the standard
+    // step construction there, then reflect the vertices back. For the common
+    // (+,+) case `reflectScreen` is the identity, so this stays byte-identical
+    // to the previous drawing.
+    const xAnti = xSign > 0 ? 0 : plotW;            // screen x of the worst-x edge
+    const yAnti = ySign > 0 ? plotH : 0;            // screen y of the worst-y edge
+    const idealCorner = [xSign > 0 ? plotW : 0, ySign > 0 ? 0 : plotH];
+    const reflectScreen = ([sx, sy]) => [xSign > 0 ? sx : plotW - sx, ySign > 0 ? sy : plotH - sy];
+    function staircaseScreen(fr) {
+        if (!fr.length) return [[xAnti, yAnti]];
+        // fr is sorted by x*xSign ascending, so reflected x is ascending too.
+        const P = fr.map(p => reflectScreen([xScale(p.x), yScale(p.y)]));
+        const R = [[0, P[0][1]]];                   // left cap at first point's y
+        for (let i = 0; i < P.length; i++) {
+            R.push([P[i][0], P[i][1]]);
+            if (i < P.length - 1) R.push([P[i][0], P[i + 1][1]]);  // drop to next y
         }
-        scPts.push([xScale(last.x), plotH]);
+        R.push([P[P.length - 1][0], plotH]);        // bottom drop at last x
+        return R.map(reflectScreen);                // involution: reflect back
+    }
 
-        // Hypervolume shading: gradient fill of the dominated region beneath the staircase.
-        // Gradient runs from the frontier corner (most dominated by the frontier)
-        // to the opposite corner (farthest from the frontier).
+    if (frontier.length > 0) {
+        const line = staircaseScreen(frontier);
+
+        // Hypervolume shading: gradient fill of the dominated region beneath the
+        // staircase, fading from the ideal corner toward the anti-ideal corner.
         const hvColor = showWorstFrontier ? "#8b5cf6" : "#002D72";
         const defs = svg.select("defs").empty() ? svg.append("defs") : svg.select("defs");
         defs.select("#hv-shade-grad").remove();
         const grad = defs.append("linearGradient")
             .attr("id", "hv-shade-grad")
             .attr("gradientUnits", "userSpaceOnUse")
-            .attr("x1", showWorstFrontier ? 0 : plotW).attr("y1", showWorstFrontier ? plotH : 0)
-            .attr("x2", showWorstFrontier ? plotW : 0).attr("y2", showWorstFrontier ? 0 : plotH);
+            .attr("x1", idealCorner[0]).attr("y1", idealCorner[1])
+            .attr("x2", xAnti).attr("y2", yAnti);
         grad.append("stop").attr("offset", "0%").attr("stop-color", hvColor).attr("stop-opacity", 0.10);
         grad.append("stop").attr("offset", "100%").attr("stop-color", hvColor).attr("stop-opacity", 0.01);
 
         g.append("path")
             .attr("class", "hv-shade")
-            .attr("d", "M 0," + plotH + " L " + scPts.map(p => p.join(",")).join(" L ") + " Z")
+            .attr("d", "M " + xAnti + "," + yAnti + " L " + line.map(p => p.join(",")).join(" L ") + " Z")
             .style("fill", "url(#hv-shade-grad)");
 
         g.append("path")
             .attr("class", "frontier-staircase")
-            .attr("d", "M " + scPts.map(p => p.join(",")).join(" L "))
+            .attr("d", "M " + line.map(p => p.join(",")).join(" L "))
             .style("stroke", showWorstFrontier ? "#8b5cf6" : null);
     }
 
@@ -2088,15 +2115,12 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     for (const p of frontier) frontierSeasonCount.set(p.playerID, (frontierSeasonCount.get(p.playerID) || 0) + 1);
 
     // Staircase path helper (screen coords) shared by hover and pinned overlays.
+    // Reuses the sign-aware staircase, then appends the anti-ideal corner so two
+    // staircases (frontier vs alt-frontier) enclose a well-defined ribbon — the
+    // exclusive dominated area — for any axis orientation.
     function staircasePts(fr) {
-        if (!fr.length) return [[0, plotH], [plotW, plotH]];
-        const pts = [[0, yScale(fr[0].y)]];
-        for (let i = 0; i < fr.length; i++) {
-            pts.push([xScale(fr[i].x), yScale(fr[i].y)]);
-            pts.push([xScale(fr[i].x), i < fr.length - 1 ? yScale(fr[i + 1].y) : plotH]);
-        }
-        pts.push([plotW, plotH]);
-        return pts;
+        if (!fr.length) return [[xAnti, yAnti], [xAnti, yAnti]];
+        return [...staircaseScreen(fr), [xAnti, yAnti]];
     }
 
     // Draw alt-frontier line + shaded polygon + label into hvRectGroup.
