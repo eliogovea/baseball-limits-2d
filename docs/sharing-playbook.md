@@ -83,16 +83,20 @@ contribution of any season on the HR-vs-SB frontier in 150 years of MLB.
 
 | Rank | Season | HR | SB | HV contribution | Share of frontier area |
 |---|---|---|---|---|---|
-| **1** | **Shohei Ohtani 2024** | **54** | **59** | **338** | **6.9%** |
-| 2 | Ronald Acuña 2023 | 41 | 73 | 182 | 3.7% |
-| 3 | Rickey Henderson 1982 | 10 | 130 | 169 | 3.4% |
-| 4 | Rickey Henderson 1986 | 28 | 87 | 117 | 2.4% |
-| 5 | Barry Bonds 2001 | 73 | 13 | 87 | 1.8% |
-| 6 | Sammy Sosa 1998 | 66 | 18 | 29 | 0.6% |
-| 7 | Harry Stovey 1890 | 12 | 97 | 17 | 0.3% |
-| 8 | Hugh Nicol 1887 | 1 | 138 | 8 | 0.2% |
+| **1** | **Shohei Ohtani 2024** | **54** | **59** | **338** | **6.87%** |
+| 2 | Ronald Acuña 2023 | 41 | 73 | 182 | 3.70% |
+| 3 | Rickey Henderson 1982 | 10 | 130 | 169 | 3.43% |
+| 4 | Rickey Henderson 1986 | 28 | 87 | 117 | 2.38% |
+| 5 | Barry Bonds 2001 | 73 | 13 | 87 | 1.77% |
+| 6 | Sammy Sosa 1998 | 66 | 18 | 29 | 0.59% |
+| 7 | Harry Stovey 1890 | 12 | 97 | 17 | 0.35% |
+| 8 | Hugh Nicol 1887 | 1 | 138 | 8 | 0.16% |
+| 9 | Ken Griffey Jr. 1998 | 56 | 20 | 2 | 0.04% |
 
-*(units are HR·SB of frontier area; full dataset 1871–2024, qualified seasons)*
+*(units are HR·SB of frontier area; full dataset 1871–2025, qualified seasons. Every
+frontier point's contribution is strictly positive — Griffey's 56/20 is the floor at 2.0,
+which rounds to 0.0% but isn't zero: a near-redundant point that nearby seasons would
+almost entirely backfill.)*
 
 **What the metric measures.** Hypervolume contribution here is *leave-one-out*: delete the
 season, let the entire 150-year cloud re-sweep and backfill the gap, then measure how much
@@ -101,29 +105,31 @@ season in history can recover**.
 
 **Why it's so large — balanced-extreme beats single-axis-extreme.**
 
-- **Bonds' 73 HR** — the all-time record — contributes only **87**. His territory is a tall,
-  thin sliver, and Sosa (66) sits right behind him, so removing Bonds barely moves the curve.
-- **Henderson's 130 SB** contributes **169** and *shrinks* as you widen the window (208 → 169
-  once the 1880s speedsters enter and backfill his high-steal strip).
+- **Bonds' 73 HR** — the all-time record — contributes only **87**: he's extreme on homers
+  but stole just 13 bases, so the band he *uniquely* owns is tall-but-short (≈7 HR wide ×
+  13 SB tall). A record on one axis isn't much *area* if you're ordinary on the other.
+- **Henderson's 130 SB** nets **169** — bigger than Bonds, but still narrow in the HR
+  direction (just 10 HR). Same story: deep on one axis, shallow on the other.
 - **Ohtani sits where the frontier bulges farthest into empty space** — high on *both* axes.
   His exclusive band runs from Acuña (41 HR / 73 SB) on the speed side to the next 50-HR
   hitter, Griffey (56 HR / **20** SB). That ~39-SB gap above 50 HR is occupied by nobody else.
 
-**The kicker — it's era-proof.** Ohtani's contribution is **exactly 338 whether the window is
-1920–2024 or 1871–2024**, while every other point's number moves as competitors are added or
-removed. No one else has ever lived in his corner of the frontier, so the rest of baseball
-history can't touch his value.
+**The kicker — the corner is empty.** The next 50-HR season on the frontier, Griffey 1998,
+came with just **20 steals** to Ohtani's **59**. No season in MLB history has ever paired that
+power with that speed, so his exclusive band is unusually wide *and* tall — almost nothing
+backfills it when you remove him. (His ΔHV is identical from 1920 or 1871, but that's expected,
+not magic: pre-1920 baseball had no power hitters to add anywhere near his corner.)
 
 That's the quantitative case for 50/50: not that 54 HR or 59 SB is a record (neither is), but
-that the *combination* pushed the achievable limit into space the other ~220k qualified
-seasons can't reach — and hypervolume contribution is exactly the measure of "expanded the
-limit into empty space."
+that the *combination* pushed the achievable limit into space no other qualified season in
+history can reach — and hypervolume contribution is exactly the measure of "expanded the limit
+into empty space."
 
 **Ready-made caption:**
 > Ohtani's 2024 (54 HR / 59 SB) owns more of the HR-vs-SB frontier than any season in 150
-> years of MLB — 1.9× the runner-up, 2× Henderson's 130 steals, 4× Bonds' 73 homers. And its
-> value doesn't budge no matter who else you add, because nobody else has ever lived in that
-> corner.
+> years of MLB — 1.9× the runner-up, 2× Henderson's 130 steals, 4× Bonds' 73 homers. The next
+> 50-homer season ever (Griffey '98) stole just 20 bases to Ohtani's 59 — nobody else has
+> paired that power with that speed.
 
 *(Reproduce the numbers headlessly: load the view, then read `window.__bl2d_hv.contributions`
 — see `CLAUDE.md` → "Headless verification".)*
@@ -161,8 +167,8 @@ and has hard numbers behind it. Keep the pure-method framing for Hacker News.
 > metric called hypervolume contribution — basically "how much unique territory does this
 > season own that nothing else in history covers" — Ohtani's 2024 comes out #1 of all time:
 > 1.9× the runner-up (Acuña '23), 2× Henderson's 130-steal year, 4× Bonds' 73 HR. The wild
-> part: his number is *identical* whether you go back to 1920 or 1871, because nobody else
-> has ever lived in the 50-HR-and-50-SB corner. [interactive chart, every view is a link]
+> part: the *next* 50-homer season on the list (Griffey '98) stole just 20 bases to Ohtani's
+> 59 — nobody else has ever paired that power with that speed. [interactive chart, every view is a link]
 
 **X / Bluesky — thread**
 > 1/ Everyone knows Ohtani's 2024 was the first 50/50 season. But *how* historic was it,
@@ -176,9 +182,9 @@ and has hard numbers behind it. Keep the pure-method framing for Hacker News.
 > 2001. The single-axis records are *thinner* than you'd think — someone's always right
 > behind them.
 >
-> 4/ The kicker: Ohtani's number is exactly the same whether you start the clock in 1920 or
-> 1871. Adding 50 more years of baseball changes everyone else's value — but not his, because
-> no one has ever lived in his corner of the frontier.
+> 4/ The kicker: the next 50-homer season on the list (Griffey '98) stole just 20 bases.
+> Ohtani had 59. That ~40-steal gap above 50 HR is empty in all of MLB history — which is why
+> his contribution towers over the rest.
 >
 > 5/ Pin his season yourself: <link with #x=HR&y=SB&hl=Shohei Ohtani> — or pick any two
 > stats and find your own record. [tool link]
@@ -188,9 +194,9 @@ and has hard numbers behind it. Keep the pure-method framing for Hacker News.
 > intuition for? I plotted 150 years of MLB stats as Pareto frontiers and computed each
 > record's *hypervolume contribution* — the area it uniquely owns. It put a clean number on
 > a story baseball fans already felt: Ohtani's 2024 50/50 contributes more to the HR-vs-SB
-> frontier than any season ever, and — unlike the single-stat record holders — its value is
-> invariant to the rest of the dataset. A nice illustration that "balanced and extreme" beats
-> "extreme on one axis" in objective space. [interactive, static D3, no backend]
+> frontier than any season ever — while the single-stat record holders contribute
+> surprisingly little, because there's always a season just behind them. A nice illustration
+> that "balanced and extreme" beats "extreme on one axis" in objective space. [interactive, static D3, no backend]
 
 ---
 
