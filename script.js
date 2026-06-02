@@ -2139,7 +2139,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                 .attr("x", labelX + 8)
                 .attr("y", labelY - 8)
                 .attr("text-anchor", "start")
-                .text(`−${(fraction * 100).toFixed(1)}% of frontier area`);
+                .text(`−${(fraction * 100).toFixed(2)}% of frontier area`);
         }
     }
 
@@ -2326,11 +2326,11 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         let hvLine = "";
         if (frontierSet.has(d) && hvByPoint.has(d)) {
             const it = hvByPoint.get(d);
-            hvLine = `<div class="tooltip-subheader">Controls ${(it.fraction * 100).toFixed(1)}% of the frontier area</div>`;
+            hvLine = `<div class="tooltip-subheader">Controls ${(it.fraction * 100).toFixed(2)}% of the frontier area</div>`;
             const nSeasons = frontierSeasonCount.get(d.playerID) || 0;
             if (nSeasons > 1) {
                 const pi = hvPlayerMap.get(d.playerID);
-                if (pi) hvLine += `<div class="tooltip-subheader">All ${nSeasons} seasons combined: ${(pi.fraction * 100).toFixed(1)}%</div>`;
+                if (pi) hvLine += `<div class="tooltip-subheader">All ${nSeasons} seasons combined: ${(pi.fraction * 100).toFixed(2)}%</div>`;
             }
         }
         let regretLine = "";
@@ -2695,7 +2695,7 @@ function renderFrontierCards(frontier, xDim, yDim, formatStat, totalUnits, mode 
                 <div class="frontier-card-year">${yearLabel}</div>
                 <div class="frontier-card-team">${subLine}</div>
                 <div class="frontier-card-stats">${xDim} ${formatStat(xDim, p.x)} · ${yDim} ${formatStat(yDim, p.y)}</div>
-                ${hvByPoint && hvByPoint.has(p) ? `<div class="frontier-card-hv">Controls ${(hvByPoint.get(p).fraction * 100).toFixed(1)}% of the frontier area</div>` : ""}
+                ${hvByPoint && hvByPoint.has(p) ? `<div class="frontier-card-hv">Controls ${(hvByPoint.get(p).fraction * 100).toFixed(2)}% of the frontier area</div>` : ""}
                 <div class="frontier-card-era">${era ? era.name : "—"}</div>
             </article>
         `;
