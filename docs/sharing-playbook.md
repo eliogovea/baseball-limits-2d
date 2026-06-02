@@ -132,21 +132,65 @@ limit into empty space."
 
 ## Draft copy (adapt before posting)
 
+Lead with the Ohtani 50/50 result (see the worked example above) — it's concrete, timely,
+and has hard numbers behind it. Keep the pure-method framing for Hacker News.
+
 **Show HN**
 > Show HN: Baseball Limits 2D – the Pareto frontier of 150 years of MLB stats
 >
 > Pick any two stats; the chart highlights the player-seasons (or careers) that define the
 > outer edge of what's ever been possible — you can't beat them on both axes at once. Static
-> D3, no backend, and every view is a shareable URL. Click any frontier dot to trace that
+> D3, no backend, every view is a shareable URL. It also computes each frontier point's
+> leave-one-out hypervolume contribution — which surfaced a fun result: Ohtani's 2024 50/50
+> is the most "valuable" season on the HR-vs-SB frontier in 150 years, and its value doesn't
+> change no matter who else you add to the comparison. Click any frontier dot to trace that
 > player's whole career.
 
 **r/dataisbeautiful**
+> [OC] Ohtani's 50/50 owns more of the HR-vs-SB "record frontier" than any season in 150
+> years of MLB — 2× Henderson's 130 steals, 4× Bonds' 73 homers [interactive]
+
+*(Alternate, method-first):*
 > [OC] The Pareto frontier of MLB batting & pitching, 1871–2025 — watch the "limits" expand
 > across history [interactive]
 
-**X / Bluesky thread opener**
-> Which MLB seasons are literally impossible to beat on two stats at once? I plotted 150
-> years of Pareto frontiers. A thread of records that have stood for decades 🧵👇
+**r/baseball  /  r/Sabermetrics**
+> I tried to measure *how* historic Ohtani's 50/50 was, not just that it happened
+>
+> Using the Pareto frontier of HR vs SB (the seasons you can't beat on both at once) and a
+> metric called hypervolume contribution — basically "how much unique territory does this
+> season own that nothing else in history covers" — Ohtani's 2024 comes out #1 of all time:
+> 1.9× the runner-up (Acuña '23), 2× Henderson's 130-steal year, 4× Bonds' 73 HR. The wild
+> part: his number is *identical* whether you go back to 1920 or 1871, because nobody else
+> has ever lived in the 50-HR-and-50-SB corner. [interactive chart, every view is a link]
+
+**X / Bluesky — thread**
+> 1/ Everyone knows Ohtani's 2024 was the first 50/50 season. But *how* historic was it,
+> in numbers? I built a tool that plots the Pareto frontier of MLB stats and measured it. 🧵
+>
+> 2/ On the HR-vs-SB "record frontier" — the seasons no one has beaten on both at once —
+> Ohtani 2024 (54 HR / 59 SB) has the largest "hypervolume contribution" of any season in
+> 150 years. It owns ~6.9% of the entire frontier, alone.
+>
+> 3/ That's ~2× Rickey Henderson's legendary 130-steal 1982, and ~4× Barry Bonds' 73-homer
+> 2001. The single-axis records are *thinner* than you'd think — someone's always right
+> behind them.
+>
+> 4/ The kicker: Ohtani's number is exactly the same whether you start the clock in 1920 or
+> 1871. Adding 50 more years of baseball changes everyone else's value — but not his, because
+> no one has ever lived in his corner of the frontier.
+>
+> 5/ Pin his season yourself: <link with #x=HR&y=SB&hl=Shohei Ohtani> — or pick any two
+> stats and find your own record. [tool link]
+
+**LinkedIn (method / optimization angle)**
+> What does multi-objective optimization look like when the data is something everyone has
+> intuition for? I plotted 150 years of MLB stats as Pareto frontiers and computed each
+> record's *hypervolume contribution* — the area it uniquely owns. It put a clean number on
+> a story baseball fans already felt: Ohtani's 2024 50/50 contributes more to the HR-vs-SB
+> frontier than any season ever, and — unlike the single-stat record holders — its value is
+> invariant to the rest of the dataset. A nice illustration that "balanced and extreme" beats
+> "extreme on one axis" in objective space. [interactive, static D3, no backend]
 
 ---
 
