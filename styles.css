@@ -1835,18 +1835,43 @@ input[type="number"].field::-webkit-outer-spin-button {
     margin-bottom: 2px;
 }
 .ps-spark { margin-bottom: 8px; }
-/* Career trajectory mini-plot (both axes) in the spotlight card. */
-.ps-mini-wrap { margin-bottom: 8px; }
-.ps-mini { display: block; max-width: 100%; }
+/* Two stacked career sparklines (X stat, Y stat) sharing one year timeline. */
+.ps-dual { margin-bottom: 8px; }
+.ps-dual-row { display: flex; align-items: center; gap: 6px; }
+.ps-dual-row + .ps-dual-row { margin-top: 2px; }
+.ps-dual-tag {
+    flex: 0 0 28px;
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-muted);
+    text-align: right;
+}
+.ps-dual-years {
+    display: flex;
+    justify-content: space-between;
+    padding-left: 34px;
+    margin-top: 1px;
+    font-size: 9px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+.ps-mini { display: block; flex: 1 1 0; min-width: 0; }
 .ps-mini-path {
     fill: none;
     stroke: var(--accent, var(--gold));
-    stroke-width: 1.2;
-    opacity: 0.4;
+    stroke-width: 1.4;
+    opacity: 0.55;
     stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
 }
-.ps-mini-dot { fill: color-mix(in srgb, var(--accent, var(--gold)) 55%, var(--panel)); }
-.ps-mini-dot--rec { fill: var(--accent, var(--gold)); stroke: var(--panel); stroke-width: 1; }
+.ps-mini-mark {
+    stroke: var(--accent, var(--gold));
+    stroke-width: 1.4;
+    opacity: 0.55;
+    vector-effect: non-scaling-stroke;
+}
 .ps-spark polyline { fill: none; stroke: var(--accent, var(--gold)); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; opacity: 1; }
 .ps-spark .frontier-spark-dot { fill: var(--accent, var(--gold)); }
 .ps-season { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }

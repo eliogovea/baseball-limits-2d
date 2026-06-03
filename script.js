@@ -3184,29 +3184,35 @@ function renderFrontierCards(frontier, xDim, yDim, formatStat, totalUnits, mode 
     }).join("");
 }
 
-// Career trajectory mini-plot for the spotlight card: the player's seasons in
-// the same two axes the chart uses, connected in year order, with the seasons
-// that reached the frontier marked. Scaled to the player's own range so the
-// shape of their career reads clearly.
-function careerMiniPlot(playerID, xDim, yDim, frontierYears, w = 200, h = 92) {
+// Career mini-plots for the spotlight card: two stacked sparklines — the X-axis
+// stat and the Y-axis stat, each over the player's career — sharing one year
+// timeline so they line up vertically and the time progression is clear. The
+// frontier seasons are marked on both. Each stat is scaled to its own range.
+function careerDualPlot(playerID, xDim, yDim, frontierYears) {
     if (!playerIndex || !playerIndex.has(playerID)) return "";
     const seasons = playerIndex.get(playerID)
         .map(s => ({ year: s.yearID, x: s[xDim], y: s[yDim] }))
         .filter(s => s.x != null && s.y != null && !isNaN(s.x) && !isNaN(s.y))
         .sort((a, b) => a.year - b.year);
     if (!seasons.length) return `<span class="frontier-spark-empty" aria-hidden="true"></span>`;
-    const pad = 6;
-    const xs = seasons.map(s => s.x), ys = seasons.map(s => s.y);
-    const xmn = Math.min(...xs), xmx = Math.max(...xs), ymn = Math.min(...ys), ymx = Math.max(...ys);
-    const sx = v => xmx === xmn ? w / 2 : pad + (v - xmn) / (xmx - xmn) * (w - 2 * pad);
-    const sy = v => ymx === ymn ? h / 2 : (h - pad) - (v - ymn) / (ymx - ymn) * (h - 2 * pad);
-    const path = seasons.map(s => `${sx(s.x).toFixed(1)},${sy(s.y).toFixed(1)}`).join(" ");
-    const dots = seasons.map(s => {
-        const rec = frontierYears.has(s.year);
-        return `<circle cx="${sx(s.x).toFixed(1)}" cy="${sy(s.y).toFixed(1)}" r="${rec ? 3.2 : 2}" class="ps-mini-dot${rec ? " ps-mini-dot--rec" : ""}"/>`;
-    }).join("");
-    return `<svg class="ps-mini" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-hidden="true">` +
-        `<polyline class="ps-mini-path" points="${path}"/>${dots}</svg>`;
+    const yMin = seasons[0].year, yMax = seasons[seasons.length - 1].year;
+    const W = 100, H = 26;   // viewBox; stretched to row width (shared timeline)
+    const X = (yr) => yMax === yMin ? W / 2 : ((yr - yMin) / (yMax - yMin)) * W;
+    const row = (dim, key) => {
+        const vals = seasons.map(s => s[key]);
+        const mn = Math.min(...vals), mx = Math.max(...vals), range = mx - mn || 1;
+        const Y = (v) => (H - 2) - ((v - mn) / range) * (H - 4);
+        const pts = seasons.map(s => `${X(s.year).toFixed(1)},${Y(s[key]).toFixed(1)}`).join(" ");
+        // Mark frontier seasons with a full-height tick (undistorted by the
+        // non-uniform stretch, and aligned across both panels).
+        const recs = seasons.filter(s => frontierYears.has(s.year))
+            .map(s => `<line class="ps-mini-mark" x1="${X(s.year).toFixed(1)}" y1="0" x2="${X(s.year).toFixed(1)}" y2="${H}"/>`).join("");
+        return `<div class="ps-dual-row"><span class="ps-dual-tag">${escapeHtml(dim)}</span>` +
+            `<svg class="ps-mini" viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none" aria-hidden="true">` +
+            `${recs}<polyline class="ps-mini-path" points="${pts}"/></svg></div>`;
+    };
+    return row(xDim, "x") + row(yDim, "y") +
+        `<div class="ps-dual-years"><span>${yMin}</span><span>${yMax}</span></div>`;
 }
 
 // Player spotlight cards — one per pinned player. Each turns the pin into a
@@ -3269,8 +3275,8 @@ function renderPlayerSpotlight(frontier, hvByPoint, xDim, yDim, formatStat, mode
             `<div class="ps-tile"><div class="ps-tile-num">${areaPct.toFixed(areaPct < 10 ? 1 : 0)}%</div><div class="ps-tile-lab">of frontier area</div></div>` +
             `</div>` +
             (playerIndex && playerIndex.has(pid)
-                ? `<div class="ps-spark-lab">Career · ${escapeHtml(xDim)} vs ${escapeHtml(yDim)}</div>` +
-                  `<div class="ps-mini-wrap">${careerMiniPlot(pid, xDim, yDim, new Set(mine.map(p => p.year)), 200, 92)}</div>`
+                ? `<div class="ps-spark-lab">Career by year</div>` +
+                  `<div class="ps-dual">${careerDualPlot(pid, xDim, yDim, new Set(mine.map(p => p.year)))}</div>`
                 : "") +
             (seasonRows ? `<div class="ps-seasons">${seasonRows}</div>` : "");
         // Don't let card clicks/drags bubble to the chart-region empty-click
