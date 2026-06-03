@@ -287,32 +287,46 @@ html[data-theme="dark"] select.field {
 .attribution-sep { color: var(--border-strong); }
 
 /* -------- Story presets (sidebar) -------- */
-/* A compact wrapping cluster of "famous frontier" pills at the top of the
-   controls panel; a leading star icon marks them (no text label). */
+/* A short list of "famous frontier" rows at the top of the controls panel —
+   one per row: title left, stat pair right. */
 .preset-shelf {
     display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 5px;
+    flex-direction: column;
+    gap: 4px;
 }
-.preset-shelf-icon { align-self: center; }
-.preset-chip {
-    flex: 0 0 auto;
-    padding: 4px 9px;
+.preset-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    padding: 6px 10px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--border-strong);
     background: var(--panel);
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text);
     cursor: pointer;
-    white-space: nowrap;
+    text-align: left;
     transition: border-color var(--transition), background var(--transition), color var(--transition);
 }
-.preset-chip:hover {
+.preset-row:hover {
     border-color: var(--mlb-blue);
-    color: var(--mlb-blue);
     background: color-mix(in srgb, var(--mlb-blue) 5%, var(--panel));
+}
+.preset-row-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.preset-row:hover .preset-row-title { color: var(--mlb-blue); }
+.preset-row-stat {
+    flex: 0 0 auto;
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
 }
 
 /* -------- Main -------- */

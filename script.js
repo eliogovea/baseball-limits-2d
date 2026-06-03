@@ -1041,11 +1041,11 @@ function applyUrlState() {
 // the existing URL-hash path. Player keys are the disambiguated display names
 // used as playerIDs (see scripts/_display_name.py).
 const PRESETS = [
-    { label: "Ohtani's 50/50",   sub: "HR · SB",   state: { ds: "batting",  m: "season", x: "HR", y: "SB",  hl: "Shohei Ohtani" } },
-    { label: "Bonds' 73",        sub: "HR · AVG",  state: { ds: "batting",  m: "season", x: "HR", y: "AVG", hl: "Barry Bonds" } },
-    { label: "Henderson 130 SB", sub: "SB · HR",   state: { ds: "batting",  m: "season", x: "SB", y: "HR",  hl: "Rickey Henderson" } },
-    { label: "Sosa power",       sub: "HR · SLG",  state: { ds: "batting",  m: "season", x: "HR", y: "SLG", hl: "Sammy Sosa" } },
-    { label: "Pedro 2000",       sub: "K/9 · K/BB", state: { ds: "pitching", m: "season", x: "K/9", y: "K/BB", hl: "Pedro Martinez (b.1971)" } },
+    { label: "Ohtani 50/50",   sub: "HR · SB",    state: { ds: "batting",  m: "season", x: "HR",  y: "SB",   hl: "Shohei Ohtani" } },
+    { label: "Bonds' 73",      sub: "HR · AVG",   state: { ds: "batting",  m: "season", x: "HR",  y: "AVG",  hl: "Barry Bonds" } },
+    { label: "Henderson 130",  sub: "SB · HR",    state: { ds: "batting",  m: "season", x: "SB",  y: "HR",   hl: "Rickey Henderson" } },
+    { label: "Sosa '98",       sub: "HR · SLG",   state: { ds: "batting",  m: "season", x: "HR",  y: "SLG",  hl: "Sammy Sosa" } },
+    { label: "Pedro 2000",     sub: "K/9 · K/BB", state: { ds: "pitching", m: "season", x: "K/9", y: "K/BB", hl: "Pedro Martinez (b.1971)" } },
 ];
 function applyPreset(state) {
     clearHighlights();
@@ -1059,13 +1059,12 @@ function applyPreset(state) {
 function renderPresetShelf() {
     const shelf = document.getElementById("preset-shelf");
     if (!shelf) return;
-    shelf.innerHTML =
-        `<span class="ctl-icon preset-shelf-icon" title="Famous frontiers" aria-hidden="true">` +
-        `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.7l1.8 3.7 4.1.6-3 2.9.7 4.1L8 11.6 4.4 13l.7-4.1-3-2.9 4.1-.6z"/></svg></span>` +
-        PRESETS.map((p, i) =>
-            `<button type="button" class="preset-chip" data-preset="${i}" title="${p.label} — ${p.sub}">${p.label}</button>`
-        ).join("");
-    shelf.querySelectorAll(".preset-chip").forEach((btn) => {
+    shelf.innerHTML = PRESETS.map((p, i) =>
+        `<button type="button" class="preset-row" data-preset="${i}" title="${p.label} — ${p.sub}">` +
+        `<span class="preset-row-title">${p.label}</span>` +
+        `<span class="preset-row-stat">${p.sub}</span></button>`
+    ).join("");
+    shelf.querySelectorAll(".preset-row").forEach((btn) => {
         btn.addEventListener("click", () => applyPreset(PRESETS[+btn.dataset.preset].state));
     });
 }
