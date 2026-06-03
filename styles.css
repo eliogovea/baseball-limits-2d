@@ -1747,23 +1747,25 @@ input[type="number"].field::-webkit-outer-spin-button {
 .frontier-empty { font-size: 11px; color: var(--text-muted); padding: 6px 4px; }
 
 /* ── Player spotlight card ─────────────────────────────────────────── */
+/* Non-interactive overlay layer; the cards inside catch pointer events. */
 .player-spotlight {
     position: absolute;
-    left: 12px;
-    width: 248px;
+    inset: 0;
+    z-index: 6;
+    pointer-events: none;
+}
+.player-spotlight[hidden] { display: none; }
+.ps-card {
+    position: absolute;
+    width: 240px;
     max-width: calc(100% - 24px);
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     box-shadow: var(--shadow-md);
     padding: 12px 12px 10px;
-    z-index: 6;
+    pointer-events: auto;
 }
-/* Anchor away from where the frontier lives so the card doesn't cover it:
-   bottom-left for the Best (upper-right) frontier, top-left for Worst. */
-.player-spotlight--bl { bottom: 12px; }
-.player-spotlight--tl { top: 12px; }
-.player-spotlight[hidden] { display: none; }
 .ps-close {
     position: absolute;
     top: 7px;
@@ -1788,14 +1790,14 @@ input[type="number"].field::-webkit-outer-spin-button {
     width: 40px;
     height: 40px;
     border-radius: 9px;
-    background: color-mix(in srgb, var(--gold) 18%, var(--panel));
+    background: color-mix(in srgb, var(--accent, var(--gold)) 18%, var(--panel));
     border: 1px solid var(--border);
     display: flex;
     align-items: center;
     justify-content: center;
     font-weight: 800;
     font-size: 14px;
-    color: var(--gold);
+    color: var(--accent, var(--gold));
 }
 .ps-id { min-width: 0; }
 .ps-name {
@@ -1816,7 +1818,7 @@ input[type="number"].field::-webkit-outer-spin-button {
 .ps-tiles { display: flex; gap: 8px; margin: 10px 0; }
 .ps-tile { flex: 1; background: var(--bg); border-radius: 7px; padding: 6px 9px; }
 .ps-tile-num { font-size: 16px; font-weight: 800; color: var(--text); font-variant-numeric: tabular-nums; }
-.ps-tile:first-child .ps-tile-num { color: var(--gold); }
+.ps-tile:first-child .ps-tile-num { color: var(--accent, var(--gold)); }
 .ps-tile-lab {
     font-size: 8px;
     font-weight: 600;
@@ -1833,7 +1835,8 @@ input[type="number"].field::-webkit-outer-spin-button {
     margin-bottom: 2px;
 }
 .ps-spark { margin-bottom: 8px; }
-.ps-spark polyline { fill: none; stroke: var(--gold); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; opacity: 1; }
+.ps-spark polyline { fill: none; stroke: var(--accent, var(--gold)); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; opacity: 1; }
+.ps-spark .frontier-spark-dot { fill: var(--accent, var(--gold)); }
 .ps-season { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }
 .ps-season-yr { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .ps-season-val { font-size: 11px; color: var(--text); font-variant-numeric: tabular-nums; }

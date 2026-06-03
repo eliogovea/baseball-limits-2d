@@ -249,7 +249,7 @@ let playerIndex = null;       // Map<playerID, Point[]>  (all seasons per player
 // Up to 6 players can be highlighted simultaneously, each with a distinct color.
 const HIGHLIGHT_COLORS = ["#f59e0b","#14b8a6","#a855f7","#f97316","#84cc16","#ec4899"];
 let careerHighlights = new Map(); // playerID → color
-let spotlightPos = null;          // {left, top} once the user drags the player card
+let spotlightPos = new Map();     // playerID → {left, top} once the user drags a card
 
 function addHighlight(playerID) {
     if (!playerID || careerHighlights.has(playerID)) return;
@@ -3205,73 +3205,90 @@ function frontierSparkline(playerID, yDim, recordYear, w = 52, h = 16) {
     return `<svg class="frontier-spark" viewBox="0 0 ${w} ${h + 2}" width="${w}" height="${h + 2}" aria-hidden="true"><polyline points="${pts}"/>${marker}</svg>`;
 }
 
-// Player spotlight card — shown when exactly one player is pinned. Turns the
-// click into a moment: meta, a career sparkline, how many frontier seasons they
-// own and what share of the frontier area (summed hypervolume contribution),
-// and their record seasons. Reuses careerHighlights + the hv metric.
+// Player spotlight cards — one per pinned player. Each turns the pin into a
+// moment: meta, a career sparkline (in the player's highlight color), how many
+// frontier seasons they own and what share of the frontier area (summed
+// hypervolume contribution), and the record seasons. Cards sit opposite the
+// frontier, cascade when there are several, and are draggable.
 function renderPlayerSpotlight(frontier, hvByPoint, xDim, yDim, formatStat, mode) {
-    const el = document.getElementById("player-spotlight");
-    if (!el) return;
-    if (careerHighlights.size !== 1) { el.hidden = true; el.innerHTML = ""; spotlightPos = null; return; }
-    // If the user dragged the card, honor that; otherwise sit opposite the
-    // frontier (bottom-left for Best, top-left for Worst) so it doesn't cover it.
-    if (spotlightPos) {
-        el.className = "player-spotlight player-spotlight--moved";
-        el.style.left = spotlightPos.left + "px";
-        el.style.top = spotlightPos.top + "px";
-        el.style.right = "auto"; el.style.bottom = "auto";
-    } else {
-        el.className = "player-spotlight " + (showWorstFrontier ? "player-spotlight--tl" : "player-spotlight--bl");
-        el.style.left = el.style.top = el.style.right = el.style.bottom = "";
-    }
-    const pid = [...careerHighlights.keys()][0];
-    const mine = frontier.filter(p => p.playerID === pid).sort((a, b) => b.year - a.year);
-    if (!mine.length) { el.hidden = true; el.innerHTML = ""; return; }
+    const layer = document.getElementById("player-spotlight");
+    if (!layer) return;
+    layer.innerHTML = "";
+    if (careerHighlights.size === 0) { layer.hidden = true; return; }
+    layer.hidden = false;
+    // Forget drag positions for players no longer pinned.
+    for (const k of [...spotlightPos.keys()]) if (!careerHighlights.has(k)) spotlightPos.delete(k);
 
-    const areaPct = hvByPoint
-        ? mine.reduce((s, p) => s + (hvByPoint.has(p) ? hvByPoint.get(p).fraction : 0), 0) * 100
-        : 0;
-    const meta = metaFor(pid) || {};
-    const nm = pid.replace(/\s*\(b\.\d+\)\s*/, "").trim();
-    const initials = nm.split(/\s+/).map(w => w[0] || "").slice(0, 2).join("").toUpperCase();
-    let span = "";
-    if (playerIndex && playerIndex.has(pid)) {
-        const yrs = playerIndex.get(pid).map(s => s.yearID);
-        span = `${Math.min(...yrs)}–${Math.max(...yrs)}`;
-    }
-    const hand = activeDatasetKey === "pitching" ? meta.throws : meta.bats;
-    const handLabel = hand ? `${activeDatasetKey === "pitching" ? "throws" : "bats"} ${hand}` : "";
-    const sub = [span, handLabel, meta.country].filter(Boolean).join(" · ");
     const unit = mode === "career" ? "careers" : "seasons";
-    const seasonRows = mine.slice(0, 5).map(p => {
-        const yl = mode === "career" ? `${p.year}–${p.yearLast}` : String(p.year);
-        return `<div class="ps-season"><span class="ps-season-yr">${yl}</span><span class="ps-season-val">${xDim} ${formatStat(xDim, p.x)} · ${yDim} ${formatStat(yDim, p.y)}</span></div>`;
-    }).join("");
+    let idx = 0;
+    for (const [pid, color] of careerHighlights) {
+        const mine = frontier.filter(p => p.playerID === pid).sort((a, b) => b.year - a.year);
+        const areaPct = hvByPoint
+            ? mine.reduce((s, p) => s + (hvByPoint.has(p) ? hvByPoint.get(p).fraction : 0), 0) * 100
+            : 0;
+        const meta = metaFor(pid) || {};
+        const nm = pid.replace(/\s*\(b\.\d+\)\s*/, "").trim();
+        const initials = nm.split(/\s+/).map(w => w[0] || "").slice(0, 2).join("").toUpperCase();
+        let span = "";
+        if (playerIndex && playerIndex.has(pid)) {
+            const yrs = playerIndex.get(pid).map(s => s.yearID);
+            span = `${Math.min(...yrs)}–${Math.max(...yrs)}`;
+        }
+        const hand = activeDatasetKey === "pitching" ? meta.throws : meta.bats;
+        const handLabel = hand ? `${activeDatasetKey === "pitching" ? "throws" : "bats"} ${hand}` : "";
+        const sub = [span, handLabel, meta.country].filter(Boolean).join(" · ");
+        const seasonRows = mine.slice(0, 5).map(p => {
+            const yl = mode === "career" ? `${p.year}–${p.yearLast}` : String(p.year);
+            return `<div class="ps-season"><span class="ps-season-yr">${yl}</span><span class="ps-season-val">${xDim} ${formatStat(xDim, p.x)} · ${yDim} ${formatStat(yDim, p.y)}</span></div>`;
+        }).join("");
 
-    el.innerHTML =
-        `<button type="button" class="ps-close" aria-label="Close player card" title="Close">` +
-        `<svg width="12" height="12" viewBox="0 0 14 14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 2l10 10M12 2L2 12"/></svg></button>` +
-        `<div class="ps-head"><div class="ps-mono" aria-hidden="true">${initials}</div>` +
-        `<div class="ps-id"><div class="ps-name">${escapeHtml(nm)}</div><div class="ps-sub">${escapeHtml(sub)}</div></div></div>` +
-        `<div class="ps-tiles">` +
-        `<div class="ps-tile"><div class="ps-tile-num">${mine.length}</div><div class="ps-tile-lab">frontier ${unit}</div></div>` +
-        `<div class="ps-tile"><div class="ps-tile-num">${areaPct.toFixed(areaPct < 10 ? 1 : 0)}%</div><div class="ps-tile-lab">of frontier area</div></div>` +
-        `</div>` +
-        `<div class="ps-spark-lab">Career ${escapeHtml(yDim)}</div>` +
-        `<div class="ps-spark">${frontierSparkline(pid, yDim, mine[0].year, 184, 26)}</div>` +
-        `<div class="ps-seasons">${seasonRows}</div>`;
-    el.hidden = false;
-    el.querySelector(".ps-close").addEventListener("click", () => {
-        clearHighlights();
-        syncPlayerHint();
-        document.dispatchEvent(new CustomEvent("bl2d:refresh"));
-    });
-    enableSpotlightDrag(el, el.querySelector(".ps-head"));
+        const card = document.createElement("div");
+        card.className = "ps-card";
+        card.style.setProperty("--accent", color);
+        // Dragged → honor; else cascade from the corner opposite the frontier
+        // (bottom-left for Best, top-left for Worst) so cards don't cover it.
+        const pos = spotlightPos.get(pid);
+        if (pos) {
+            card.style.left = pos.left + "px"; card.style.top = pos.top + "px";
+        } else {
+            const off = 12 + idx * 24;
+            card.style.left = off + "px";
+            card.style[showWorstFrontier ? "top" : "bottom"] = off + "px";
+        }
+        card.innerHTML =
+            `<button type="button" class="ps-close" aria-label="Close player card" title="Close">` +
+            `<svg width="12" height="12" viewBox="0 0 14 14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 2l10 10M12 2L2 12"/></svg></button>` +
+            `<div class="ps-head"><div class="ps-mono" aria-hidden="true">${initials}</div>` +
+            `<div class="ps-id"><div class="ps-name">${escapeHtml(nm)}</div><div class="ps-sub">${escapeHtml(sub)}</div></div></div>` +
+            `<div class="ps-tiles">` +
+            `<div class="ps-tile"><div class="ps-tile-num">${mine.length}</div><div class="ps-tile-lab">frontier ${unit}</div></div>` +
+            `<div class="ps-tile"><div class="ps-tile-num">${areaPct.toFixed(areaPct < 10 ? 1 : 0)}%</div><div class="ps-tile-lab">of frontier area</div></div>` +
+            `</div>` +
+            (playerIndex && playerIndex.has(pid)
+                ? `<div class="ps-spark-lab">Career ${escapeHtml(yDim)}</div>` +
+                  `<div class="ps-spark">${frontierSparkline(pid, yDim, mine.length ? mine[0].year : null, 184, 26)}</div>`
+                : "") +
+            (seasonRows ? `<div class="ps-seasons">${seasonRows}</div>` : "");
+        // Don't let card clicks/drags bubble to the chart-region empty-click
+        // handler (which clears highlights — that was hiding the card).
+        card.addEventListener("mousedown", (e) => e.stopPropagation());
+        card.addEventListener("click", (e) => e.stopPropagation());
+        card.querySelector(".ps-close").addEventListener("click", (e) => {
+            e.stopPropagation();
+            removeHighlight(pid);
+            spotlightPos.delete(pid);
+            syncPlayerHint();
+            document.dispatchEvent(new CustomEvent("bl2d:refresh"));
+        });
+        enableSpotlightDrag(card, card.querySelector(".ps-head"), pid);
+        layer.appendChild(card);
+        idx++;
+    }
 }
 
-// Let the user drag the spotlight card by its header (within the chart region).
-// The position persists across redraws via the module-level spotlightPos.
-function enableSpotlightDrag(card, handle) {
+// Let the user drag a spotlight card by its header (within the chart region).
+// The position persists across redraws via spotlightPos (keyed by playerID).
+function enableSpotlightDrag(card, handle, pid) {
     if (!handle) return;
     handle.style.cursor = "move";
     const onDown = (e) => {
@@ -3283,13 +3300,9 @@ function enableSpotlightDrag(card, handle) {
         const grabX = pt.clientX - cr.left, grabY = pt.clientY - cr.top;
         const onMove = (ev) => {
             const p = ev.touches ? ev.touches[0] : ev;
-            let left = p.clientX - pr.left - grabX;
-            let top = p.clientY - pr.top - grabY;
-            // keep the card within the chart region
-            left = Math.max(0, Math.min(pr.width - cr.width, left));
-            top = Math.max(0, Math.min(pr.height - cr.height, top));
-            spotlightPos = { left, top };
-            card.className = "player-spotlight player-spotlight--moved";
+            const left = Math.max(0, Math.min(pr.width - cr.width, p.clientX - pr.left - grabX));
+            const top = Math.max(0, Math.min(pr.height - cr.height, p.clientY - pr.top - grabY));
+            spotlightPos.set(pid, { left, top });
             card.style.left = left + "px"; card.style.top = top + "px";
             card.style.right = "auto"; card.style.bottom = "auto";
             if (ev.cancelable) ev.preventDefault();
@@ -3305,6 +3318,7 @@ function enableSpotlightDrag(card, handle) {
         window.addEventListener("touchmove", onMove, { passive: false });
         window.addEventListener("touchend", onUp);
         e.preventDefault();
+        e.stopPropagation();
     };
     handle.addEventListener("mousedown", onDown);
     handle.addEventListener("touchstart", onDown, { passive: false });
