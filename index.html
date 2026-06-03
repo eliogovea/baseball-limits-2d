@@ -223,6 +223,13 @@
                         </button>
                         <input type="number" id="e-year-select" class="field" inputmode="numeric" aria-label="End year" title="End year">
                     </div>
+                    <!-- Smooth (game-by-game) cursor: animates the end-year season day by
+                         day from Retrosheet play-by-play. Scrubber + date appear when on. -->
+                    <div class="ctl-field ctl-field--inline ctl-smooth-row">
+                        <button type="button" id="smooth-toggle" class="seg-btn" aria-pressed="false" title="Animate the end-year season game by game (Retrosheet play-by-play)">Smooth</button>
+                        <input type="range" id="pbp-scrubber" class="pbp-scrubber" min="0" max="0" value="0" aria-label="Season date cursor" title="Drag through the season" hidden>
+                        <span id="pbp-date" class="pbp-date" hidden></span>
+                    </div>
                     <!-- Comparison-era range, aligned under the primary range. The center
                          overlap-icon button enables/disables it (mirrors the ▶ position);
                          the year inputs stay dimmed + disabled until it's on. -->

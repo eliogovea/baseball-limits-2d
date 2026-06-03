@@ -2333,6 +2333,16 @@ input[type="number"].field::-webkit-outer-spin-button {
     background: color-mix(in srgb, var(--mlb-red) 8%, transparent);
 }
 
+/* Smooth (game-by-game) cursor row: a Retrosheet sub-season scrubber. */
+.ctl-smooth-row { gap: 8px; align-items: center; }
+.ctl-smooth-row .pbp-scrubber { flex: 1 1 auto; min-width: 0; accent-color: var(--mlb-red); }
+.ctl-smooth-row .pbp-date {
+    font-size: 11px;
+    color: var(--text-muted, #667);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
 @media (min-width: 1200px) {
     :root { --sidebar-w: 320px; }
     .controls-panel { padding: 18px; }

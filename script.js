@@ -278,6 +278,10 @@ let hvEncodingEnabled = true;  // scale frontier dot radius by hypervolume contr
 let isolationPinned = null;     // data-point reference for the pinned isolation ring, or null
 let animTimer = null;           // setInterval handle while frontier animation is running
 let animExtentCache = null;     // { key, x, y } — full-range axis extents cached per animation session
+let pbpActive = null;           // decoded BL2P season when smooth (game-by-game) mode is on, else null
+let pbpCursorIdx = 0;           // current index into pbpActive.dates (the as-of-date cursor)
+let pbpRaf = null;              // requestAnimationFrame handle while the cursor is playing
+let pendingCursorYmd = null;    // a t=YYYYMMDD from a deep-link, applied once data is loaded
 
 // URL state defaults — params at their default value are omitted from the
 // hash to keep it short.
@@ -286,6 +290,7 @@ const URL_DEFAULTS = {
     x: "HR", y: "SB", sy: "1920", ey: "2024", pa: "502",
     m: "season", lg: "all", bt: "all", cb: "era", co: "all",
     fr: "all", hl: "", d: "1", c2: "0", sy2: "1900", ey2: "1919",
+    t: "",
 };
 
 // Per-dataset metadata. The Stats toggle in the UI switches `activeDataset`;
@@ -468,6 +473,165 @@ async function loadDataset(key) {
     return { points, playerIndex: buildPlayerIndex(points) };
 }
 
+// ── Sub-season (Retrosheet) play-by-play layer ──────────────────────────────
+// A lazy-loaded BL2P season file (scripts/convert_retrosheet_pbp.py) holds every
+// player's per-game counting-stat deltas in date order. We prefix-sum them into
+// cumulative-as-of-date trajectories so the frontier can be animated game by game
+// within a season. The synthetic points pointsAsOf() emits are shaped exactly like
+// parseBattingRows output, so they feed the existing frontier pipeline unchanged.
+const pbpCache = new Map();   // `${dataset}:${year}` -> Promise<decoded | null>
+
+function decodePbpSeason(year, dataset) {
+    const key = `${dataset}:${year}`;
+    if (pbpCache.has(key)) return pbpCache.get(key);
+    const prefix = dataset === "pitching" ? "p" : "b";
+    const promise = fetch(`data/pbp/${prefix}${year}.bl2p.gz`)
+        .then(async (resp) => {
+            if (!resp.ok) return null;            // 404 → caller degrades to year animation
+            const stream = resp.body.pipeThrough(new DecompressionStream("gzip"));
+            const buf = new Uint8Array(await new Response(stream).arrayBuffer());
+            return parseBl2p(buf);
+        })
+        .catch(() => null);
+    pbpCache.set(key, promise);
+    return promise;
+}
+
+function parseBl2p(buf) {
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const dec = new TextDecoder();
+    let off = 0;
+    if (dec.decode(buf.subarray(0, 4)) !== "BL2P") throw new Error("parseBl2p: bad magic");
+    off = 4;
+    const major = buf[off++]; off += 3;           // minor, dataset, flags (unused here)
+    if (major !== 1) throw new Error("parseBl2p: unsupported version " + major);
+    const year = dv.getUint16(off, true); off += 2;
+    const P = dv.getUint16(off, true); off += 2;
+    const D = dv.getUint16(off, true); off += 2;
+    const C = dv.getUint16(off, true); off += 2;
+
+    const dates = new Uint16Array(D);
+    for (let i = 0; i < D; i++) { dates[i] = dv.getUint16(off, true); off += 2; }
+
+    const cols = new Array(C);
+    for (let i = 0; i < C; i++) {
+        const width = buf[off++];
+        const nl = buf[off++];
+        const name = dec.decode(buf.subarray(off, off + nl)); off += nl;
+        cols[i] = { name, width };
+    }
+
+    const names = new Array(P);
+    for (let i = 0; i < P; i++) {
+        const nl = buf[off++];
+        names[i] = dec.decode(buf.subarray(off, off + nl)); off += nl;
+    }
+
+    const gameCounts = new Uint16Array(P);
+    let G = 0;
+    for (let i = 0; i < P; i++) { gameCounts[i] = dv.getUint16(off, true); off += 2; G += gameCounts[i]; }
+
+    const dateIdxAll = new Uint16Array(G);
+    for (let i = 0; i < G; i++) { dateIdxAll[i] = dv.getUint16(off, true); off += 2; }
+
+    // Bit-unpack each column (LSB-first), byte-aligned at each column boundary.
+    const colArrays = {};
+    for (const { name, width } of cols) {
+        const arr = new Int32Array(G);
+        const mask = (1 << width) - 1;
+        let acc = 0, nbits = 0, p = off;
+        for (let i = 0; i < G; i++) {
+            while (nbits < width) { acc |= buf[p++] << nbits; nbits += 8; }
+            arr[i] = acc & mask;
+            acc >>>= width;
+            nbits -= width;
+        }
+        off += Math.ceil((G * width) / 8);
+        colArrays[name] = arr;
+    }
+
+    // Prefix-sum per player into cumulative-by-game arrays.
+    const colNames = cols.map((c) => c.name);
+    const perPlayer = new Map();
+    let g = 0;
+    for (let pi = 0; pi < P; pi++) {
+        const n = gameCounts[pi];
+        const dateIdx = dateIdxAll.subarray(g, g + n);
+        const cum = {};
+        for (const name of colNames) {
+            const src = colArrays[name];
+            const c = new Int32Array(n);
+            let run = 0;
+            for (let k = 0; k < n; k++) { run += src[g + k]; c[k] = run; }
+            cum[name] = c;
+        }
+        perPlayer.set(names[pi], { dateIdx, cum });
+        g += n;
+    }
+
+    return { year, dates, dateCount: D, cols: colNames, perPlayer, games: G, players: P };
+}
+
+// Largest index k with sortedDateIdx[k] <= cursorIdx, or -1 if the player has
+// not yet appeared by the cursor date.
+function pbpLastGameAtOrBefore(sortedDateIdx, cursorIdx) {
+    let lo = 0, hi = sortedDateIdx.length - 1, ans = -1;
+    while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (sortedDateIdx[mid] <= cursorIdx) { ans = mid; lo = mid + 1; }
+        else hi = mid - 1;
+    }
+    return ans;
+}
+
+// Build season-shaped points from each player's cumulative stats as of the
+// cursor date, then run them through parseBattingRows so every derived stat
+// (PA, AVG, OBP, …) is computed identically to the season-level pipeline.
+function pbpPointsAsOf(decoded, cursorIdx) {
+    const seasonIdx = datasetState.batting?.playerIndex;
+    const rawRows = [];
+    for (const [name, rec] of decoded.perPlayer) {
+        const k = pbpLastGameAtOrBefore(rec.dateIdx, cursorIdx);
+        if (k < 0) continue;                       // no game yet → no point
+        const row = { playerID: name, yearID: String(decoded.year) };
+        for (const col of decoded.cols) row[col] = rec.cum[col][k];
+        // Team / league come from the player's season-level row (same display
+        // key), so the league filter and color-by-league work unchanged.
+        let teamID = "—", lgID = "—";
+        const seasonRows = seasonIdx && seasonIdx.get(name);
+        if (seasonRows) {
+            const s = seasonRows.find((r) => r.yearID === decoded.year);
+            if (s) { teamID = s.teamID; lgID = s.lgID; }
+        }
+        row.teamID = teamID;
+        row.lgID = lgID;
+        rawRows.push(row);
+    }
+    return parseBattingRows(rawRows);
+}
+
+// Day-of-year ↔ calendar helpers for the cursor's URL token (YYYYMMDD) and label.
+function pbpDayToYmd(year, doy) {
+    const d = new Date(Date.UTC(year, 0, doy));
+    return `${year}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+function pbpDayLabel(year, doy) {
+    return new Date(Date.UTC(year, 0, doy))
+        .toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+}
+function pbpYmdToDay(ymd) {
+    const y = +ymd.slice(0, 4), m = +ymd.slice(4, 6), d = +ymd.slice(6, 8);
+    return Math.round((Date.UTC(y, m - 1, d) - Date.UTC(y, 0, 1)) / 86400000) + 1;
+}
+// Index into the date table for the day nearest (and <=) a given day-of-year.
+function pbpNearestDateIdx(dates, doy) {
+    let ans = 0;
+    for (let i = 0; i < dates.length; i++) {
+        if (dates[i] <= doy) ans = i; else break;
+    }
+    return ans;
+}
+
 Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batting, pitching]) => {
     datasetState.batting = batting;
     datasetState.pitching = pitching;
@@ -587,6 +751,16 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         const def = activeDataset();
         const data = activeData();
 
+        // Smooth (game-by-game) cursor: swap in each player's cumulative stats as
+        // of the cursor date and pin the window to that one season. The synthetic
+        // points are season-shaped, so the frontier pipeline is otherwise untouched.
+        let points = data.points;
+        let sY = sYear, eY = eYear;
+        if (pbpActive) {
+            points = pbpPointsAsOf(pbpActive, pbpCursorIdx);
+            sY = eY = pbpActive.year;
+        }
+
         // The playing-time threshold only matters for rate stats — for counting
         // stats every season qualifies, so we hide the control and apply no
         // minimum. The dropdown's own value is still written to the URL so the
@@ -607,7 +781,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         loadingIndicator.classList.add("active");
         cancelAnimationFrame(pendingRender);
         pendingRender = requestAnimationFrame(() => {
-            drawScatterPlot(data.points, xDim, yDim, sYear, eYear, minThreshold, formatStat, mode,
+            drawScatterPlot(points, xDim, yDim, sY, eY, minThreshold, formatStat, mode,
                 { league, bats, colorBy, depth, compareEras, sB, eB, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey });
             loadingIndicator.classList.remove("active");
             writeUrlState({ xDim, yDim, sYear, eYear, minPa: thresholdValue, mode, league, bats, colorBy, depth, compareEras, sB, eB, country, franchise });
@@ -728,8 +902,110 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         }, 400);
     }
     document.getElementById("anim-play-btn").addEventListener("click", () => {
+        if (pbpActive) { if (pbpRaf) stopPbpPlay(); else startPbpPlay(); return; }
         if (animTimer) stopAnimation(); else startAnimation();
     });
+
+    // ── Smooth (game-by-game) cursor controls ──────────────────────────────
+    const smoothToggle = document.getElementById("smooth-toggle");
+    const scrubber = document.getElementById("pbp-scrubber");
+    const dateLabel = document.getElementById("pbp-date");
+
+    function syncScrubber() {
+        if (!pbpActive) return;
+        scrubber.max = String(pbpActive.dateCount - 1);
+        scrubber.value = String(pbpCursorIdx);
+        dateLabel.textContent = pbpDayLabel(pbpActive.year, pbpActive.dates[pbpCursorIdx]);
+        window.__bl2d_pbpCursorYmd = pbpDayToYmd(pbpActive.year, pbpActive.dates[pbpCursorIdx]);
+    }
+    function showSmoothControls(on) {
+        smoothToggle.classList.toggle("active", on);
+        smoothToggle.setAttribute("aria-pressed", String(on));
+        scrubber.hidden = !on;
+        dateLabel.hidden = !on;
+    }
+    function stopPbpPlay() {
+        if (pbpRaf) { cancelAnimationFrame(pbpRaf); pbpRaf = null; }
+        const btn = document.getElementById("anim-play-btn");
+        btn.classList.remove("playing");
+        document.getElementById("anim-icon-play").hidden = false;
+        document.getElementById("anim-icon-stop").hidden = true;
+    }
+    function startPbpPlay() {
+        if (!pbpActive) return;
+        stopAnimation();
+        const total = pbpActive.dateCount;
+        const durMs = 10000;                       // ~10s to sweep a full season
+        const begin = performance.now();
+        pbpCursorIdx = 0;
+        const btn = document.getElementById("anim-play-btn");
+        btn.classList.add("playing");
+        document.getElementById("anim-icon-play").hidden = true;
+        document.getElementById("anim-icon-stop").hidden = false;
+        const tick = (now) => {
+            const frac = Math.min(1, (now - begin) / durMs);
+            pbpCursorIdx = Math.min(total - 1, Math.floor(frac * (total - 1)));
+            syncScrubber();
+            refreshChart();
+            if (frac < 1) pbpRaf = requestAnimationFrame(tick);
+            else stopPbpPlay();
+        };
+        pbpRaf = requestAnimationFrame(tick);
+    }
+    async function enableSmooth(startIdx) {
+        const year = parseInt(document.getElementById("e-year-select").value);
+        const decoded = await decodePbpSeason(year, activeDatasetKey);
+        if (!decoded) {                            // no PBP for this year → degrade
+            window.__bl2d_pbpFallback = true;
+            showSmoothControls(false);
+            dateLabel.hidden = false;
+            dateLabel.textContent = `No game-by-game data for ${year}`;
+            window.__bl2d_pbpGames = 0;
+            return;
+        }
+        window.__bl2d_pbpFallback = false;
+        window.__bl2d_pbpGames = decoded.games;
+        pbpActive = decoded;
+        pbpCursorIdx = (startIdx != null)
+            ? Math.max(0, Math.min(decoded.dateCount - 1, startIdx))
+            : decoded.dateCount - 1;               // default: full-season frontier
+        showSmoothControls(true);
+        syncScrubber();
+        refreshChart();
+    }
+    function disableSmooth() {
+        stopPbpPlay();
+        pbpActive = null;
+        showSmoothControls(false);
+        refreshChart();
+    }
+    smoothToggle?.addEventListener("click", () => {
+        if (pbpActive) disableSmooth(); else enableSmooth();
+    });
+    scrubber?.addEventListener("input", () => {
+        if (!pbpActive) return;
+        stopPbpPlay();
+        pbpCursorIdx = parseInt(scrubber.value) || 0;
+        syncScrubber();
+        refreshChart();
+    });
+    // Expose for headless verification (scripts/snap.js evalJS).
+    window.__bl2d_pbpActive = () => pbpActive;
+    window.__bl2d_pbpPointsAsOf = (idx) => pbpActive ? pbpPointsAsOf(pbpActive, idx) : null;
+    window.__bl2d_enableSmooth = enableSmooth;
+
+    // Deep-link with t=YYYYMMDD: point the season at that year, load its PBP,
+    // and snap the cursor to the nearest game date.
+    if (pendingCursorYmd) {
+        const ymd = pendingCursorYmd;
+        pendingCursorYmd = null;
+        const year = parseInt(ymd.slice(0, 4));
+        document.getElementById("e-year-select").value = String(year);
+        decodePbpSeason(year, activeDatasetKey).then((decoded) => {
+            if (!decoded) return;
+            enableSmooth(pbpNearestDateIdx(decoded.dates, pbpYmdToDay(ymd)));
+        });
+    }
 
     setupZoomToolbar();
 
@@ -1034,6 +1310,9 @@ function applyUrlState() {
     updateChipSelection(frVal);
     updateFranchiseDimming(getSegValue("league-seg", "league") || "all");
     if (u.hl) { u.hl.split(",").forEach(id => addHighlight(id.trim())); }
+    // The as-of-date cursor loads async (lazy PBP fetch); stash it and let the
+    // bootstrap apply it once the season file is decoded.
+    pendingCursorYmd = (u.t && /^\d{8}$/.test(u.t)) ? u.t : null;
 }
 
 // ── Curated story presets ───────────────────────────────────────────────
@@ -1097,6 +1376,8 @@ function writeUrlState(state) {
             co: state.country,
             fr: state.franchise,
             hl: [...careerHighlights.keys()].join(","),
+            // The as-of-date cursor (smooth game-by-game mode). Absent unless on.
+            t: pbpActive ? pbpDayToYmd(pbpActive.year, pbpActive.dates[pbpCursorIdx]) : "",
         };
         // Drop defaults to keep the URL short.
         const parts = [];
@@ -2230,6 +2511,8 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
 
     const { filtered, unique, frontier } = buildFrontier(seasonMatches);
     const frontierSet = new Set(frontier);
+    // Headless-verification hook: the current frontier's player keys + (x,y).
+    window.__bl2d_frontierPids = frontier.map(d => d.playerID);
 
     // Onion-peeling layers (layer 0 == frontier). depth=1 is the default and is
     // a no-op visually. Exposed for the headless invariant checks.
