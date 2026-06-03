@@ -518,9 +518,12 @@ html[data-theme="dark"] select.field {
 /* Chart overlays */
 
 .legend {
+    /* Anchored bottom-left (the anti-ideal corner) — the one corner the Pareto
+       frontier never occupies — so the legend can't hide a frontier point the
+       way a top-right legend did when one season dominates both axes. */
     position: absolute;
-    top: 12px;
-    right: 12px;
+    bottom: 14px;
+    left: 14px;
     display: flex;
     flex-direction: column;
     gap: 4px;

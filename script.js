@@ -1044,7 +1044,7 @@ const PRESETS = [
     { label: "Ohtani 50/50",   sub: "HR · SB",    state: { ds: "batting",  m: "season", x: "HR",  y: "SB",   hl: "Shohei Ohtani" } },
     { label: "Bonds' 73",      sub: "HR · AVG",   state: { ds: "batting",  m: "season", x: "HR",  y: "AVG",  hl: "Barry Bonds" } },
     { label: "Henderson 130",  sub: "SB · HR",    state: { ds: "batting",  m: "season", x: "SB",  y: "HR",   hl: "Rickey Henderson" } },
-    { label: "Sosa '98",       sub: "HR · SLG",   state: { ds: "batting",  m: "season", x: "HR",  y: "SLG",  hl: "Sammy Sosa" } },
+    { label: "Sosa '98",       sub: "HR · RBI",   state: { ds: "batting",  m: "season", x: "HR",  y: "RBI",  hl: "Sammy Sosa" } },
     { label: "Pedro 2000",     sub: "K/9 · K/BB", state: { ds: "pitching", m: "season", x: "K/9", y: "K/BB", hl: "Pedro Martinez (b.1971)" } },
 ];
 function applyPreset(state) {
@@ -3267,9 +3267,11 @@ function renderPlayerSpotlight(frontier, hvByPoint, xDim, yDim, formatStat, mode
         if (pos) {
             card.style.left = pos.left + "px"; card.style.top = pos.top + "px";
         } else {
+            // Top corner, opposite the bottom-left legend; cascades when several.
+            // Best frontier's ideal corner (top-right) is usually empty → safe.
             const off = 12 + idx * 24;
-            card.style.left = off + "px";
-            card.style[showWorstFrontier ? "top" : "bottom"] = off + "px";
+            card.style.top = off + "px";
+            card.style[showWorstFrontier ? "left" : "right"] = off + "px";
         }
         card.innerHTML =
             `<button type="button" class="ps-close" aria-label="Close player card" title="Close">` +
