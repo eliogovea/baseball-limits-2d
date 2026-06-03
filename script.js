@@ -3184,25 +3184,29 @@ function renderFrontierCards(frontier, xDim, yDim, formatStat, totalUnits, mode 
     }).join("");
 }
 
-// Tiny career sparkline for a leaderboard row: the player's season-by-season
-// value of the active Y-axis stat, with a marker on the record season.
-function frontierSparkline(playerID, yDim, recordYear, w = 52, h = 16) {
+// Career trajectory mini-plot for the spotlight card: the player's seasons in
+// the same two axes the chart uses, connected in year order, with the seasons
+// that reached the frontier marked. Scaled to the player's own range so the
+// shape of their career reads clearly.
+function careerMiniPlot(playerID, xDim, yDim, frontierYears, w = 200, h = 92) {
     if (!playerIndex || !playerIndex.has(playerID)) return "";
     const seasons = playerIndex.get(playerID)
-        .map(s => ({ year: s.yearID, v: s[yDim] }))
-        .filter(s => s.v != null && !isNaN(s.v))
+        .map(s => ({ year: s.yearID, x: s[xDim], y: s[yDim] }))
+        .filter(s => s.x != null && s.y != null && !isNaN(s.x) && !isNaN(s.y))
         .sort((a, b) => a.year - b.year);
-    if (seasons.length < 2) return `<span class="frontier-spark-empty" aria-hidden="true"></span>`;
-    const vals = seasons.map(s => s.v);
-    const mn = Math.min(...vals), mx = Math.max(...vals), range = mx - mn || 1;
-    const X = i => (i / (seasons.length - 1)) * w;
-    const Y = v => h - ((v - mn) / range) * h;
-    const pts = seasons.map((s, i) => `${X(i).toFixed(1)},${Y(s.v).toFixed(1)}`).join(" ");
-    const ri = seasons.findIndex(s => s.year === recordYear);
-    const marker = ri >= 0
-        ? `<circle class="frontier-spark-dot" cx="${X(ri).toFixed(1)}" cy="${Y(seasons[ri].v).toFixed(1)}" r="2"/>`
-        : "";
-    return `<svg class="frontier-spark" viewBox="0 0 ${w} ${h + 2}" width="${w}" height="${h + 2}" aria-hidden="true"><polyline points="${pts}"/>${marker}</svg>`;
+    if (!seasons.length) return `<span class="frontier-spark-empty" aria-hidden="true"></span>`;
+    const pad = 6;
+    const xs = seasons.map(s => s.x), ys = seasons.map(s => s.y);
+    const xmn = Math.min(...xs), xmx = Math.max(...xs), ymn = Math.min(...ys), ymx = Math.max(...ys);
+    const sx = v => xmx === xmn ? w / 2 : pad + (v - xmn) / (xmx - xmn) * (w - 2 * pad);
+    const sy = v => ymx === ymn ? h / 2 : (h - pad) - (v - ymn) / (ymx - ymn) * (h - 2 * pad);
+    const path = seasons.map(s => `${sx(s.x).toFixed(1)},${sy(s.y).toFixed(1)}`).join(" ");
+    const dots = seasons.map(s => {
+        const rec = frontierYears.has(s.year);
+        return `<circle cx="${sx(s.x).toFixed(1)}" cy="${sy(s.y).toFixed(1)}" r="${rec ? 3.2 : 2}" class="ps-mini-dot${rec ? " ps-mini-dot--rec" : ""}"/>`;
+    }).join("");
+    return `<svg class="ps-mini" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-hidden="true">` +
+        `<polyline class="ps-mini-path" points="${path}"/>${dots}</svg>`;
 }
 
 // Player spotlight cards — one per pinned player. Each turns the pin into a
@@ -3265,8 +3269,8 @@ function renderPlayerSpotlight(frontier, hvByPoint, xDim, yDim, formatStat, mode
             `<div class="ps-tile"><div class="ps-tile-num">${areaPct.toFixed(areaPct < 10 ? 1 : 0)}%</div><div class="ps-tile-lab">of frontier area</div></div>` +
             `</div>` +
             (playerIndex && playerIndex.has(pid)
-                ? `<div class="ps-spark-lab">Career ${escapeHtml(yDim)}</div>` +
-                  `<div class="ps-spark">${frontierSparkline(pid, yDim, mine.length ? mine[0].year : null, 184, 26)}</div>`
+                ? `<div class="ps-spark-lab">Career · ${escapeHtml(xDim)} vs ${escapeHtml(yDim)}</div>` +
+                  `<div class="ps-mini-wrap">${careerMiniPlot(pid, xDim, yDim, new Set(mine.map(p => p.year)), 200, 92)}</div>`
                 : "") +
             (seasonRows ? `<div class="ps-seasons">${seasonRows}</div>` : "");
         // Don't let card clicks/drags bubble to the chart-region empty-click

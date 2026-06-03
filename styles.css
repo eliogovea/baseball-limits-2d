@@ -1835,6 +1835,18 @@ input[type="number"].field::-webkit-outer-spin-button {
     margin-bottom: 2px;
 }
 .ps-spark { margin-bottom: 8px; }
+/* Career trajectory mini-plot (both axes) in the spotlight card. */
+.ps-mini-wrap { margin-bottom: 8px; }
+.ps-mini { display: block; max-width: 100%; }
+.ps-mini-path {
+    fill: none;
+    stroke: var(--accent, var(--gold));
+    stroke-width: 1.2;
+    opacity: 0.4;
+    stroke-linejoin: round;
+}
+.ps-mini-dot { fill: color-mix(in srgb, var(--accent, var(--gold)) 55%, var(--panel)); }
+.ps-mini-dot--rec { fill: var(--accent, var(--gold)); stroke: var(--panel); stroke-width: 1; }
 .ps-spark polyline { fill: none; stroke: var(--accent, var(--gold)); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; opacity: 1; }
 .ps-spark .frontier-spark-dot { fill: var(--accent, var(--gold)); }
 .ps-season { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }
