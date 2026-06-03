@@ -367,6 +367,9 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     display: flex;
     gap: 12px;
 }
+/* `display:flex` above would otherwise beat the UA [hidden] rule, leaving the
+   global-frontier row visible when JS hides it. */
+.legend-row[hidden] { display: none; }
 .legend-item { display: inline-flex; align-items: center; gap: 5px; }
 .legend-note {
     font-size: 10px;
