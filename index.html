@@ -150,19 +150,6 @@
 
     <main class="app-main">
         <section class="chart-region" aria-label="Scatter plot">
-            <div class="legend" aria-hidden="true">
-                <!-- Encoding key — populated by renderLegend() to match the active
-                     Color-by encoding (era colorbar / league dots / handedness dots). -->
-                <div id="legend-encoding"></div>
-                <div class="legend-row">
-                    <span class="legend-item"><span class="legend-dot legend-dot--frontier"></span>Frontier</span>
-                    <span class="legend-item"><span class="legend-dot legend-dot--season"></span>Season</span>
-                </div>
-                <div class="legend-row legend-row--global" id="legend-global" hidden>
-                    <span class="legend-item"><span class="legend-line legend-line--global"></span>Global frontier</span>
-                </div>
-                <div class="legend-note">Frontier size = area owned</div>
-            </div>
             <div class="loading-indicator" id="loading-indicator" role="status" aria-live="polite">
                 <span class="spinner" aria-hidden="true"></span>
                 <span>Loading data…</span>
@@ -277,6 +264,20 @@
                             <button type="button" class="seg-btn" data-depth="3">3</button>
                             <button type="button" class="seg-btn" data-depth="4">4</button>
                             <button type="button" class="seg-btn" data-depth="5">5</button>
+                        </div>
+                    </div>
+                    <!-- Encoding key — matches the Color-by control above; populated by
+                         renderLegend(). Lives here (not over the chart) so it never hides
+                         a frontier point. -->
+                    <div class="legend" aria-hidden="true">
+                        <div id="legend-encoding"></div>
+                        <div class="legend-row">
+                            <span class="legend-item"><span class="legend-dot legend-dot--frontier"></span>Frontier</span>
+                            <span class="legend-item"><span class="legend-dot legend-dot--season"></span>Season</span>
+                            <span class="legend-note">size = area owned</span>
+                        </div>
+                        <div class="legend-row legend-row--global" id="legend-global" hidden>
+                            <span class="legend-item"><span class="legend-line legend-line--global"></span>Global frontier</span>
                         </div>
                     </div>
                 </section>

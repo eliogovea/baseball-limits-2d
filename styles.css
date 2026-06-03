@@ -518,25 +518,14 @@ html[data-theme="dark"] select.field {
 /* Chart overlays */
 
 .legend {
-    /* Anchored bottom-left (the anti-ideal corner) — the one corner the Pareto
-       frontier never occupies — so the legend can't hide a frontier point the
-       way a top-right legend did when one season dominates both axes. */
-    position: absolute;
-    bottom: 14px;
-    left: 14px;
+    /* In-flow key in the sidebar, directly under the Color-by control it
+       explains — keeps it off the chart so it never hides a frontier point. */
     display: flex;
     flex-direction: column;
     gap: 4px;
-    padding: 6px 10px;
-    background: var(--glass-bg);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
+    margin-top: 8px;
     font-size: 11px;
     color: var(--text-muted);
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
-    pointer-events: auto;
-    z-index: 2;
 }
 .legend-row {
     display: flex;
@@ -2341,7 +2330,6 @@ input[type="number"].field::-webkit-outer-spin-button {
     .app-header { padding: 0 12px; }
     .brand h1 { font-size: 15px; }
     .attribution { font-size: 11px; gap: 6px; }
-    .legend { top: 8px; right: 8px; padding: 4px 8px; font-size: 10px; }
     .tooltip { max-width: 260px; }
 
     /* Tighten the welcome modal so it needs little or no scrolling on phones. */
