@@ -2035,7 +2035,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // FLIP: snapshot current dot positions so we can morph to the new layout.
     // During animation playback (400ms ticks), use a shorter duration so transitions
     // complete before the next tick; D3 interrupts gracefully if they overlap.
-    const FLIP_DURATION = animTimer ? 350 : 280;
+    // prefers-reduced-motion → 0 (snap to the end state, no tween).
+    const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const FLIP_DURATION = reduceMotion ? 0 : (animTimer ? 350 : 280);
     const flipPos = new Map();
     if (FLIP_DURATION > 0) {
         svg.selectAll(".regular-point, .special-point").each(function(d) {
@@ -2044,6 +2046,11 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             flipPos.set(key, { cx: +this.getAttribute("cx"), cy: +this.getAttribute("cy") });
         });
     }
+    // Capture the outgoing frontier staircase so we can ghost it out while the
+    // new one fades in — the "frontier rewrites itself" effect. Read via node()
+    // so an empty selection (first render) yields null instead of throwing.
+    const oldStairNode = FLIP_DURATION > 0 ? svg.select("path.frontier-staircase").node() : null;
+    const oldStairD = oldStairNode ? oldStairNode.getAttribute("d") : null;
     svg.selectAll("*").remove();
     d3.select("#tooltip").attr("data-visible", "false");
 
@@ -2520,7 +2527,11 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // FLIP: animate dots from their previous screen positions to the new ones.
     // Hit circles (tooltip targets) are updated instantly — they must match the
     // final dot positions, not the animated intermediate ones.
-    if (FLIP_DURATION > 0 && flipPos.size > 0) {
+    // Performance guard: tweening tens of thousands of SVG circles is the lag the
+    // Canvas-migration backlog item describes. Above this many dots, snap them
+    // (the staircase + shade still morph cheaply below).
+    const FLIP_DOT_CAP = 6000;
+    if (FLIP_DURATION > 0 && flipPos.size > 0 && flipPos.size <= FLIP_DOT_CAP) {
         svg.selectAll(".regular-point, .special-point").each(function(d) {
             if (!d || !d.playerID) return;
             const key = d.playerID + "|" + (d.year ?? d.yearID ?? "");
@@ -2537,9 +2548,11 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     }
 
     // Fade in staircase and shade on interactive changes only — during animation
-    // playback the boundary updates every 400ms so fading from 0 each tick strobe.
+    // playback the boundary updates every 400ms so fading from 0 each tick strobes.
     if (FLIP_DURATION > 0 && !animTimer) {
-        svg.selectAll("path.frontier-staircase")
+        const newStair = svg.select("path.frontier-staircase");
+        const newStairD = newStair.node() ? newStair.node().getAttribute("d") : null;
+        newStair
             .style("opacity", 0)
             .transition().duration(FLIP_DURATION).ease(d3.easeCubicOut)
             .style("opacity", 0.55);
@@ -2547,6 +2560,24 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             .style("opacity", 0)
             .transition().duration(FLIP_DURATION).ease(d3.easeCubicOut)
             .style("opacity", 1);
+        // Ghost the outgoing staircase: a dashed copy of the old path that fades
+        // and clears, so the frontier visibly "redraws" rather than snapping.
+        if (oldStairD && newStairD && oldStairD !== newStairD) {
+            newStair.node().parentNode.insertBefore(
+                (() => {
+                    const g = document.createElementNS("http://www.w3.org/2000/svg", "path");
+                    g.setAttribute("d", oldStairD);
+                    g.setAttribute("class", "frontier-staircase-ghost");
+                    return g;
+                })(),
+                newStair.node()
+            );
+            svg.select("path.frontier-staircase-ghost")
+                .style("opacity", 0.5)
+                .transition().duration(FLIP_DURATION).ease(d3.easeCubicOut)
+                .style("opacity", 0)
+                .remove();
+        }
     }
 
     // On-chart frontier labels: greedy collision avoidance, mobile shows

@@ -389,6 +389,14 @@ html[data-theme="dark"] select.field {
     opacity: 0.55;
     pointer-events: none;
 }
+/* Outgoing frontier during a morph — dashed, fades out (see drawScatterPlot). */
+.frontier-staircase-ghost {
+    fill: none;
+    stroke: var(--frontier-color);
+    stroke-width: 2;
+    stroke-dasharray: 5 4;
+    pointer-events: none;
+}
 
 .career-point {
     fill: var(--gold);
