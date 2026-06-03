@@ -2291,9 +2291,10 @@ input[type="number"].field::-webkit-outer-spin-button {
     background: color-mix(in srgb, var(--mlb-blue) 9%, transparent);
 }
 
-/* Leading icon that stands in for a text label on a control row. */
+/* Leading icon that stands in for a text label on a control row. Fixed width so
+   icon-led rows (Color, Layers) keep their seg-groups vertically aligned. */
 .ctl-icon {
-    flex: 0 0 auto;
+    flex: 0 0 16px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
