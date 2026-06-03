@@ -31,6 +31,7 @@
     <link rel="stylesheet" href="styles.css">
     <script src="https://d3js.org/d3.v7.min.js" defer></script>
     <script src="script.js" defer></script>
+    <script src="tour.js" defer></script>
 </head>
 <body>
     <header class="app-header">
@@ -140,7 +141,10 @@
             <p><strong>Click any red dot</strong> to trace that player's other seasons in gold and reveal the combined frontier area all their seasons collectively own. Click a second player to see their joint footprint together.</p>
             <p><strong>Press ▶</strong> next to the year range to watch the frontier evolve — the end year advances automatically so you can see which seasons rewrote history and when.</p>
             <p><strong>Explore</strong> by picking any two stats, adjusting the year range, or filtering by league, handedness, or birthplace.</p>
-            <button class="explainer-dismiss" id="explainer-dismiss" type="button">Start exploring</button>
+            <div class="explainer-actions">
+                <button class="explainer-tour" id="take-tour-btn" type="button">Take the tour</button>
+                <button class="explainer-dismiss" id="explainer-dismiss" type="button">Start exploring</button>
+            </div>
         </div>
     </div>
 

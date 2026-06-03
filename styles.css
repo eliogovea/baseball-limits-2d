@@ -919,9 +919,19 @@ html[data-theme="dark"] select.field {
 }
 .explainer-red { color: var(--mlb-red); }
 .explainer-gold { color: var(--gold); }
+/* Action row pinned to the bottom of the (scrollable) modal so the CTAs stay
+   visible on short phones; fade the scrolling text into the panel above it. */
+.explainer-actions {
+    display: flex;
+    gap: 8px;
+    position: sticky;
+    bottom: 0;
+    background: var(--panel);
+    box-shadow: 0 -14px 14px -6px var(--panel);
+    padding-bottom: 0;
+}
 .explainer-dismiss {
-    display: block;
-    width: 100%;
+    flex: 1 1 auto;
     padding: 10px 16px;
     background: var(--mlb-blue);
     color: var(--on-primary);
@@ -929,16 +939,87 @@ html[data-theme="dark"] select.field {
     border-radius: var(--radius-sm);
     font-weight: 600;
     font-size: 14px;
+    cursor: pointer;
     transition: background var(--transition);
-    /* Pin to the bottom of the (scrollable) modal so the CTA is always visible
-       on short phones; fade the scrolling text into the panel just above it. */
-    position: sticky;
-    bottom: 0;
-    box-shadow: 0 -14px 14px -6px var(--panel);
 }
 .explainer-dismiss:hover {
     background: var(--mlb-blue-hover);
 }
+.explainer-tour {
+    flex: 0 0 auto;
+    padding: 10px 16px;
+    background: var(--panel);
+    color: var(--mlb-blue);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-weight: 600;
+    font-size: 14px;
+    cursor: pointer;
+    transition: border-color var(--transition), background var(--transition);
+}
+.explainer-tour:hover { background: var(--bg); border-color: var(--mlb-blue); }
+
+/* ── Guided tour overlay ───────────────────────────────────────────── */
+.bl-tour {
+    position: fixed;
+    inset: 0;
+    z-index: 400;
+}
+.bl-tour-ring {
+    position: fixed;
+    border-radius: 10px;
+    box-shadow: 0 0 0 9999px rgba(5, 9, 15, 0.62),
+                0 0 0 2px var(--mlb-blue),
+                0 0 18px 4px color-mix(in srgb, var(--mlb-blue) 40%, transparent);
+    pointer-events: none;
+    transition: left 0.25s ease, top 0.25s ease, width 0.25s ease, height 0.25s ease;
+    animation: bl-tour-pulse 1.8s ease-in-out infinite;
+}
+.bl-tour-ring--still { animation: none; }
+@keyframes bl-tour-pulse {
+    0%, 100% { box-shadow: 0 0 0 9999px rgba(5,9,15,0.62), 0 0 0 2px var(--mlb-blue), 0 0 14px 3px color-mix(in srgb, var(--mlb-blue) 35%, transparent); }
+    50%      { box-shadow: 0 0 0 9999px rgba(5,9,15,0.62), 0 0 0 2px var(--mlb-blue), 0 0 22px 7px color-mix(in srgb, var(--mlb-blue) 55%, transparent); }
+}
+.bl-tour-card {
+    position: fixed;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-md);
+    padding: 13px 14px 11px;
+    z-index: 401;
+}
+.bl-tour-title { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+.bl-tour-body { font-size: 12px; line-height: 1.45; color: var(--text-muted); }
+.bl-tour-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 12px;
+}
+.bl-tour-dots { display: flex; gap: 4px; }
+.bl-tour-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--border-strong); }
+.bl-tour-dot.is-on { background: var(--mlb-blue); }
+.bl-tour-btns { display: flex; gap: 6px; }
+.bl-tour-btns button {
+    padding: 5px 11px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid var(--border-strong);
+    background: var(--panel);
+    color: var(--text-muted);
+    transition: all var(--transition);
+}
+.bl-tour-btns button:hover { color: var(--mlb-blue); border-color: var(--mlb-blue); }
+.bl-tour-next {
+    background: var(--mlb-blue) !important;
+    color: var(--on-primary) !important;
+    border-color: var(--mlb-blue) !important;
+}
+.bl-tour-next:hover { background: var(--mlb-blue-hover) !important; }
 
 /* -------- Controls -------- */
 
