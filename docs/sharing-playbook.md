@@ -148,9 +148,9 @@ and has hard numbers behind it. Keep the pure-method framing for Hacker News.
 > outer edge of what's ever been possible — you can't beat them on both axes at once. Static
 > D3, no backend, every view is a shareable URL. It also computes each frontier point's
 > leave-one-out hypervolume contribution — which surfaced a fun result: Ohtani's 2024 50/50
-> is the most "valuable" season on the HR-vs-SB frontier in 150 years, and its value doesn't
-> change no matter who else you add to the comparison. Click any frontier dot to trace that
-> player's whole career.
+> is the largest contributor on the HR-vs-SB frontier in 150 years, because no other season
+> has ever paired that power with that speed (the next 50-HR season stole just 20 bases).
+> Click any frontier dot to trace that player's whole career.
 
 **r/dataisbeautiful**
 > [OC] Ohtani's 50/50 owns more of the HR-vs-SB "record frontier" than any season in 150
@@ -195,8 +195,9 @@ and has hard numbers behind it. Keep the pure-method framing for Hacker News.
 > record's *hypervolume contribution* — the area it uniquely owns. It put a clean number on
 > a story baseball fans already felt: Ohtani's 2024 50/50 contributes more to the HR-vs-SB
 > frontier than any season ever — while the single-stat record holders contribute
-> surprisingly little, because there's always a season just behind them. A nice illustration
-> that "balanced and extreme" beats "extreme on one axis" in objective space. [interactive, static D3, no backend]
+> surprisingly little, since being extreme on one stat but ordinary on the other carves out
+> only a thin sliver. A nice illustration that "balanced and extreme" beats "extreme on one
+> axis" in objective space. [interactive, static D3, no backend]
 
 ---
 
