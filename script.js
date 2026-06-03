@@ -2189,6 +2189,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     window.__bl2d_computeHv = computeHvContributions;
 
     renderFrontierCards(frontier, xDim, yDim, formatStat, filtered.length, mode, hvByPoint);
+    renderPlayerSpotlight(frontier, hvByPoint, xDim, yDim, formatStat, mode);
 
     if (unique.length === 0) {
         svg.append("text")
@@ -3020,14 +3021,13 @@ function renderFrontierCards(frontier, xDim, yDim, formatStat, totalUnits, mode 
 
 // Tiny career sparkline for a leaderboard row: the player's season-by-season
 // value of the active Y-axis stat, with a marker on the record season.
-function frontierSparkline(playerID, yDim, recordYear) {
+function frontierSparkline(playerID, yDim, recordYear, w = 52, h = 16) {
     if (!playerIndex || !playerIndex.has(playerID)) return "";
     const seasons = playerIndex.get(playerID)
         .map(s => ({ year: s.yearID, v: s[yDim] }))
         .filter(s => s.v != null && !isNaN(s.v))
         .sort((a, b) => a.year - b.year);
     if (seasons.length < 2) return `<span class="frontier-spark-empty" aria-hidden="true"></span>`;
-    const w = 52, h = 16;
     const vals = seasons.map(s => s.v);
     const mn = Math.min(...vals), mx = Math.max(...vals), range = mx - mn || 1;
     const X = i => (i / (seasons.length - 1)) * w;
@@ -3038,6 +3038,58 @@ function frontierSparkline(playerID, yDim, recordYear) {
         ? `<circle class="frontier-spark-dot" cx="${X(ri).toFixed(1)}" cy="${Y(seasons[ri].v).toFixed(1)}" r="2"/>`
         : "";
     return `<svg class="frontier-spark" viewBox="0 0 ${w} ${h + 2}" width="${w}" height="${h + 2}" aria-hidden="true"><polyline points="${pts}"/>${marker}</svg>`;
+}
+
+// Player spotlight card — shown when exactly one player is pinned. Turns the
+// click into a moment: meta, a career sparkline, how many frontier seasons they
+// own and what share of the frontier area (summed hypervolume contribution),
+// and their record seasons. Reuses careerHighlights + the hv metric.
+function renderPlayerSpotlight(frontier, hvByPoint, xDim, yDim, formatStat, mode) {
+    const el = document.getElementById("player-spotlight");
+    if (!el) return;
+    if (careerHighlights.size !== 1) { el.hidden = true; el.innerHTML = ""; return; }
+    const pid = [...careerHighlights.keys()][0];
+    const mine = frontier.filter(p => p.playerID === pid).sort((a, b) => b.year - a.year);
+    if (!mine.length) { el.hidden = true; el.innerHTML = ""; return; }
+
+    const areaPct = hvByPoint
+        ? mine.reduce((s, p) => s + (hvByPoint.has(p) ? hvByPoint.get(p).fraction : 0), 0) * 100
+        : 0;
+    const meta = metaFor(pid) || {};
+    const nm = pid.replace(/\s*\(b\.\d+\)\s*/, "").trim();
+    const initials = nm.split(/\s+/).map(w => w[0] || "").slice(0, 2).join("").toUpperCase();
+    let span = "";
+    if (playerIndex && playerIndex.has(pid)) {
+        const yrs = playerIndex.get(pid).map(s => s.yearID);
+        span = `${Math.min(...yrs)}–${Math.max(...yrs)}`;
+    }
+    const hand = activeDatasetKey === "pitching" ? meta.throws : meta.bats;
+    const handLabel = hand ? `${activeDatasetKey === "pitching" ? "throws" : "bats"} ${hand}` : "";
+    const sub = [span, handLabel, meta.country].filter(Boolean).join(" · ");
+    const unit = mode === "career" ? "careers" : "seasons";
+    const seasonRows = mine.slice(0, 5).map(p => {
+        const yl = mode === "career" ? `${p.year}–${p.yearLast}` : String(p.year);
+        return `<div class="ps-season"><span class="ps-season-yr">${yl}</span><span class="ps-season-val">${xDim} ${formatStat(xDim, p.x)} · ${yDim} ${formatStat(yDim, p.y)}</span></div>`;
+    }).join("");
+
+    el.innerHTML =
+        `<button type="button" class="ps-close" aria-label="Close player card" title="Close">` +
+        `<svg width="12" height="12" viewBox="0 0 14 14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 2l10 10M12 2L2 12"/></svg></button>` +
+        `<div class="ps-head"><div class="ps-mono" aria-hidden="true">${initials}</div>` +
+        `<div class="ps-id"><div class="ps-name">${escapeHtml(nm)}</div><div class="ps-sub">${escapeHtml(sub)}</div></div></div>` +
+        `<div class="ps-tiles">` +
+        `<div class="ps-tile"><div class="ps-tile-num">${mine.length}</div><div class="ps-tile-lab">frontier ${unit}</div></div>` +
+        `<div class="ps-tile"><div class="ps-tile-num">${areaPct.toFixed(areaPct < 10 ? 1 : 0)}%</div><div class="ps-tile-lab">of frontier area</div></div>` +
+        `</div>` +
+        `<div class="ps-spark-lab">Career ${escapeHtml(yDim)}</div>` +
+        `<div class="ps-spark">${frontierSparkline(pid, yDim, mine[0].year, 184, 26)}</div>` +
+        `<div class="ps-seasons">${seasonRows}</div>`;
+    el.hidden = false;
+    el.querySelector(".ps-close").addEventListener("click", () => {
+        clearHighlights();
+        syncPlayerHint();
+        document.dispatchEvent(new CustomEvent("bl2d:refresh"));
+    });
 }
 
 // Exact leave-one-out hypervolume contribution for a 2D Pareto frontier.

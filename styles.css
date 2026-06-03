@@ -1620,6 +1620,95 @@ input[type="number"].field::-webkit-outer-spin-button {
 .frontier-spark-empty { flex: 0 0 52px; }
 .frontier-empty { font-size: 11px; color: var(--text-muted); padding: 6px 4px; }
 
+/* ── Player spotlight card ─────────────────────────────────────────── */
+.player-spotlight {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    width: 248px;
+    max-width: calc(100% - 24px);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-md);
+    padding: 12px 12px 10px;
+    z-index: 6;
+}
+.player-spotlight[hidden] { display: none; }
+.ps-close {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    transition: color var(--transition), border-color var(--transition);
+}
+.ps-close:hover { color: var(--text); border-color: var(--border-strong); }
+.ps-head { display: flex; align-items: center; gap: 10px; padding-right: 22px; }
+.ps-mono {
+    flex: 0 0 auto;
+    width: 40px;
+    height: 40px;
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--gold) 18%, var(--panel));
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 14px;
+    color: var(--gold);
+}
+.ps-id { min-width: 0; }
+.ps-name {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.ps-sub {
+    font-size: 10px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.ps-tiles { display: flex; gap: 8px; margin: 10px 0; }
+.ps-tile { flex: 1; background: var(--bg); border-radius: 7px; padding: 6px 9px; }
+.ps-tile-num { font-size: 16px; font-weight: 800; color: var(--text); font-variant-numeric: tabular-nums; }
+.ps-tile:first-child .ps-tile-num { color: var(--gold); }
+.ps-tile-lab {
+    font-size: 8px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+}
+.ps-spark-lab {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin-bottom: 2px;
+}
+.ps-spark { margin-bottom: 8px; }
+.ps-spark polyline { fill: none; stroke: var(--gold); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; opacity: 1; }
+.ps-season { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }
+.ps-season-yr { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.ps-season-val { font-size: 11px; color: var(--text); font-variant-numeric: tabular-nums; }
+
 /* ── On-chart axis stat picker menu ─────────────────────────────── */
 .axis-stat-menu {
     position: absolute;
