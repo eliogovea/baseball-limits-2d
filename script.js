@@ -1055,6 +1055,12 @@ function applyPreset(state) {
     history.replaceState(null, "", location.pathname + location.search + "#" + hash);
     applyUrlState();
     document.dispatchEvent(new Event("bl2d:refresh"));
+    // Picked from the welcome modal → dismiss it and remember it's been seen.
+    const backdrop = document.getElementById("explainer-backdrop");
+    if (backdrop && !backdrop.hidden) {
+        backdrop.hidden = true;
+        try { localStorage.setItem("bl2d_intro_seen", "1"); } catch (e) { /* private mode */ }
+    }
 }
 function renderPresetShelf() {
     const shelf = document.getElementById("preset-shelf");
@@ -2458,11 +2464,18 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         for (let i = depthLayers.length - 1; i >= 1; i--) {
             const layer = depthLayers[i];
             if (!layer.length) continue;
-            const op = 0.85 * Math.pow(0.6, i);
             const pts = staircaseScreen(layer);
+            const poly = "M " + pts.map(p => p.join(",")).join(" L ");
+            // Dominated-region fill — nested layers stack so the tone deepens
+            // toward the inner layers, making the topographic depth read clearly.
+            dg.append("path")
+                .attr("class", "depth-shade")
+                .attr("d", poly + " L " + xAnti + "," + yAnti + " Z");
+            // Staircase + dots; gentle fade so each layer's boundary still reads.
+            const op = Math.max(0.3, 0.9 * Math.pow(0.72, i));
             dg.append("path")
                 .attr("class", "depth-staircase")
-                .attr("d", "M " + pts.map(p => p.join(",")).join(" L "))
+                .attr("d", poly)
                 .style("opacity", op);
             dg.append("g").selectAll("circle")
                 .data(layer).enter().append("circle")

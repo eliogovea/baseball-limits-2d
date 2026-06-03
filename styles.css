@@ -286,9 +286,16 @@ html[data-theme="dark"] select.field {
 }
 .attribution-sep { color: var(--border-strong); }
 
-/* -------- Story presets (sidebar) -------- */
-/* A short list of "famous frontier" rows at the top of the controls panel —
-   one per row: title left, stat pair right. */
+/* -------- Story presets (welcome modal) -------- */
+/* A short list of "famous frontier" rows — one per row: title left, stat right.
+   Lives in the welcome modal (reachable anytime via Help). */
+.explainer-stories-lab {
+    margin: 6px 0 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+}
+.explainer .preset-shelf { margin-bottom: 16px; }
 .preset-shelf {
     display: flex;
     flex-direction: column;
@@ -421,6 +428,13 @@ html[data-theme="dark"] select.field {
     fill: var(--frontier-color);
     stroke: var(--panel);
     stroke-width: 1;
+    pointer-events: none;
+}
+/* Nested dominated-region fills — stack to darken toward the inner layers. */
+.depth-shade {
+    fill: var(--frontier-color);
+    fill-opacity: 0.06;
+    stroke: none;
     pointer-events: none;
 }
 
