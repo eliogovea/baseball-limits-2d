@@ -567,7 +567,7 @@ html[data-theme="dark"] select.field {
 .legend-era-bar {
     display: flex;
     height: 8px;
-    width: 116px;
+    width: 100%;
     border-radius: 3px;
     overflow: hidden;
 }
