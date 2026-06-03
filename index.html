@@ -239,6 +239,14 @@
                         <input type="number" id="e-year-select" class="field" inputmode="numeric" aria-label="End year" title="End year">
                     </div>
                     <div class="ctl-field ctl-field--inline">
+                        <label class="hv-toggle"><input type="checkbox" id="era-compare-toggle"> Compare a second era</label>
+                    </div>
+                    <div class="ctl-field ctl-field--inline ctl-year-row" id="era-b-row" hidden>
+                        <input type="number" id="sb-year-select" class="field" inputmode="numeric" aria-label="Comparison start year" title="Comparison era start" value="1900">
+                        <span class="year-range-sep">–</span>
+                        <input type="number" id="eb-year-select" class="field" inputmode="numeric" aria-label="Comparison end year" title="Comparison era end" value="1919">
+                    </div>
+                    <div class="ctl-field ctl-field--inline">
                         <div class="seg-group" role="group" id="colorby-seg" aria-label="Color dots by" title="Color the background dots by">
                             <button type="button" class="seg-btn active" data-colorby="era" title="Color dots by era">Era</button>
                             <button type="button" class="seg-btn" data-colorby="league" title="Color dots by league">League</button>

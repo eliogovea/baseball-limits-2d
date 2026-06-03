@@ -284,7 +284,7 @@ const URL_DEFAULTS = {
     ds: "batting",
     x: "HR", y: "SB", sy: "1920", ey: "2024", pa: "502",
     m: "season", lg: "all", bt: "all", cb: "era", co: "all",
-    fr: "all", hl: "", d: "1",
+    fr: "all", hl: "", d: "1", c2: "0", sy2: "1900", ey2: "1919",
 };
 
 // Per-dataset metadata. The Stats toggle in the UI switches `activeDataset`;
@@ -531,6 +531,14 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     // highlight or touch playing-time; just recolor the cloud + legend.
     setupSegGroup("colorby-seg", () => refreshChart());
     document.getElementById("depth-select")?.addEventListener("change", () => refreshChart());
+    document.getElementById("era-compare-toggle")?.addEventListener("change", (e) => {
+        const row = document.getElementById("era-b-row");
+        if (row) row.hidden = !e.target.checked;
+        refreshChart();
+    });
+    ["sb-year-select", "eb-year-select"].forEach((id) => {
+        document.getElementById(id)?.addEventListener("change", () => refreshChart());
+    });
     ["country-select", "franchise-select"].forEach((id) => {
         document.getElementById(id)?.addEventListener("change", () => {
             clearHighlights();
@@ -571,6 +579,9 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         const bats = getSegValue("bats-seg", "bats") || "all";
         const colorBy = getSegValue("colorby-seg", "colorby") || "era";
         const depth = parseInt(document.getElementById("depth-select")?.value) || 1;
+        const compareEras = document.getElementById("era-compare-toggle")?.checked || false;
+        const sB = parseInt(document.getElementById("sb-year-select")?.value) || 1900;
+        const eB = parseInt(document.getElementById("eb-year-select")?.value) || 1919;
         const country = document.getElementById("country-select").value || "all";
         const franchise = document.getElementById("franchise-select")?.value || "all";
         const def = activeDataset();
@@ -597,9 +608,9 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         cancelAnimationFrame(pendingRender);
         pendingRender = requestAnimationFrame(() => {
             drawScatterPlot(data.points, xDim, yDim, sYear, eYear, minThreshold, formatStat, mode,
-                { league, bats, colorBy, depth, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey });
+                { league, bats, colorBy, depth, compareEras, sB, eB, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey });
             loadingIndicator.classList.remove("active");
-            writeUrlState({ xDim, yDim, sYear, eYear, minPa: thresholdValue, mode, league, bats, colorBy, depth, country, franchise });
+            writeUrlState({ xDim, yDim, sYear, eYear, minPa: thresholdValue, mode, league, bats, colorBy, depth, compareEras, sB, eB, country, franchise });
         });
     }
 
@@ -1001,6 +1012,14 @@ function applyUrlState() {
     setSeg("bats-seg", "bats", u.bt);
     setSeg("colorby-seg", "colorby", u.cb);
     setSelect("depth-select", u.d);
+    if (u.sy2) { const e = document.getElementById("sb-year-select"); if (e) e.value = u.sy2; }
+    if (u.ey2) { const e = document.getElementById("eb-year-select"); if (e) e.value = u.ey2; }
+    if (u.c2 === "1") {
+        const t = document.getElementById("era-compare-toggle");
+        const row = document.getElementById("era-b-row");
+        if (t) t.checked = true;
+        if (row) row.hidden = false;
+    }
     setSelect("country-select", u.co);
     updateCountrySelection(document.getElementById("country-select")?.value || "all");
     setSelect("franchise-select", u.fr);
@@ -1062,6 +1081,9 @@ function writeUrlState(state) {
             bt: state.bats,
             cb: state.colorBy,
             d: String(state.depth),
+            c2: state.compareEras ? "1" : "0",
+            sy2: String(state.sB),
+            ey2: String(state.eB),
             co: state.country,
             fr: state.franchise,
             hl: [...careerHighlights.keys()].join(","),
@@ -2075,8 +2097,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         return m;
     };
 
-    const seasonMatches = (p) => {
-        if (p.yearID < sYear || p.yearID > eYear) return false;
+    // Attribute filters without the year window — reused for the era-vs-era
+    // comparison frontier, which applies the same filters over a second range.
+    const attrMatches = (p) => {
         if (league !== "all" && p.lgID !== league) return false;
         if (franchise !== "all" && FRANCHISE_BY_TEAM.get(p.teamID) !== franchise) return false;
         if (bats !== "all" || country !== "all") {
@@ -2087,6 +2110,8 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         }
         return true;
     };
+    const seasonMatches = (p) =>
+        p.yearID >= sYear && p.yearID <= eYear && attrMatches(p);
 
     const thresholdField = filters.thresholdField || "PA";
     const datasetKey = filters.dataset || "batting";
@@ -2202,6 +2227,14 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const depthLayers = peelDepth > 1 ? paretoLayers(unique, peelDepth) : [frontier];
     window.__bl2d_depthLayers = depthLayers.map(l => l.length);
 
+    // Era-vs-era: a second frontier over a different year window (same attribute
+    // filters), used to overlay and quantify how much the primary era dominates.
+    const compareEras = !!filters.compareEras && !animTimer;
+    const sB = filters.sB | 0, eB = filters.eB | 0;
+    const eraB = compareEras
+        ? buildFrontier(p => p.yearID >= sB && p.yearID <= eB && attrMatches(p))
+        : null;
+
     // "Global" reference frontier: same universe (year range + threshold) but
     // ignoring the attribute filters (league, team, country, handedness). Lets a
     // filtered view keep perspective on the all-MLB limit — drawn as a faint
@@ -2304,6 +2337,13 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         const extentSource = globalResult ? globalResult.unique : unique;
         xExtent = d3.extent(extentSource, d => d.x);
         yExtent = d3.extent(extentSource, d => d.y);
+    }
+    // Widen the domain so the comparison era's frontier isn't clipped.
+    if (eraB && eraB.frontier.length && xExtent[0] != null) {
+        xExtent = [Math.min(xExtent[0], d3.min(eraB.frontier, d => d.x)),
+                   Math.max(xExtent[1], d3.max(eraB.frontier, d => d.x))];
+        yExtent = [Math.min(yExtent[0], d3.min(eraB.frontier, d => d.y)),
+                   Math.max(yExtent[1], d3.max(eraB.frontier, d => d.y))];
     }
     const xDomain = (viewDomain && viewDomain.x) || xExtent;
     const yDomain = (viewDomain && viewDomain.y) || yExtent;
@@ -2455,6 +2495,43 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             .attr("class", "frontier-staircase")
             .attr("d", "M " + line.map(p => p.join(",")).join(" L "))
             .style("stroke", showWorstFrontier ? "#8b5cf6" : null);
+    }
+
+    // Era-vs-era overlay: the comparison frontier (teal) + its dominated region,
+    // plus a coverage headline = how much of B's objective space the primary era
+    // also dominates (grid-sampled, sign-aware so "lower is better" axes work).
+    if (eraB && eraB.frontier.length) {
+        const bPts = staircaseScreen(eraB.frontier);
+        const eg = g.append("g").attr("class", "era-b-layer");
+        eg.append("path")
+            .attr("class", "era-b-shade")
+            .attr("d", "M " + xAnti + "," + yAnti + " L " + bPts.map(p => p.join(",")).join(" L ") + " Z");
+        eg.append("path")
+            .attr("class", "era-b-staircase")
+            .attr("d", "M " + bPts.map(p => p.join(",")).join(" L "));
+        eg.selectAll("circle.era-b-dot")
+            .data(eraB.frontier).enter().append("circle")
+            .attr("class", "era-b-dot")
+            .attr("cx", d => xScale(d.x)).attr("cy", d => yScale(d.y)).attr("r", 3.5);
+
+        const domBy = (fr, cx, cy) => fr.some(a => a.x * xSign >= cx * xSign && a.y * ySign >= cy * ySign);
+        let covNum = 0, covDen = 0;
+        const N = 48;
+        for (let i = 0; i < N; i++) {
+            for (let j = 0; j < N; j++) {
+                const cx = xExtent[0] + (i + 0.5) / N * (xExtent[1] - xExtent[0]);
+                const cy = yExtent[0] + (j + 0.5) / N * (yExtent[1] - yExtent[0]);
+                if (domBy(eraB.frontier, cx, cy)) { covDen++; if (domBy(frontier, cx, cy)) covNum++; }
+            }
+        }
+        const coverage = covDen ? Math.round(covNum / covDen * 100) : 0;
+        window.__bl2d_eraCoverage = coverage;
+        eg.append("text")
+            .attr("class", "era-b-label")
+            .attr("x", 8).attr("y", 16)
+            .text(`${sYear}–${eYear} dominates ${coverage}% of ${sB}–${eB}`);
+    } else {
+        window.__bl2d_eraCoverage = null;
     }
 
     // Overlay group for HV contribution polygons (hover + pinned player).

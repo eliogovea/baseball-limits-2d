@@ -389,6 +389,28 @@ html[data-theme="dark"] select.field {
     opacity: 0.55;
     pointer-events: none;
 }
+/* Era-vs-era comparison overlay (teal — distinct from frontier/league/era hues). */
+.era-b-shade { fill: #0ea5a4; fill-opacity: 0.12; pointer-events: none; }
+.era-b-staircase {
+    fill: none;
+    stroke: #0ea5a4;
+    stroke-width: 2;
+    stroke-dasharray: 6 4;
+    opacity: 0.9;
+    pointer-events: none;
+}
+.era-b-dot { fill: #0ea5a4; stroke: var(--panel); stroke-width: 1.2; pointer-events: none; }
+.era-b-label {
+    font-family: var(--font-sans);
+    font-size: 11px;
+    font-weight: 600;
+    fill: var(--text);
+    paint-order: stroke;
+    stroke: var(--panel);
+    stroke-width: 3px;
+    pointer-events: none;
+}
+
 /* Outgoing frontier during a morph — dashed, fades out (see drawScatterPlot). */
 .frontier-staircase-ghost {
     fill: none;
