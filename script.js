@@ -284,7 +284,7 @@ const URL_DEFAULTS = {
     ds: "batting",
     x: "HR", y: "SB", sy: "1920", ey: "2024", pa: "502",
     m: "season", lg: "all", bt: "all", cb: "era", co: "all",
-    fr: "all", hl: "",
+    fr: "all", hl: "", d: "1",
 };
 
 // Per-dataset metadata. The Stats toggle in the UI switches `activeDataset`;
@@ -530,6 +530,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     // Color encoding is a display option, not a filter — no need to clear the
     // highlight or touch playing-time; just recolor the cloud + legend.
     setupSegGroup("colorby-seg", () => refreshChart());
+    document.getElementById("depth-select")?.addEventListener("change", () => refreshChart());
     ["country-select", "franchise-select"].forEach((id) => {
         document.getElementById(id)?.addEventListener("change", () => {
             clearHighlights();
@@ -569,6 +570,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         const league = getSegValue("league-seg", "league") || "all";
         const bats = getSegValue("bats-seg", "bats") || "all";
         const colorBy = getSegValue("colorby-seg", "colorby") || "era";
+        const depth = parseInt(document.getElementById("depth-select")?.value) || 1;
         const country = document.getElementById("country-select").value || "all";
         const franchise = document.getElementById("franchise-select")?.value || "all";
         const def = activeDataset();
@@ -595,9 +597,9 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         cancelAnimationFrame(pendingRender);
         pendingRender = requestAnimationFrame(() => {
             drawScatterPlot(data.points, xDim, yDim, sYear, eYear, minThreshold, formatStat, mode,
-                { league, bats, colorBy, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey });
+                { league, bats, colorBy, depth, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey });
             loadingIndicator.classList.remove("active");
-            writeUrlState({ xDim, yDim, sYear, eYear, minPa: thresholdValue, mode, league, bats, colorBy, country, franchise });
+            writeUrlState({ xDim, yDim, sYear, eYear, minPa: thresholdValue, mode, league, bats, colorBy, depth, country, franchise });
         });
     }
 
@@ -998,6 +1000,7 @@ function applyUrlState() {
     setSeg("league-seg", "league", u.lg);
     setSeg("bats-seg", "bats", u.bt);
     setSeg("colorby-seg", "colorby", u.cb);
+    setSelect("depth-select", u.d);
     setSelect("country-select", u.co);
     updateCountrySelection(document.getElementById("country-select")?.value || "all");
     setSelect("franchise-select", u.fr);
@@ -1058,6 +1061,7 @@ function writeUrlState(state) {
             lg: state.league,
             bt: state.bats,
             cb: state.colorBy,
+            d: String(state.depth),
             co: state.country,
             fr: state.franchise,
             hl: [...careerHighlights.keys()].join(","),
@@ -2152,22 +2156,51 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             if (i === 0 || p.x !== flt[i - 1].x || p.y !== flt[i - 1].y) uniq.push(p);
         }
 
-        // Pareto frontier: sweep left-to-right keeping the best-in-class envelope.
-        // Signed values ensure "lower is better" axes are treated correctly.
+        // Pareto frontier via the shared sweep (keeps onion-peeling layer 0
+        // byte-identical to the single frontier).
+        const fr = sweepFrontier(uniq);
+
+        return { filtered: flt, unique: uniq, frontier: fr };
+    }
+
+    // Left-to-right best-in-class envelope over an already-sorted, deduped array.
+    // Signed values handle "lower is better" axes. Shared by buildFrontier and
+    // the onion-peeling layers so layer 0 == the single frontier.
+    function sweepFrontier(sortedUniq) {
         const fr = [];
-        for (const p of uniq) {
+        for (const p of sortedUniq) {
             const py = p.y * ySign;
             while (fr.length && fr[fr.length - 1].y * ySign < py) fr.pop();
             if (fr.length && fr[fr.length - 1].y === p.y &&
                 fr[fr.length - 1].x * xSign < p.x * xSign) fr.pop();
             fr.push(p);
         }
+        return fr;
+    }
 
-        return { filtered: flt, unique: uniq, frontier: fr };
+    // Pareto depth (onion peeling): peel the frontier, re-sweep the remainder,
+    // repeat up to maxDepth. layers[0] is the live frontier. The remainder stays
+    // sorted, so each peel is O(pool), bounding total cost at depth × N.
+    function paretoLayers(sortedUniq, maxDepth) {
+        const layers = [];
+        let pool = sortedUniq;
+        for (let i = 0; i < maxDepth && pool.length; i++) {
+            const fr = sweepFrontier(pool);
+            const set = new Set(fr);
+            layers.push(fr);
+            pool = pool.filter(p => !set.has(p));
+        }
+        return layers;
     }
 
     const { filtered, unique, frontier } = buildFrontier(seasonMatches);
     const frontierSet = new Set(frontier);
+
+    // Onion-peeling layers (layer 0 == frontier). depth=1 is the default and is
+    // a no-op visually. Exposed for the headless invariant checks.
+    const peelDepth = Math.max(1, Math.min(5, filters.depth || 1));
+    const depthLayers = peelDepth > 1 ? paretoLayers(unique, peelDepth) : [frontier];
+    window.__bl2d_depthLayers = depthLayers.map(l => l.length);
 
     // "Global" reference frontier: same universe (year range + threshold) but
     // ignoring the attribute filters (league, team, country, handedness). Lets a
@@ -2371,6 +2404,30 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             .style("fill", "#8a93a6")
             .style("opacity", 0.65);
         if (legendGlobalEl) legendGlobalEl.hidden = false;
+    }
+
+    // Onion-peeling: draw the deeper Pareto layers (1…n) behind the live
+    // frontier, fading outward. Non-interactive so the real frontier keeps its
+    // clicks, tooltips, and cards. Deepest first so layer 0 ends up on top.
+    if (depthLayers.length > 1) {
+        const dg = g.append("g").attr("class", "depth-layers");
+        for (let i = depthLayers.length - 1; i >= 1; i--) {
+            const layer = depthLayers[i];
+            if (!layer.length) continue;
+            const op = 0.85 * Math.pow(0.6, i);
+            const pts = staircaseScreen(layer);
+            dg.append("path")
+                .attr("class", "depth-staircase")
+                .attr("d", "M " + pts.map(p => p.join(",")).join(" L "))
+                .style("opacity", op);
+            dg.append("g").selectAll("circle")
+                .data(layer).enter().append("circle")
+                .attr("class", "depth-dot")
+                .attr("cx", d => xScale(d.x))
+                .attr("cy", d => yScale(d.y))
+                .attr("r", 3)
+                .style("opacity", op);
+        }
     }
 
     if (frontier.length > 0) {

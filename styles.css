@@ -398,6 +398,21 @@ html[data-theme="dark"] select.field {
     pointer-events: none;
 }
 
+/* Onion-peeling: deeper Pareto layers behind the live frontier. Non-interactive,
+   fading outward (opacity set per-layer in drawScatterPlot). */
+.depth-staircase {
+    fill: none;
+    stroke: var(--frontier-color);
+    stroke-width: 1.6;
+    pointer-events: none;
+}
+.depth-dot {
+    fill: var(--frontier-color);
+    stroke: var(--panel);
+    stroke-width: 1;
+    pointer-events: none;
+}
+
 .career-point {
     fill: var(--gold);
     stroke: #ffffff;
