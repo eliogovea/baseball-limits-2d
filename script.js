@@ -533,8 +533,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     setupSegGroup("colorby-seg", () => refreshChart());
     setupSegGroup("depth-seg", () => refreshChart());
     document.getElementById("era-compare-toggle")?.addEventListener("change", (e) => {
-        const row = document.getElementById("era-b-row");
-        if (row) row.hidden = !e.target.checked;
+        setEraCompareEnabled(e.target.checked);
         refreshChart();
     });
     ["sb-year-select", "eb-year-select"].forEach((id) => {
@@ -965,6 +964,17 @@ function parseUrlHash() {
     return out;
 }
 
+// Enable/disable the comparison-era range row: dims it + toggles its inputs, so
+// it reads as available-but-off (like the dimmed franchises) until compare is on.
+function setEraCompareEnabled(on) {
+    const row = document.getElementById("era-b-row");
+    if (row) { row.classList.toggle("ctl-disabled", !on); row.setAttribute("aria-disabled", String(!on)); }
+    const sb = document.getElementById("sb-year-select");
+    const eb = document.getElementById("eb-year-select");
+    if (sb) sb.disabled = !on;
+    if (eb) eb.disabled = !on;
+}
+
 function applyUrlState() {
     const u = parseUrlHash();
     const setSelect = (id, val) => {
@@ -1017,9 +1027,8 @@ function applyUrlState() {
     if (u.ey2) { const e = document.getElementById("eb-year-select"); if (e) e.value = u.ey2; }
     if (u.c2 === "1") {
         const t = document.getElementById("era-compare-toggle");
-        const row = document.getElementById("era-b-row");
         if (t) t.checked = true;
-        if (row) row.hidden = false;
+        setEraCompareEnabled(true);
     }
     setSelect("country-select", u.co);
     updateCountrySelection(document.getElementById("country-select")?.value || "all");

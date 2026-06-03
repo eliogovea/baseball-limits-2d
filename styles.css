@@ -2279,6 +2279,19 @@ input[type="number"].field::-webkit-outer-spin-button {
 .ctl-section[hidden],
 .ctl-field[hidden] { display: none; }
 
+/* Available-but-off control (e.g. the comparison-era range before it's enabled),
+   mirroring the dimmed-franchise treatment. */
+.ctl-disabled { opacity: 0.4; pointer-events: none; }
+
+/* Leading icon that stands in for a text label on a control row. */
+.ctl-icon {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+}
+
 /* Axis selectors drive the whole chart, so give them subtle primary emphasis
    over the other controls (theme-safe via color-mix). */
 .ctl-axis-pair .field {
