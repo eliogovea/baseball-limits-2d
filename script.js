@@ -601,6 +601,8 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         });
     }
 
+    renderPresetShelf();
+
     // Apply the persisted theme before the first render so the chart's color
     // tables (era ramp, league) are themed when drawScatterPlot first runs.
     applyTheme(initialTheme());
@@ -934,15 +936,16 @@ function applyUrlState() {
         document.querySelectorAll(`#${groupId} .seg-btn`).forEach(b => b.classList.remove("active"));
         btn.classList.add("active");
     };
-    // Dataset must switch first so the pitching dimension dropdowns exist
-    // before we try to select a pitching-only axis token (e.g. ERA, K/9).
-    if (u.ds === "pitching" && activeDatasetKey !== "pitching") {
-        const stBtn = document.querySelector('#stats-toggle .mode-btn[data-stats="pitching"]');
+    // Dataset must switch first so the right dimension dropdowns exist before we
+    // try to select a dataset-specific axis token (e.g. ERA, K/9). Bidirectional
+    // so re-applying a preset/deep-link reliably lands on the named dataset.
+    if ((u.ds === "batting" || u.ds === "pitching") && u.ds !== activeDatasetKey) {
+        const stBtn = document.querySelector(`#stats-toggle .mode-btn[data-stats="${u.ds}"]`);
         if (stBtn) {
             document.querySelectorAll('#stats-toggle .mode-btn').forEach(b => b.classList.remove("active"));
             stBtn.classList.add("active");
         }
-        activeDatasetKey = "pitching";
+        activeDatasetKey = u.ds;
         playerIndex = datasetState[activeDatasetKey].playerIndex;
         populateSelectorsForActive();
         resetThresholdToDefault();
@@ -952,12 +955,15 @@ function applyUrlState() {
     setSelect("y-axis-select", u.y);
     if (u.sy) document.getElementById("s-year-select").value = u.sy;
     if (u.ey) document.getElementById("e-year-select").value = u.ey;
-    // Mode applies first so PA slider config is right before we set its value.
-    if (u.m === "career") {
-        document.querySelectorAll(".mode-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === "career"));
-        applyModeConfig("career");
-        document.getElementById("mode-hint").textContent =
-            "Each dot is one player's career totals across the selected year window.";
+    // Mode applies before PA so the slider config is right before we set its
+    // value. Bidirectional + scoped to #mode-toggle so it doesn't disturb the
+    // Best/Worst or Batting/Pitching groups (which also use .mode-btn).
+    if (u.m === "career" || u.m === "season") {
+        document.querySelectorAll("#mode-toggle .mode-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === u.m));
+        applyModeConfig(u.m);
+        document.getElementById("mode-hint").textContent = u.m === "career"
+            ? "Each dot is one player's career totals across the selected year window."
+            : "Each dot is one player's single season.";
     }
     if (u.pa) document.getElementById("pa-min-select").value = u.pa;
     setSeg("league-seg", "league", u.lg);
@@ -971,6 +977,41 @@ function applyUrlState() {
     updateChipSelection(frVal);
     updateFranchiseDimming(getSegValue("league-seg", "league") || "all");
     if (u.hl) { u.hl.split(",").forEach(id => addHighlight(id.trim())); }
+}
+
+// ── Curated story presets ───────────────────────────────────────────────
+// One tap loads a famous frontier (axes + dataset + a pinned player) through
+// the existing URL-hash path. Player keys are the disambiguated display names
+// used as playerIDs (see scripts/_display_name.py).
+const PRESETS = [
+    { label: "Ohtani's 50/50",   sub: "HR · SB",   state: { ds: "batting",  m: "season", x: "HR", y: "SB",  hl: "Shohei Ohtani" } },
+    { label: "Bonds' 73",        sub: "HR · AVG",  state: { ds: "batting",  m: "season", x: "HR", y: "AVG", hl: "Barry Bonds" } },
+    { label: "Henderson 130 SB", sub: "SB · HR",   state: { ds: "batting",  m: "season", x: "SB", y: "HR",  hl: "Rickey Henderson" } },
+    { label: "Sosa power",       sub: "HR · SLG",  state: { ds: "batting",  m: "season", x: "HR", y: "SLG", hl: "Sammy Sosa" } },
+    { label: "Pedro 2000",       sub: "K/9 · K/BB", state: { ds: "pitching", m: "season", x: "K/9", y: "K/BB", hl: "Pedro Martinez (b.1971)" } },
+];
+function applyPreset(state) {
+    clearHighlights();
+    const hash = Object.entries(state)
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+        .join("&");
+    history.replaceState(null, "", location.pathname + location.search + "#" + hash);
+    applyUrlState();
+    document.dispatchEvent(new Event("bl2d:refresh"));
+}
+function renderPresetShelf() {
+    const shelf = document.getElementById("preset-shelf");
+    if (!shelf) return;
+    shelf.innerHTML =
+        `<span class="preset-shelf-label">Stories</span>` +
+        PRESETS.map((p, i) =>
+            `<button type="button" class="preset-chip" data-preset="${i}">` +
+            `<span class="preset-chip-title">${p.label}</span>` +
+            `<span class="preset-chip-sub">${p.sub}</span></button>`
+        ).join("");
+    shelf.querySelectorAll(".preset-chip").forEach((btn) => {
+        btn.addEventListener("click", () => applyPreset(PRESETS[+btn.dataset.preset].state));
+    });
 }
 
 let urlWriteTimer = null;
