@@ -199,6 +199,8 @@
 
             <div class="controls-panel collapsed" id="controls-panel">
 
+              <div class="controls-inputs">
+
                 <!-- ── PLOT band: what's drawn (direction, dataset, axes, range, color) ── -->
                 <p class="ctl-section__title">Plot</p>
                 <section class="ctl-section">
@@ -278,6 +280,17 @@
                         <div id="player-suggestions" class="player-suggestions" hidden role="listbox" aria-label="Player suggestions"></div>
                     </div>
                     <div class="player-chips" id="player-hint" hidden></div>
+                </section>
+
+              </div><!-- /.controls-inputs -->
+
+                <!-- ── Frontier leaderboard: browsable list of record seasons ── -->
+                <section class="frontier-section" aria-label="Frontier leaderboard">
+                    <div class="frontier-head">
+                        <span class="frontier-title">On the frontier</span>
+                        <span class="frontier-count" id="frontier-count"></span>
+                    </div>
+                    <div class="frontier-cards" id="frontier-cards" role="list"></div>
                 </section>
 
             </div>

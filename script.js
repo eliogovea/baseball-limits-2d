@@ -603,6 +603,35 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
 
     renderPresetShelf();
 
+    // Frontier leaderboard interaction: click / Enter pins (toggles) a player's
+    // gold career trail; ↑/↓ move between rows. Rows are re-rendered each refresh.
+    const fcards = document.getElementById("frontier-cards");
+    if (fcards) {
+        const togglePin = (pid) => {
+            if (!pid) return;
+            if (careerHighlights.has(pid)) removeHighlight(pid);
+            else addHighlight(pid);
+            syncPlayerHint();
+            refreshChart();
+        };
+        fcards.addEventListener("click", (e) => {
+            const row = e.target.closest(".frontier-card");
+            if (row) togglePin(row.dataset.pid);
+        });
+        fcards.addEventListener("keydown", (e) => {
+            const row = e.target.closest(".frontier-card");
+            if (!row) return;
+            if (e.key === "Enter" || e.key === " ") { e.preventDefault(); togglePin(row.dataset.pid); }
+            else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                e.preventDefault();
+                const rows = [...fcards.querySelectorAll(".frontier-card")];
+                const i = rows.indexOf(row);
+                const next = rows[Math.max(0, Math.min(rows.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))];
+                if (next) next.focus();
+            }
+        });
+    }
+
     // Apply the persisted theme before the first render so the chart's color
     // tables (era ramp, league) are themed when drawScatterPlot first runs.
     applyTheme(initialTheme());
@@ -2969,26 +2998,46 @@ function renderFrontierCards(frontier, xDim, yDim, formatStat, totalUnits, mode 
 
     const ordered = [...frontier].sort((a, b) => b.x - a.x);
 
-    cardsEl.innerHTML = ordered.map(p => {
-        const era = eraFor(p.year);
+    cardsEl.innerHTML = ordered.map((p, i) => {
         const isCareer = mode === "career";
-        const yearLabel = isCareer
-            ? `${p.year}–${p.yearLast}`
-            : String(p.year);
-        const subLine = isCareer
-            ? `${p.seasonsCount} season${p.seasonsCount === 1 ? "" : "s"}`
-            : `${escapeHtml(p.teamID)} · ${escapeHtml(p.lgID)}`;
+        const yearLabel = isCareer ? `${p.year}–${p.yearLast}` : String(p.year);
+        const pinned = careerHighlights.has(p.playerID);
+        const hv = hvByPoint && hvByPoint.has(p) ? hvByPoint.get(p).fraction : null;
         return `
-            <article class="frontier-card">
-                <div class="frontier-card-name">${escapeHtml(p.playerID)}</div>
-                <div class="frontier-card-year">${yearLabel}</div>
-                <div class="frontier-card-team">${subLine}</div>
-                <div class="frontier-card-stats">${xDim} ${formatStat(xDim, p.x)} · ${yDim} ${formatStat(yDim, p.y)}</div>
-                ${hvByPoint && hvByPoint.has(p) ? `<div class="frontier-card-hv">Controls ${(hvByPoint.get(p).fraction * 100).toFixed(2)}% of the frontier area</div>` : ""}
-                <div class="frontier-card-era">${era ? era.name : "—"}</div>
-            </article>
+            <div class="frontier-card${pinned ? " frontier-card--pinned" : ""}" role="listitem"
+                 tabindex="0" data-pid="${escapeHtml(p.playerID)}"
+                 aria-label="${escapeHtml(p.playerID)}, ${yearLabel}. ${xDim} ${formatStat(xDim, p.x)}, ${yDim} ${formatStat(yDim, p.y)}. Click to pin career.">
+                <span class="frontier-rank">${i + 1}</span>
+                <div class="frontier-card-main">
+                    <div class="frontier-card-name">${escapeHtml(p.playerID)}</div>
+                    <div class="frontier-card-sub">${yearLabel} · ${xDim} ${formatStat(xDim, p.x)} / ${yDim} ${formatStat(yDim, p.y)}${hv != null ? ` · <span class="frontier-card-hv">${(hv * 100).toFixed(0)}% area</span>` : ""}</div>
+                </div>
+                ${frontierSparkline(p.playerID, yDim, isCareer ? null : p.year)}
+            </div>
         `;
     }).join("");
+}
+
+// Tiny career sparkline for a leaderboard row: the player's season-by-season
+// value of the active Y-axis stat, with a marker on the record season.
+function frontierSparkline(playerID, yDim, recordYear) {
+    if (!playerIndex || !playerIndex.has(playerID)) return "";
+    const seasons = playerIndex.get(playerID)
+        .map(s => ({ year: s.yearID, v: s[yDim] }))
+        .filter(s => s.v != null && !isNaN(s.v))
+        .sort((a, b) => a.year - b.year);
+    if (seasons.length < 2) return `<span class="frontier-spark-empty" aria-hidden="true"></span>`;
+    const w = 52, h = 16;
+    const vals = seasons.map(s => s.v);
+    const mn = Math.min(...vals), mx = Math.max(...vals), range = mx - mn || 1;
+    const X = i => (i / (seasons.length - 1)) * w;
+    const Y = v => h - ((v - mn) / range) * h;
+    const pts = seasons.map((s, i) => `${X(i).toFixed(1)},${Y(s.v).toFixed(1)}`).join(" ");
+    const ri = seasons.findIndex(s => s.year === recordYear);
+    const marker = ri >= 0
+        ? `<circle class="frontier-spark-dot" cx="${X(ri).toFixed(1)}" cy="${Y(seasons[ri].v).toFixed(1)}" r="2"/>`
+        : "";
+    return `<svg class="frontier-spark" viewBox="0 0 ${w} ${h + 2}" width="${w}" height="${h + 2}" aria-hidden="true"><polyline points="${pts}"/>${marker}</svg>`;
 }
 
 // Exact leave-one-out hypervolume contribution for a 2D Pareto frontier.

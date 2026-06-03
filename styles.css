@@ -1525,6 +1525,101 @@ input[type="number"].field::-webkit-outer-spin-button {
 }
 .player-chip-remove:hover { opacity: 1; }
 
+/* ── Frontier leaderboard ──────────────────────────────────────────── */
+.frontier-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    min-height: 0;
+}
+.frontier-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex: 0 0 auto;
+}
+.frontier-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+}
+.frontier-count {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+.frontier-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow-y: auto;
+    min-height: 0;
+}
+.frontier-card {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 7px;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: background var(--transition), border-color var(--transition);
+}
+.frontier-card:hover { background: var(--bg); }
+.frontier-card:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--mlb-blue) 45%, transparent);
+}
+.frontier-card--pinned {
+    background: color-mix(in srgb, var(--gold) 14%, var(--panel));
+    border-color: color-mix(in srgb, var(--gold) 55%, var(--panel));
+}
+.frontier-rank {
+    flex: 0 0 auto;
+    width: 16px;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+.frontier-card--pinned .frontier-rank { color: var(--gold); }
+.frontier-card-main { flex: 1 1 auto; min-width: 0; }
+.frontier-card-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.frontier-card-sub {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.frontier-card-hv { color: var(--mlb-blue); font-weight: 600; }
+.frontier-spark { flex: 0 0 auto; }
+.frontier-spark polyline {
+    fill: none;
+    stroke: var(--text-muted);
+    stroke-width: 1.4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 0.7;
+}
+.frontier-spark-dot { fill: var(--gold); }
+.frontier-spark-empty { flex: 0 0 52px; }
+.frontier-empty { font-size: 11px; color: var(--text-muted); padding: 6px 4px; }
+
 /* ── On-chart axis stat picker menu ─────────────────────────────── */
 .axis-stat-menu {
     position: absolute;
@@ -1828,10 +1923,12 @@ input[type="number"].field::-webkit-outer-spin-button {
     .controls-panel {
         padding: 16px 16px 12px;
         gap: 0;
-        overflow-y: auto;
+        overflow: hidden;          /* the two children scroll independently */
     }
     .controls-panel.collapsed { display: flex; }
-    .controls-inputs { gap: 10px; }
+    /* Inputs take the available space and scroll on their own, so the frontier
+       leaderboard below stays visible without scrolling past every control. */
+    .controls-inputs { gap: 10px; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 
     /* Compact new section layout on desktop */
     .ctl-section { gap: 5px; padding: 6px 0; }
@@ -1840,8 +1937,9 @@ input[type="number"].field::-webkit-outer-spin-button {
     .ctl-field { gap: 3px; }
     .ctl-grid-2 { gap: 8px; }
     .frontier-section {
-        flex: 1 1 180px;           /* take remaining space; at least ~3 cards' worth */
-        min-height: 180px;
+        flex: 1 1 200px;           /* shares panel height with the inputs (both grow) */
+        min-height: 150px;         /* ~4 rows even when the inputs are tall */
+        max-height: 50%;
         overflow: hidden;
     }
     .frontier-cards {
