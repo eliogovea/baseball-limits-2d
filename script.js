@@ -249,6 +249,7 @@ let playerIndex = null;       // Map<playerID, Point[]>  (all seasons per player
 // Up to 6 players can be highlighted simultaneously, each with a distinct color.
 const HIGHLIGHT_COLORS = ["#f59e0b","#14b8a6","#a855f7","#f97316","#84cc16","#ec4899"];
 let careerHighlights = new Map(); // playerID → color
+let spotlightPos = null;          // {left, top} once the user drags the player card
 
 function addHighlight(playerID) {
     if (!playerID || careerHighlights.has(playerID)) return;
@@ -3178,7 +3179,6 @@ function renderFrontierCards(frontier, xDim, yDim, formatStat, totalUnits, mode 
                     <div class="frontier-card-name">${escapeHtml(p.playerID)}</div>
                     <div class="frontier-card-sub">${yearLabel} · ${xDim} ${formatStat(xDim, p.x)} / ${yDim} ${formatStat(yDim, p.y)}${hv != null ? ` · <span class="frontier-card-hv">${(hv * 100).toFixed(0)}% area</span>` : ""}</div>
                 </div>
-                ${frontierSparkline(p.playerID, yDim, isCareer ? null : p.year)}
             </div>
         `;
     }).join("");
@@ -3212,7 +3212,18 @@ function frontierSparkline(playerID, yDim, recordYear, w = 52, h = 16) {
 function renderPlayerSpotlight(frontier, hvByPoint, xDim, yDim, formatStat, mode) {
     const el = document.getElementById("player-spotlight");
     if (!el) return;
-    if (careerHighlights.size !== 1) { el.hidden = true; el.innerHTML = ""; return; }
+    if (careerHighlights.size !== 1) { el.hidden = true; el.innerHTML = ""; spotlightPos = null; return; }
+    // If the user dragged the card, honor that; otherwise sit opposite the
+    // frontier (bottom-left for Best, top-left for Worst) so it doesn't cover it.
+    if (spotlightPos) {
+        el.className = "player-spotlight player-spotlight--moved";
+        el.style.left = spotlightPos.left + "px";
+        el.style.top = spotlightPos.top + "px";
+        el.style.right = "auto"; el.style.bottom = "auto";
+    } else {
+        el.className = "player-spotlight " + (showWorstFrontier ? "player-spotlight--tl" : "player-spotlight--bl");
+        el.style.left = el.style.top = el.style.right = el.style.bottom = "";
+    }
     const pid = [...careerHighlights.keys()][0];
     const mine = frontier.filter(p => p.playerID === pid).sort((a, b) => b.year - a.year);
     if (!mine.length) { el.hidden = true; el.innerHTML = ""; return; }
@@ -3255,6 +3266,48 @@ function renderPlayerSpotlight(frontier, hvByPoint, xDim, yDim, formatStat, mode
         syncPlayerHint();
         document.dispatchEvent(new CustomEvent("bl2d:refresh"));
     });
+    enableSpotlightDrag(el, el.querySelector(".ps-head"));
+}
+
+// Let the user drag the spotlight card by its header (within the chart region).
+// The position persists across redraws via the module-level spotlightPos.
+function enableSpotlightDrag(card, handle) {
+    if (!handle) return;
+    handle.style.cursor = "move";
+    const onDown = (e) => {
+        if (e.target.closest(".ps-close")) return;   // let the close button work
+        const pt = e.touches ? e.touches[0] : e;
+        const parent = card.offsetParent || card.parentNode;
+        const pr = parent.getBoundingClientRect();
+        const cr = card.getBoundingClientRect();
+        const grabX = pt.clientX - cr.left, grabY = pt.clientY - cr.top;
+        const onMove = (ev) => {
+            const p = ev.touches ? ev.touches[0] : ev;
+            let left = p.clientX - pr.left - grabX;
+            let top = p.clientY - pr.top - grabY;
+            // keep the card within the chart region
+            left = Math.max(0, Math.min(pr.width - cr.width, left));
+            top = Math.max(0, Math.min(pr.height - cr.height, top));
+            spotlightPos = { left, top };
+            card.className = "player-spotlight player-spotlight--moved";
+            card.style.left = left + "px"; card.style.top = top + "px";
+            card.style.right = "auto"; card.style.bottom = "auto";
+            if (ev.cancelable) ev.preventDefault();
+        };
+        const onUp = () => {
+            window.removeEventListener("mousemove", onMove);
+            window.removeEventListener("mouseup", onUp);
+            window.removeEventListener("touchmove", onMove);
+            window.removeEventListener("touchend", onUp);
+        };
+        window.addEventListener("mousemove", onMove);
+        window.addEventListener("mouseup", onUp);
+        window.addEventListener("touchmove", onMove, { passive: false });
+        window.addEventListener("touchend", onUp);
+        e.preventDefault();
+    };
+    handle.addEventListener("mousedown", onDown);
+    handle.addEventListener("touchstart", onDown, { passive: false });
 }
 
 // Exact leave-one-out hypervolume contribution for a 2D Pareto frontier.

@@ -1749,7 +1749,6 @@ input[type="number"].field::-webkit-outer-spin-button {
 /* ── Player spotlight card ─────────────────────────────────────────── */
 .player-spotlight {
     position: absolute;
-    top: 12px;
     left: 12px;
     width: 248px;
     max-width: calc(100% - 24px);
@@ -1760,6 +1759,10 @@ input[type="number"].field::-webkit-outer-spin-button {
     padding: 12px 12px 10px;
     z-index: 6;
 }
+/* Anchor away from where the frontier lives so the card doesn't cover it:
+   bottom-left for the Best (upper-right) frontier, top-left for Worst. */
+.player-spotlight--bl { bottom: 12px; }
+.player-spotlight--tl { top: 12px; }
 .player-spotlight[hidden] { display: none; }
 .ps-close {
     position: absolute;
