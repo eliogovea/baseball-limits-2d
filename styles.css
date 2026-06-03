@@ -286,58 +286,33 @@ html[data-theme="dark"] select.field {
 }
 .attribution-sep { color: var(--border-strong); }
 
-/* -------- Story presets shelf -------- */
-
+/* -------- Story presets (sidebar) -------- */
+/* A compact wrapping cluster of "famous frontier" pills at the top of the
+   controls panel; a leading star icon marks them (no text label). */
 .preset-shelf {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 8px;
-    padding: 7px 16px;
-    background: var(--panel);
-    border-bottom: 1px solid var(--border);
-    overflow-x: auto;
-    flex: 0 0 auto;
-    scrollbar-width: thin;
+    gap: 5px;
 }
-.preset-shelf-label {
-    flex: 0 0 auto;
-    font-size: 10px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-muted);
-    padding-right: 2px;
-}
+.preset-shelf-icon { align-self: center; }
 .preset-chip {
     flex: 0 0 auto;
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    padding: 5px 11px;
-    border-radius: var(--radius);
+    padding: 4px 9px;
+    border-radius: var(--radius-sm);
     border: 1px solid var(--border-strong);
     background: var(--panel);
-    text-align: left;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
     cursor: pointer;
-    transition: border-color var(--transition), background var(--transition);
+    white-space: nowrap;
+    transition: border-color var(--transition), background var(--transition), color var(--transition);
 }
 .preset-chip:hover {
     border-color: var(--mlb-blue);
+    color: var(--mlb-blue);
     background: color-mix(in srgb, var(--mlb-blue) 5%, var(--panel));
-}
-.preset-chip-title {
-    font-size: 12px;
-    font-weight: 700;
-    color: var(--text);
-    white-space: nowrap;
-}
-.preset-chip:hover .preset-chip-title { color: var(--mlb-blue); }
-.preset-chip-sub {
-    font-size: 10px;
-    font-weight: 500;
-    color: var(--text-muted);
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
 }
 
 /* -------- Main -------- */
@@ -2256,7 +2231,8 @@ input[type="number"].field::-webkit-outer-spin-button {
 /* Year range row — each year fills its half so it lines up under the axis
    select above it (start under X, end under Y). Native spinners suppressed. */
 .ctl-year-row { gap: 10px; }
-#s-year-select, #e-year-select {
+#s-year-select, #e-year-select,
+#sb-year-select, #eb-year-select {
     flex: 1 1 0;
     min-width: 0;
     text-align: center;
@@ -2267,7 +2243,11 @@ input[type="number"].field::-webkit-outer-spin-button {
 #s-year-select::-webkit-inner-spin-button,
 #s-year-select::-webkit-outer-spin-button,
 #e-year-select::-webkit-inner-spin-button,
-#e-year-select::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+#e-year-select::-webkit-outer-spin-button,
+#sb-year-select::-webkit-inner-spin-button,
+#sb-year-select::-webkit-outer-spin-button,
+#eb-year-select::-webkit-inner-spin-button,
+#eb-year-select::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 
 /* Contextual threshold row (bottom): label + dropdown filling the rest. */
 .ctl-pa-row { gap: 8px; }

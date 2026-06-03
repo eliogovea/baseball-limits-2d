@@ -1060,11 +1060,10 @@ function renderPresetShelf() {
     const shelf = document.getElementById("preset-shelf");
     if (!shelf) return;
     shelf.innerHTML =
-        `<span class="preset-shelf-label">Stories</span>` +
+        `<span class="ctl-icon preset-shelf-icon" title="Famous frontiers" aria-hidden="true">` +
+        `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.7l1.8 3.7 4.1.6-3 2.9.7 4.1L8 11.6 4.4 13l.7-4.1-3-2.9 4.1-.6z"/></svg></span>` +
         PRESETS.map((p, i) =>
-            `<button type="button" class="preset-chip" data-preset="${i}">` +
-            `<span class="preset-chip-title">${p.label}</span>` +
-            `<span class="preset-chip-sub">${p.sub}</span></button>`
+            `<button type="button" class="preset-chip" data-preset="${i}" title="${p.label} — ${p.sub}">${p.label}</button>`
         ).join("");
     shelf.querySelectorAll(".preset-chip").forEach((btn) => {
         btn.addEventListener("click", () => applyPreset(PRESETS[+btn.dataset.preset].state));
