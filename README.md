@@ -65,7 +65,7 @@ Status convention: `- [ ]` open, `- [x] *(shipped <sha>)*` shipped. Items with a
 
 ### Analytical / Pareto frontier concepts
 
-- [ ] **Pareto depth (onion peeling)** — recursively remove the frontier and compute the next one from the remaining points, repeating 3–5 times. Render each layer in decreasing opacity or a stepped color. Seasons that survive to layer 1 are the all-time elite; layer 2 are the near-misses; and so on. Visually turns the chart into a topographic map of dominance. *(Design in [`docs/pareto-onion-peeling-design.md`](docs/pareto-onion-peeling-design.md); implementation pending.)*
+- [x] **Pareto depth (onion peeling)** *(shipped a54bd6a)* — recursively peels the frontier and re-sweeps the remainder up to 5 times, rendering each layer as a fading staircase behind the live frontier (a topographic map of dominance). "Layers" selector (1–5) in the Plot band; deeper layers are non-interactive; state rides in the hash as `d=<n>`. Implements [`docs/pareto-onion-peeling-design.md`](docs/pareto-onion-peeling-design.md); invariants (depth-1 identity, disjoint coverage) verified via `window.__bl2d_depthLayers`. From the Claude Design upgrades.
 
 - [ ] **Hypervolume shading** — fill the area "dominated" by the frontier (the region beneath and to the left of the curve) with a light gradient. The shaded region is the hypervolume indicator — a single scalar capturing how much of the objective space the frontier controls. Pairs perfectly with the ▶ animation: you can watch the shaded area grow as history advances.
 
@@ -87,7 +87,7 @@ Status convention: `- [ ]` open, `- [x] *(shipped <sha>)*` shipped. Items with a
 
 - [ ] **Convex hull vs. concave frontier points** — distinguish "supported" frontier points (those on the convex hull, reachable by any linear utility weighting) from "unsupported" ones sitting in concave dips. Concave-region seasons are often the most distinctive because no scalar weighted average of the two stats would have surfaced them — they're records that only multi-objective thinking finds.
 
-- [ ] **Era-vs-era frontier comparison** — pick two year ranges side-by-side and quantify how much one era's frontier dominates the other using coverage / generational distance / inverted generational distance. Answers questions like "does the steroid-era HR-vs-AVG frontier strictly dominate the dead-ball frontier?" with a single number plus a translucent overlay showing where the two curves diverge.
+- [x] **Era-vs-era frontier comparison** *(shipped 771dae6)* — a "Compare a second era" toggle overlays a second year range's frontier (teal, dashed) over the same attribute filters and headlines a coverage % = how much of the comparison era's objective space the primary era dominates (grid-sampled, sign-aware). The axis domain widens to fit both; state rides in the hash (`c2/sy2/ey2`). From the Claude Design upgrades.
 
 - [ ] **Frontier entropy / tradeoff diversity** — a single scalar summarising how spread-out the frontier's tradeoffs are along its length. High entropy = a long, balanced frontier with many distinct niches; low entropy = a short frontier crowded near one extreme. Plotted as a time series alongside the ▶ animation, it would show eras when the sport allowed many different paths to greatness vs. eras when one archetype dominated.
 
@@ -99,9 +99,13 @@ Status convention: `- [ ]` open, `- [x] *(shipped <sha>)*` shipped. Items with a
 
 - [ ] **Voronoi overlay for frontier points** — partition the chart space into cells, one per frontier point, each cell showing the region "closest" to that frontier dot. Visually answers: "if a new season entered, which frontier record would it challenge?" Could be a toggleable layer.
 
-- [ ] **Animated transitions on filter change** — when the axis, year range, or filters change, smoothly morph the frontier line and dots to their new positions using D3 transitions rather than an instant snap. Easier to follow how the frontier shifts when something changes.
+- [x] **Animated transitions on filter change** *(shipped 8194d33)* — dots glide (FLIP) and the outgoing frontier staircase ghosts out (dashed, fading) while the new one redraws, so the frontier "rewrites itself" instead of snapping. Honors `prefers-reduced-motion`; a point-count guard snaps the cloud above 6000 (staircase still morphs). From the Claude Design upgrades.
 
-- [ ] **Sparklines in frontier cards** — add a tiny inline career sparkline (e.g. HR by year) to each entry in the "On the Frontier" sidebar card. Shows at a glance whether the record season was a peak or part of a sustained run.
+- [x] **Frontier leaderboard** *(shipped f0e21e0)* — the "On the frontier" sidebar list is now a browsable, ranked leaderboard (name · year · X/Y · % area), click/Enter to pin a player's gold trail, ↑/↓ to navigate. Re-enables the sidebar split so it stays visible. (The career sparkline this item originally imagined now lives in the player spotlight card, where there's room to read it — see below.) From the Claude Design upgrades.
+
+- [x] **Player spotlight card** *(shipped 2a7111a, refined 0e8c0d5)* — pinning a single player opens a card with monogram, career span/handedness, frontier-season count, % of frontier area owned (summed hypervolume contribution), a career sparkline of the Y-stat, and the record seasons. Anchored opposite the frontier and draggable by its header. From the Claude Design upgrades.
+
+- [x] **Curated story presets** *(shipped efbd971)* — a "Stories" shelf above the chart with one-tap famous frontiers (Ohtani's 50/50, Bonds' 73, Henderson 130 SB, Sosa power, Pedro 2000) that load axes + dataset + a pinned player via the URL-hash path. From the Claude Design upgrades.
 
 - [x] **Dark mode** *(shipped e9eec27)* — shipped as the **Night** theme in a 3-theme system (Classic / Editorial / Night), selectable from the header swatch switcher and persisted in `localStorage`. The holistic pass the earlier attempts lacked: every literal color was first tokenized (`--glass-bg`, `--gold`, `--league-al/-nl`, `--on-primary`), and `applyTheme()` re-skins both the CSS-var chrome and the D3-painted chart (by mutating the in-place `ERAS`/`COLOR_PALETTES` tables). Night uses a near-black field with a light frontier staircase and a blue sequential era ramp.
 
@@ -127,13 +131,13 @@ Status convention: `- [ ]` open, `- [x] *(shipped <sha>)*` shipped. Items with a
 
 - [x] **Axis-label glossary tooltips** *(shipped f192458)* — hover the X/Y axis label to get the same stat blurb the glossary modal shows, without opening the modal. Especially useful on first visit when users don't yet know that ERA or WHIP on the frontier highlights the *worst* seasons (since the frontier finds the upper-right envelope and those stats are "lower is better"). Surfaces the explanation exactly where the confusion happens.
 
-- [ ] **Keyboard navigation across frontier points** — arrow keys cycle through frontier dots left-to-right with focus + tooltip, Enter pins the career highlight, Escape clears it. Makes the chart usable without a mouse, improves accessibility, and gives power users a fast way to scan the whole frontier without precise pointer aim.
+- [ ] **Keyboard navigation across frontier points** — arrow keys cycle through frontier dots left-to-right with focus + tooltip, Enter pins the career highlight, Escape clears it. Makes the chart usable without a mouse, improves accessibility, and gives power users a fast way to scan the whole frontier without precise pointer aim. *(Partially shipped via the frontier leaderboard (`f0e21e0`): rows are focusable, ↑/↓ navigate, Enter pins. The on-**chart** dot arrow-cycle + tooltip is still open.)*
 
 ### Data / scope
 
 - [ ] **Intra-season / day-by-day animation** — the current ▶ animation steps by full season. With daily cumulative stats (e.g. running HR total after each game) you could watch a record-breaking season unfold game by game. Blocked on data: the Lahman database only publishes season totals; daily logs from BBRef or Statcast come with terms that don't allow bulk redistribution. Worth revisiting if a compatible open dataset appears.
 
-- [ ] **Interactive guided tour** — replace (or supplement) the static welcome modal with a step-by-step walkthrough that highlights each UI region in sequence: the chart, the frontier curve, the axis selectors, the year-range animation button, the Loneliness Radius, the filters, and the frontier card list. Libraries like [Shepherd.js](https://shepherdjs.dev/) or a lightweight hand-rolled tooltip-chain would work. Keeps the first-visit experience self-contained without needing external docs.
+- [x] **Interactive guided tour** *(shipped 5984102)* — a zero-dependency spotlight tour (`tour.js`) dims the app and lights up one region at a time (chart, frontier, axis labels, story shelf, controls) with a one-line coachmark, step dots, Back/Next/Skip, keyboard, and reduced-motion support. Launched from a "Take the tour" button in the welcome modal (supplements it). From the Claude Design upgrades.
 
 - [ ] **Negro Leagues spotlight mode** — the 2020 Lahman release added Negro Leagues seasons and they're already in the dataset, but the league filter and broad year ranges make them easy to overlook. A dedicated toggle (or league preset) that emphasises Negro Leagues seasons in a distinct colour would surface a slice of baseball history that's currently invisible by default, and would pair well with the era-vs-era frontier comparison idea above.
 
