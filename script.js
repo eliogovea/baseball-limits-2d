@@ -2660,8 +2660,11 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         .style("fill", d => {
             const careerColor = careerHighlights.get(d.playerID);
             if (careerColor) return careerColor;
-            if (frontierColor) return frontierColor;
-            return (COLOR_PALETTES.league[d.lgID] || COLOR_PALETTES.league.unknown).dark;
+            if (frontierColor) return frontierColor;          // worst-mode purple
+            // Follow the active Color-by encoding (era / league / bats), same as
+            // the cloud — frontier dots stay distinct via size + the white ring,
+            // not a fixed color, so the encoding isn't misrepresented.
+            return colorOf(d, colorBy, getMeta);
         });
 
     // FLIP: animate dots from their previous screen positions to the new ones.
