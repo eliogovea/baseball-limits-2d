@@ -103,7 +103,7 @@ Status convention: `- [ ]` open, `- [x] *(shipped <sha>)*` shipped. Items with a
 
 - [ ] **Sparklines in frontier cards** — add a tiny inline career sparkline (e.g. HR by year) to each entry in the "On the Frontier" sidebar card. Shows at a glance whether the record season was a peak or part of a sustained run.
 
-- [ ] **Dark mode** — a dark colour scheme where the chart background is near-black and the dot cloud uses muted colours. The red frontier curve and highlight colours (gold, teal, purple) would pop more dramatically against a dark field. *(Partial attempts discarded — only `--bg`/`--text` flipping leaves panels white on a dark page; needs holistic pass across all CSS variables, the hardcoded `rgba(255,255,255,0.92)` tooltip background, and D3-set SVG axis colors. `scripts/snap.js` has a TODO for `Emulation.setEmulatedMedia(prefers-color-scheme: dark)` which would let the verification floor exercise this headlessly.)*
+- [x] **Dark mode** *(shipped e9eec27)* — shipped as the **Night** theme in a 3-theme system (Classic / Editorial / Night), selectable from the header swatch switcher and persisted in `localStorage`. The holistic pass the earlier attempts lacked: every literal color was first tokenized (`--glass-bg`, `--gold`, `--league-al/-nl`, `--on-primary`), and `applyTheme()` re-skins both the CSS-var chrome and the D3-painted chart (by mutating the in-place `ERAS`/`COLOR_PALETTES` tables). Night uses a near-black field with a light frontier staircase and a blue sequential era ramp.
 
 - [ ] **Canvas rendering** — switch the point-cloud layer from SVG circles to an HTML Canvas overlay (D3 still manages axes, labels, and interactions in SVG). Unlocks smooth rendering with 50 k+ points and removes the current lag at large datasets.
 
@@ -111,7 +111,19 @@ Status convention: `- [ ]` open, `- [x] *(shipped <sha>)*` shipped. Items with a
 
 - [x] **Player search box** *(shipped 7752a0f)* — a typeahead in the filter panel that highlights a player's seasons (colored dots, dimmed cloud) and pins them as a chip. Uses the disambiguated display names already in `playerIndex`. Replaces the "scroll the frontier card list and hope they're on it" flow with a direct lookup. (The box existed earlier but didn't highlight — `pick()` called the closure-scoped `refreshChart`; `7752a0f` routes it through the `bl2d:refresh` event.)
 
-- [ ] **Reduced-motion support** — honour `prefers-reduced-motion` to skip the frontier ▶ animation's per-step transitions and disable any future animated filter morphs. The current CSS has no `@media (prefers-reduced-motion)` block, so motion-sensitive users get the full animation either way. Easy a11y win.
+- [x] **Reduced-motion support** *(shipped e9eec27)* — a `@media (prefers-reduced-motion: reduce)` block collapses decorative transitions and the modal pop/fade to instant. The loading spinner is re-exempted (it conveys state), and the user-initiated ▶ frontier animation is left intact as opt-in motion.
+
+- [x] **Theme system (Classic / Editorial / Night)** *(shipped e9eec27)* — header swatch switcher, `localStorage` persistence, and per-theme era ramps. See **Dark mode** above for the architecture. From the Claude Design review.
+
+- [x] **CVD-safe era encoding + legend-reflects-encoding** *(shipped e9eec27)* — the era cloud now uses a luminance-monotonic sequential ramp (protanopia/deuteranopia-safe; the old 7-hue categorical scale wasn't), and the chart legend renders the key for whatever the active **Color-by** encoding is (era colorbar with year ends / AL-NL / handedness) instead of a static league key. Adds an **Era / League / Bats** color-by control (era is now the default, matching the welcome copy); state rides in the URL hash as `cb`. From the Claude Design review.
+
+- [x] **Keyboard focus ring** *(shipped e9eec27)* — a global `:focus-visible` ring restores a visible focus indicator on the custom controls (segmented toggles, chips, icon buttons) that previously stripped the UA outline. From the Claude Design review.
+
+- [x] **Sidebar hierarchy + mobile axis bar** *(shipped e9eec27)* — the controls are grouped into **Plot / Filter / Highlight** bands with the axis selects emphasized, and a persistent compact X-vs-Y bar sits above the mobile drawer so axis switching doesn't require opening it. From the Claude Design review.
+
+- [x] **Frontier-label collision avoidance** *(shipped e9eec27)* — label placement now measures real text width via `getComputedTextLength()` (replacing the per-character estimate) and adds leader lines for dodged labels. Invariant: no two `.frontier-label` boxes overlap after layout (`window.__bl2d_labelOverlaps === 0`). From the Claude Design review.
+
+- [x] **Logomark + favicon / app-icon set** *(shipped e9eec27)* — the product had a wordmark only; added the "apex" mark (Pareto staircase + gold record dot) inline in the header plus `favicon.svg`/PNGs, `apple-touch-icon`, and `manifest.webmanifest`. From the Claude Design review.
 
 - [x] **Axis-label glossary tooltips** *(shipped f192458)* — hover the X/Y axis label to get the same stat blurb the glossary modal shows, without opening the modal. Especially useful on first visit when users don't yet know that ERA or WHIP on the frontier highlights the *worst* seasons (since the frontier finds the upper-right envelope and those stats are "lower is better"). Surfaces the explanation exactly where the confusion happens.
 
