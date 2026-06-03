@@ -254,14 +254,14 @@
                         </div>
                     </div>
                     <div class="ctl-field ctl-field--inline ctl-depth-row">
-                        <label class="ctl-label" for="depth-select">Layers</label>
-                        <select id="depth-select" class="field" aria-label="Pareto depth — how many frontier layers to peel" title="Peel deeper Pareto layers (dominance topography)">
-                            <option value="1">1</option>
-                            <option value="2">2</option>
-                            <option value="3">3</option>
-                            <option value="4">4</option>
-                            <option value="5">5</option>
-                        </select>
+                        <label class="ctl-label">Layers</label>
+                        <div class="seg-group" role="group" id="depth-seg" aria-label="Pareto depth — how many frontier layers to peel" title="Peel deeper Pareto layers (dominance topography)">
+                            <button type="button" class="seg-btn active" data-depth="1">1</button>
+                            <button type="button" class="seg-btn" data-depth="2">2</button>
+                            <button type="button" class="seg-btn" data-depth="3">3</button>
+                            <button type="button" class="seg-btn" data-depth="4">4</button>
+                            <button type="button" class="seg-btn" data-depth="5">5</button>
+                        </div>
                     </div>
                 </section>
 

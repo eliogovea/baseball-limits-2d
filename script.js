@@ -531,7 +531,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     // Color encoding is a display option, not a filter — no need to clear the
     // highlight or touch playing-time; just recolor the cloud + legend.
     setupSegGroup("colorby-seg", () => refreshChart());
-    document.getElementById("depth-select")?.addEventListener("change", () => refreshChart());
+    setupSegGroup("depth-seg", () => refreshChart());
     document.getElementById("era-compare-toggle")?.addEventListener("change", (e) => {
         const row = document.getElementById("era-b-row");
         if (row) row.hidden = !e.target.checked;
@@ -579,7 +579,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         const league = getSegValue("league-seg", "league") || "all";
         const bats = getSegValue("bats-seg", "bats") || "all";
         const colorBy = getSegValue("colorby-seg", "colorby") || "era";
-        const depth = parseInt(document.getElementById("depth-select")?.value) || 1;
+        const depth = parseInt(getSegValue("depth-seg", "depth")) || 1;
         const compareEras = document.getElementById("era-compare-toggle")?.checked || false;
         const sB = parseInt(document.getElementById("sb-year-select")?.value) || 1900;
         const eB = parseInt(document.getElementById("eb-year-select")?.value) || 1919;
@@ -1012,7 +1012,7 @@ function applyUrlState() {
     setSeg("league-seg", "league", u.lg);
     setSeg("bats-seg", "bats", u.bt);
     setSeg("colorby-seg", "colorby", u.cb);
-    setSelect("depth-select", u.d);
+    setSeg("depth-seg", "depth", u.d);
     if (u.sy2) { const e = document.getElementById("sb-year-select"); if (e) e.value = u.sy2; }
     if (u.ey2) { const e = document.getElementById("eb-year-select"); if (e) e.value = u.ey2; }
     if (u.c2 === "1") {
