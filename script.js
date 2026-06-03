@@ -532,8 +532,8 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     // highlight or touch playing-time; just recolor the cloud + legend.
     setupSegGroup("colorby-seg", () => refreshChart());
     setupSegGroup("depth-seg", () => refreshChart());
-    document.getElementById("era-compare-toggle")?.addEventListener("change", (e) => {
-        setEraCompareEnabled(e.target.checked);
+    document.getElementById("era-compare-toggle")?.addEventListener("click", (e) => {
+        setEraCompareEnabled(!e.currentTarget.classList.contains("active"));
         refreshChart();
     });
     ["sb-year-select", "eb-year-select"].forEach((id) => {
@@ -579,7 +579,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         const bats = getSegValue("bats-seg", "bats") || "all";
         const colorBy = getSegValue("colorby-seg", "colorby") || "era";
         const depth = parseInt(getSegValue("depth-seg", "depth")) || 1;
-        const compareEras = document.getElementById("era-compare-toggle")?.checked || false;
+        const compareEras = document.getElementById("era-compare-toggle")?.classList.contains("active") || false;
         const sB = parseInt(document.getElementById("sb-year-select")?.value) || 1900;
         const eB = parseInt(document.getElementById("eb-year-select")?.value) || 1919;
         const country = document.getElementById("country-select").value || "all";
@@ -967,8 +967,8 @@ function parseUrlHash() {
 // Enable/disable the comparison-era range row: dims it + toggles its inputs, so
 // it reads as available-but-off (like the dimmed franchises) until compare is on.
 function setEraCompareEnabled(on) {
-    const row = document.getElementById("era-b-row");
-    if (row) { row.classList.toggle("ctl-disabled", !on); row.setAttribute("aria-disabled", String(!on)); }
+    const btn = document.getElementById("era-compare-toggle");
+    if (btn) { btn.classList.toggle("active", on); btn.setAttribute("aria-pressed", String(on)); }
     const sb = document.getElementById("sb-year-select");
     const eb = document.getElementById("eb-year-select");
     if (sb) sb.disabled = !on;
@@ -1025,11 +1025,7 @@ function applyUrlState() {
     setSeg("depth-seg", "depth", u.d);
     if (u.sy2) { const e = document.getElementById("sb-year-select"); if (e) e.value = u.sy2; }
     if (u.ey2) { const e = document.getElementById("eb-year-select"); if (e) e.value = u.ey2; }
-    if (u.c2 === "1") {
-        const t = document.getElementById("era-compare-toggle");
-        if (t) t.checked = true;
-        setEraCompareEnabled(true);
-    }
+    if (u.c2 === "1") setEraCompareEnabled(true);
     setSelect("country-select", u.co);
     updateCountrySelection(document.getElementById("country-select")?.value || "all");
     setSelect("franchise-select", u.fr);

@@ -238,14 +238,14 @@
                         </button>
                         <input type="number" id="e-year-select" class="field" inputmode="numeric" aria-label="End year" title="End year">
                     </div>
-                    <div class="ctl-field ctl-field--inline">
-                        <label class="hv-toggle"><input type="checkbox" id="era-compare-toggle"> Compare a second era</label>
-                    </div>
-                    <!-- Always visible, aligned under the primary range; dimmed + disabled
-                         until "Compare a second era" is on (like the dimmed franchises). -->
-                    <div class="ctl-field ctl-field--inline ctl-year-row ctl-disabled" id="era-b-row" aria-disabled="true">
+                    <!-- Comparison-era range, aligned under the primary range. The center
+                         overlap-icon button enables/disables it (mirrors the ▶ position);
+                         the year inputs stay dimmed + disabled until it's on. -->
+                    <div class="ctl-field ctl-field--inline ctl-year-row" id="era-b-row">
                         <input type="number" id="sb-year-select" class="field" inputmode="numeric" aria-label="Comparison start year" title="Comparison era start" value="1900" disabled>
-                        <span class="year-range-sep">–</span>
+                        <button type="button" id="era-compare-toggle" class="anim-play-btn era-compare-btn" aria-pressed="false" aria-label="Compare a second era" title="Compare a second era">
+                            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="6.2" cy="8" r="3.8"/><circle cx="9.8" cy="8" r="3.8"/></svg>
+                        </button>
                         <input type="number" id="eb-year-select" class="field" inputmode="numeric" aria-label="Comparison end year" title="Comparison era end" value="1919" disabled>
                     </div>
                     <div class="ctl-field ctl-field--inline">

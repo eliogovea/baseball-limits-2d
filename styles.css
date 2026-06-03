@@ -2282,6 +2282,14 @@ input[type="number"].field::-webkit-outer-spin-button {
 /* Available-but-off control (e.g. the comparison-era range before it's enabled),
    mirroring the dimmed-franchise treatment. */
 .ctl-disabled { opacity: 0.4; pointer-events: none; }
+/* Comparison-era range: dim the year inputs until the center toggle turns it on
+   (the toggle itself stays interactive). */
+#era-b-row .field:disabled { opacity: 0.4; cursor: pointer; }
+.era-compare-btn.active {
+    border-color: var(--mlb-blue);
+    color: var(--mlb-blue);
+    background: color-mix(in srgb, var(--mlb-blue) 9%, transparent);
+}
 
 /* Leading icon that stands in for a text label on a control row. */
 .ctl-icon {
