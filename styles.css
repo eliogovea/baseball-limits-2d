@@ -21,6 +21,14 @@
     --sidebar-w: 300px;
     --transition: 0.15s ease;
 
+    /* Themeable functional tokens — Classic defaults. applyTheme() (script.js)
+       overwrites these on <html> so the var-based chrome re-skins for free. */
+    --glass-bg: rgba(255, 255, 255, 0.92);
+    --gold: #f59e0b;
+    --league-al: #c8102e;
+    --league-nl: #002d72;
+    --on-primary: #ffffff;
+
     --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 
@@ -59,6 +67,35 @@ a {
 }
 a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
 
+/* Keyboard-focus ring on every interactive control (a11y P0). Many custom
+   controls (.mode-btn, .seg-btn, .franchise-chip, .country-chip, .share-platform,
+   .icon-btn, .help-btn) strip the UA outline with no replacement; this restores a
+   visible focus indicator only for keyboard users (:focus-visible). */
+button:focus-visible,
+a:focus-visible,
+.field:focus-visible,
+[role="button"]:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--mlb-blue) 45%, transparent);
+}
+
+/* Respect reduced-motion: collapse all decorative transitions/animations
+   (modal pop + fade, hover transitions, slider thumb scale) to instant. The
+   loading spinner is re-exempted — it conveys state, not decoration. The
+   user-initiated ▶ frontier animation is opt-in motion and is left intact. */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+    .spinner {
+        animation-duration: 0.8s !important;
+        animation-iteration-count: infinite !important;
+    }
+}
+
 /* -------- Header -------- */
 
 .app-header {
@@ -76,7 +113,9 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     flex-shrink: 0;
 }
 .app-header > * { min-width: 0; }
-.brand { flex: 1 1 auto; overflow: hidden; }
+.brand { flex: 1 1 auto; overflow: hidden; display: flex; align-items: center; gap: 10px; }
+.brand-mark { flex: 0 0 auto; border-radius: 6px; display: block; }
+.brand-text { min-width: 0; }
 .header-right {
     display: flex;
     align-items: center;
@@ -113,6 +152,38 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
 .export-wrap {
     position: relative;
     flex: 0 0 auto;
+}
+
+/* Color-theme switcher — compact swatches (each previews its theme's panel +
+   accent) so it fits the dense header without wide text labels. */
+.theme-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex: 0 0 auto;
+}
+.theme-btn {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 1px solid var(--border-strong);
+    padding: 0;
+    cursor: pointer;
+    transition: transform var(--transition), box-shadow var(--transition);
+}
+.theme-btn[data-theme="classic"]   { background: linear-gradient(135deg, #ffffff 50%, #002d72 50%); }
+.theme-btn[data-theme="editorial"] { background: linear-gradient(135deg, #fffdf8 50%, #b23a2e 50%); }
+.theme-btn[data-theme="dark"]      { background: linear-gradient(135deg, #161b22 50%, #58a6ff 50%); }
+.theme-btn:hover { transform: scale(1.12); }
+.theme-btn.active {
+    border-color: var(--mlb-blue);
+    box-shadow: 0 0 0 2px var(--mlb-blue);
+}
+
+/* Night theme: the native <select> caret is a dark SVG baked into the bg image;
+   swap to a light stroke so it stays visible on dark fields. */
+html[data-theme="dark"] select.field {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='none' stroke='%239aa6b2' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
 }
 .export-menu {
     position: absolute;
@@ -180,6 +251,11 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     letter-spacing: -0.01em;
     line-height: 1.1;
 }
+/* Red's role: reserved for League = AL (legend, league-colored cloud). The
+   "record / highlight" accent is gold (career trail, player chips, logomark
+   dot) — see --gold. The wordmark "2D" keeps red as the brand accent pending a
+   holistic brand decision; if revisited, move it to gold to fully separate the
+   two meanings. */
 .brand-accent {
     color: var(--mlb-red);
 }
@@ -261,7 +337,7 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
 }
 
 .career-point {
-    fill: #f59e0b;
+    fill: var(--gold);
     stroke: #ffffff;
     stroke-width: 1.5;
     pointer-events: none;
@@ -332,6 +408,14 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
 .axis-title:hover .axis-caret { fill: var(--mlb-blue); }
 .axis-caret { fill: var(--text-muted); font-weight: 400; }
 
+/* Leader line connecting a dodged label back to its frontier dot. */
+.frontier-leader {
+    stroke: var(--text-muted);
+    stroke-width: 0.75;
+    opacity: 0.4;
+    pointer-events: none;
+}
+
 .frontier-label {
     font-family: var(--font-sans);
     font-size: 11px;
@@ -353,7 +437,7 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     flex-direction: column;
     gap: 4px;
     padding: 6px 10px;
-    background: rgba(255, 255, 255, 0.92);
+    background: var(--glass-bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     font-size: 11px;
@@ -373,8 +457,32 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
 .legend-item { display: inline-flex; align-items: center; gap: 5px; }
 .legend-note {
     font-size: 10px;
+    /* Full-opacity muted (≈5.9:1 on white) instead of an opacity hack, so the
+       contrast is deterministic across themes. */
     color: var(--text-muted);
-    opacity: 0.85;
+}
+/* Era encoding key — a sequential colorbar that matches the cloud ramp, with
+   the year range at its ends. Rendered by renderLegend() when Color-by = Era. */
+.legend-encoding { display: flex; flex-direction: column; gap: 3px; }
+.legend-enc-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.legend-era-bar {
+    display: flex;
+    height: 8px;
+    width: 116px;
+    border-radius: 3px;
+    overflow: hidden;
+}
+.legend-era-bar span { flex: 1; }
+.legend-era-scale {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    font-variant-numeric: tabular-nums;
 }
 .legend-dot {
     width: 8px;
@@ -384,8 +492,8 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     flex-shrink: 0;
 }
 /* Color = league */
-.legend-dot--al { background: #c8102e; }
-.legend-dot--nl { background: #002d72; }
+.legend-dot--al { background: var(--league-al); }
+.legend-dot--nl { background: var(--league-nl); }
 /* Frontier markers are larger and white-ringed (size encodes area owned);
    season dots are small and faded. Neutral fill — the league row above
    already conveys the colour axis. */
@@ -427,7 +535,7 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     height: 28px;
     border-radius: 6px;
     border: 1px solid var(--border);
-    background: rgba(255, 255, 255, 0.92);
+    background: var(--glass-bg);
     color: var(--text-muted);
     padding: 0;
     cursor: pointer;
@@ -444,10 +552,10 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
 }
 .chart-tool.active {
     background: var(--mlb-blue);
-    color: #ffffff;
+    color: var(--on-primary);
     border-color: var(--mlb-blue);
 }
-.chart-tool.active:hover { color: #ffffff; }
+.chart-tool.active:hover { color: var(--on-primary); }
 .chart-tool:disabled { opacity: 0.35; cursor: not-allowed; }
 
 /* d3.brush styling: tight selection rectangle, subtle handles */
@@ -470,7 +578,7 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     align-items: center;
     gap: 8px;
     padding: 6px 10px;
-    background: rgba(255, 255, 255, 0.92);
+    background: var(--glass-bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     font-size: 12px;
@@ -668,7 +776,7 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     border-radius: 8px;
     border: 1px solid var(--border-strong);
     background: var(--mlb-blue);
-    color: #fff;
+    color: var(--on-primary);
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
@@ -756,13 +864,13 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     margin-bottom: 18px;
 }
 .explainer-red { color: var(--mlb-red); }
-.explainer-gold { color: #f59e0b; }
+.explainer-gold { color: var(--gold); }
 .explainer-dismiss {
     display: block;
     width: 100%;
     padding: 10px 16px;
     background: var(--mlb-blue);
-    color: #ffffff;
+    color: var(--on-primary);
     border: none;
     border-radius: var(--radius-sm);
     font-weight: 600;
@@ -788,6 +896,33 @@ a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
     flex-direction: column;
     max-height: 70vh;
     overflow: hidden;
+}
+
+/* Mobile axis bar — a persistent compact X-vs-Y selector above the drawer so
+   the chart's primary control isn't buried in the collapsed panel. Desktop
+   hides it (the sidebar always shows the full axis row). */
+.mobile-axis-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+}
+.mobile-axis-bar select.field {
+    flex: 1 1 0;
+    min-width: 0;
+    font-weight: 600;
+    border-color: color-mix(in srgb, var(--mlb-blue) 35%, var(--border-strong));
+    background-color: color-mix(in srgb, var(--mlb-blue) 4%, var(--panel));
+}
+.mobile-axis-vs {
+    flex: 0 0 auto;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
 }
 
 .controls-toggle {
@@ -1162,10 +1297,10 @@ input[type="number"].field::-webkit-outer-spin-button {
 .seg-btn:hover { color: var(--mlb-blue); }
 .seg-btn.active {
     background: var(--mlb-blue);
-    color: #ffffff;
+    color: var(--on-primary);
     box-shadow: 0 1px 1px rgba(0, 45, 114, 0.18);
 }
-.seg-btn.active:hover { color: #ffffff; }
+.seg-btn.active:hover { color: var(--on-primary); }
 
 .mode-toggle {
     display: flex;
@@ -1190,10 +1325,10 @@ input[type="number"].field::-webkit-outer-spin-button {
 .mode-btn:hover { color: var(--mlb-blue); }
 .mode-btn.active {
     background: var(--mlb-blue);
-    color: #ffffff;
+    color: var(--on-primary);
     box-shadow: 0 1px 2px rgba(0, 45, 114, 0.2);
 }
-.mode-btn.active:hover { color: #ffffff; }
+.mode-btn.active:hover { color: var(--on-primary); }
 
 .preset-row {
     display: flex;
@@ -1220,7 +1355,7 @@ input[type="number"].field::-webkit-outer-spin-button {
 .preset.active {
     background: var(--mlb-blue);
     border-color: var(--mlb-blue);
-    color: #ffffff;
+    color: var(--on-primary);
 }
 
 .control-hint {
@@ -1303,8 +1438,8 @@ input[type="number"].field::-webkit-outer-spin-button {
     gap: 5px;
     padding: 3px 6px 3px 7px;
     border-radius: 20px;
-    border: 1.5px solid var(--chip-color, #f59e0b);
-    background: color-mix(in srgb, var(--chip-color, #f59e0b) 12%, var(--panel));
+    border: 1.5px solid var(--chip-color, var(--gold));
+    background: color-mix(in srgb, var(--chip-color, var(--gold)) 12%, var(--panel));
     font-size: 11px;
     font-weight: 600;
     color: var(--text);
@@ -1314,7 +1449,7 @@ input[type="number"].field::-webkit-outer-spin-button {
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: var(--chip-color, #f59e0b);
+    background: var(--chip-color, var(--gold));
     flex-shrink: 0;
 }
 .player-chip-name {
@@ -1327,7 +1462,7 @@ input[type="number"].field::-webkit-outer-spin-button {
     background: none;
     border: none;
     cursor: pointer;
-    color: var(--chip-color, #f59e0b);
+    color: var(--chip-color, var(--gold));
     font-size: 13px;
     line-height: 1;
     padding: 0 1px;
@@ -1390,7 +1525,7 @@ input[type="number"].field::-webkit-outer-spin-button {
 .country-chip--all.country-chip--selected {
     background: var(--mlb-blue);
     border-color: var(--mlb-blue);
-    color: #ffffff;
+    color: var(--on-primary);
 }
 
 .country-chip-grid {
@@ -1496,7 +1631,7 @@ input[type="number"].field::-webkit-outer-spin-button {
 .franchise-division-cell--dimmed { opacity: 0.25; pointer-events: none; }
 
 .franchise-division-label {
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -1632,6 +1767,10 @@ input[type="number"].field::-webkit-outer-spin-button {
     .controls-toggle {
         display: none;
     }
+    /* Desktop sidebar always shows the full axis row — the mobile bar is redundant. */
+    .mobile-axis-bar {
+        display: none;
+    }
     .controls-panel {
         padding: 16px 16px 12px;
         gap: 0;
@@ -1666,7 +1805,7 @@ input[type="number"].field::-webkit-outer-spin-button {
     .mode-toggle { padding: 2px; gap: 2px; }
     .mode-btn { padding: 5px 6px; font-size: 12px; }
     .franchise-chip { padding: 3px 4px; font-size: 10px; }
-    .franchise-division-label { font-size: 8px; }
+    .franchise-division-label { font-size: 10px; }
     .mode-toggle.compact .mode-btn { padding: 4px 4px; font-size: 11px; }
     .filter-row { gap: 8px; margin-bottom: 6px; }
     .filter-label { min-width: 56px; font-size: 10px; }
@@ -1725,8 +1864,18 @@ input[type="number"].field::-webkit-outer-spin-button {
 .ctl-pa-row .ctl-label { flex: 0 0 auto; white-space: nowrap; }
 /* Two-class selector beats `.field { width: 100% }` (defined later in the file). */
 .ctl-pa-row .ctl-threshold { flex: 1 1 auto; width: auto; text-align: left; }
-/* `.ctl-section { display: flex }` would otherwise beat the UA `[hidden]` rule. */
-.ctl-section[hidden] { display: none; }
+/* `.ctl-section`/`.ctl-field` display:flex would otherwise beat the UA `[hidden]`
+   rule — the threshold row is now an inline .ctl-field inside the Filter band. */
+.ctl-section[hidden],
+.ctl-field[hidden] { display: none; }
+
+/* Axis selectors drive the whole chart, so give them subtle primary emphasis
+   over the other controls (theme-safe via color-mix). */
+.ctl-axis-pair .field {
+    font-weight: 600;
+    border-color: color-mix(in srgb, var(--mlb-blue) 35%, var(--border-strong));
+    background-color: color-mix(in srgb, var(--mlb-blue) 4%, var(--panel));
+}
 
 .anim-play-btn {
     display: flex;

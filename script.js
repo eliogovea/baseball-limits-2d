@@ -1,16 +1,39 @@
+// Era → color. A luminance-ordered, single-hue (blue) SEQUENTIAL ramp,
+// light(old) → dark(modern). Ordinal time maps to a monotonic lightness so the
+// encoding stays truthful and is safe under protanopia/deuteranopia (CVD) — a
+// categorical multi-hue scale fails both. Per-theme ramps live in THEMES; this
+// is the Classic default. Invariant asserted at startup on __bl2d_eraRampLum.
 const ERAS = [
-    { start: 1871, end: 1899, name: "Pre-modern",   color: "#a89a7e" },
-    { start: 1900, end: 1919, name: "Dead Ball",    color: "#8a7456" },
-    { start: 1920, end: 1941, name: "Live Ball",    color: "#4a6fa5" },
-    { start: 1942, end: 1968, name: "Integration",  color: "#2f5b8a" },
-    { start: 1969, end: 1992, name: "Free Agency",  color: "#1f4570" },
-    { start: 1993, end: 2005, name: "Steroid",      color: "#7a3f5f" },
-    { start: 2006, end: 2099, name: "Modern",       color: "#005a8a" },
+    { start: 1871, end: 1899, name: "Pre-modern",   color: "#d9e3f0" },
+    { start: 1900, end: 1919, name: "Dead Ball",    color: "#b3c6e0" },
+    { start: 1920, end: 1941, name: "Live Ball",    color: "#8aa9cf" },
+    { start: 1942, end: 1968, name: "Integration",  color: "#6189bd" },
+    { start: 1969, end: 1992, name: "Free Agency",  color: "#3f6aa3" },
+    { start: 1993, end: 2005, name: "Steroid",      color: "#244a7d" },
+    { start: 2006, end: 2099, name: "Modern",       color: "#122a4d" },
 ];
 function eraFor(year) {
     for (const e of ERAS) if (year >= e.start && year <= e.end) return e;
     return null;
 }
+
+// Relative luminance (WCAG) of a #rrggbb hex — used to assert the era ramp is
+// monotonic in lightness (the property that makes it CVD-safe and ordinal).
+function relLuminance(hex) {
+    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+    if (!m) return NaN;
+    const lin = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+    const [r, g, b] = [m[1], m[2], m[3]].map((h) => lin(parseInt(h, 16)));
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+(function assertEraRampMonotonic() {
+    const lum = ERAS.map((e) => relLuminance(e.color));
+    let monotonic = true;
+    for (let i = 1; i < lum.length; i++) if (lum[i] >= lum[i - 1]) monotonic = false;
+    // Old → modern goes light → dark, so luminance must strictly DECREASE.
+    window.__bl2d_eraRampLum = { luminance: lum, monotonicDecreasing: monotonic };
+    if (!monotonic) console.warn("[bl2d] era ramp is not monotonic in luminance — CVD-safety invariant violated", lum);
+})();
 
 // Color palettes per encoding mode. Keep deliberate — Red/Blue echo MLB.
 const COLOR_PALETTES = {
@@ -27,6 +50,77 @@ const COLOR_PALETTES = {
     },
 };
 
+// ── Theming ──────────────────────────────────────────────────────────────
+// Three coherent themes. Each drives the CSS-variable chrome (via `vars`,
+// written onto <html> so the var-based styles.css re-skins for free) AND the
+// D3-painted chart, by mutating the in-place ERAS / COLOR_PALETTES color tables
+// (so colorOf + renderLegend reflect the theme with no call-site changes).
+// Classic's cloud is the CVD-safe sequential ramp; Editorial/Night carry their
+// own sequential ramps. cloudOpacity lifts on darker themes so dots stay legible.
+const THEMES = {
+    classic: {
+        label: "Classic",
+        vars: {
+            "--bg": "#f6f7f9", "--panel": "#ffffff", "--border": "#e3e6ea", "--border-strong": "#cdd2d8",
+            "--text": "#1a1f2e", "--text-muted": "#5a6478", "--mlb-blue": "#002d72",
+            "--mlb-blue-hover": "#001a44", "--mlb-red": "#c8102e", "--frontier-color": "#0f172a",
+            "--glass-bg": "rgba(255,255,255,0.92)", "--gold": "#f59e0b",
+            "--league-al": "#c8102e", "--league-nl": "#002d72", "--on-primary": "#ffffff",
+        },
+        cloud: ["#d9e3f0", "#b3c6e0", "#8aa9cf", "#6189bd", "#3f6aa3", "#244a7d", "#122a4d"],
+        cloudOpacity: 0.4, league: { AL: "#c8102e", NL: "#002d72" }, switchColor: "#7a3f5f",
+    },
+    editorial: {
+        label: "Editorial",
+        vars: {
+            "--bg": "#f7f4ed", "--panel": "#fffdf8", "--border": "#e7e0d2", "--border-strong": "#d3c9b4",
+            "--text": "#1f1b16", "--text-muted": "#6b6357", "--mlb-blue": "#243b53",
+            "--mlb-blue-hover": "#1a2c3f", "--mlb-red": "#b23a2e", "--frontier-color": "#16130f",
+            "--glass-bg": "rgba(255,253,248,0.92)", "--gold": "#c4781b",
+            "--league-al": "#b23a2e", "--league-nl": "#243b53", "--on-primary": "#fffdf8",
+        },
+        cloud: ["#e8dcc0", "#d9c098", "#c79f6f", "#b87d4b", "#9c5d34", "#7d4226", "#5c2f1c"],
+        cloudOpacity: 0.5, league: { AL: "#b23a2e", NL: "#243b53" }, switchColor: "#8a5a3c",
+    },
+    dark: {
+        label: "Night",
+        vars: {
+            "--bg": "#0d1117", "--panel": "#161b22", "--border": "#283039", "--border-strong": "#3a444f",
+            "--text": "#e6edf3", "--text-muted": "#9aa6b2", "--mlb-blue": "#58a6ff",
+            "--mlb-blue-hover": "#4793e8", "--mlb-red": "#ff6b81", "--frontier-color": "#f0f6fc",
+            "--glass-bg": "rgba(22,27,34,0.85)", "--gold": "#f5a623",
+            "--league-al": "#ff6b81", "--league-nl": "#58a6ff", "--on-primary": "#0d1117",
+        },
+        cloud: ["#33414f", "#3e5061", "#4a5f73", "#566f86", "#637f98", "#708fab", "#7e9fbe"],
+        cloudOpacity: 0.72, league: { AL: "#ff6b81", NL: "#58a6ff" }, switchColor: "#b07fd6",
+    },
+};
+// Base cloud opacity for the active theme; read by drawScatterPlot.
+let themeCloudOpacity = THEMES.classic.cloudOpacity;
+
+function applyTheme(name) {
+    const t = THEMES[name] || THEMES.classic;
+    const root = document.documentElement;
+    Object.entries(t.vars).forEach(([k, v]) => root.style.setProperty(k, v));
+    root.setAttribute("data-theme", name);
+    // Re-skin the D3-painted chart by mutating the in-place color tables.
+    t.cloud.forEach((c, i) => { if (ERAS[i]) ERAS[i].color = c; });
+    COLOR_PALETTES.league.AL.color = COLOR_PALETTES.league.AL.dark = t.league.AL;
+    COLOR_PALETTES.league.NL.color = COLOR_PALETTES.league.NL.dark = t.league.NL;
+    COLOR_PALETTES.bats.L.color = t.league.AL;
+    COLOR_PALETTES.bats.R.color = t.league.NL;
+    COLOR_PALETTES.bats.S.color = t.switchColor;
+    themeCloudOpacity = t.cloudOpacity;
+    try { localStorage.setItem("bl2d-theme", name); } catch (e) {}
+    // Reflect the choice in the header switcher.
+    document.querySelectorAll("#theme-switch .theme-btn").forEach(b =>
+        b.classList.toggle("active", b.dataset.theme === name));
+}
+
+function initialTheme() {
+    try { return localStorage.getItem("bl2d-theme") || "classic"; } catch (e) { return "classic"; }
+}
+
 function colorOf(p, colorBy, getMeta) {
     if (colorBy === "era") {
         return (eraFor(p.year ?? p.yearID) || { color: "#4a6fa5" }).color;
@@ -41,6 +135,38 @@ function colorOf(p, colorBy, getMeta) {
         return (COLOR_PALETTES.league[k] || COLOR_PALETTES.league.unknown).color;
     }
     return "#4a6fa5";
+}
+
+// Keep the chart legend honest: show the key for whatever encoding is actually
+// painting the cloud. Era → a sequential colorbar matching the ramp; League /
+// Bats → categorical swatches. Called from drawScatterPlot on every redraw.
+function renderLegend(colorBy) {
+    const el = document.getElementById("legend-encoding");
+    if (!el) return;
+    if (colorBy === "league") {
+        el.innerHTML =
+            `<div class="legend-row">` +
+            `<span class="legend-item"><span class="legend-dot legend-dot--al"></span>AL</span>` +
+            `<span class="legend-item"><span class="legend-dot legend-dot--nl"></span>NL</span>` +
+            `</div>`;
+    } else if (colorBy === "bats") {
+        const b = COLOR_PALETTES.bats;
+        el.innerHTML =
+            `<div class="legend-row">` +
+            `<span class="legend-item"><span class="legend-dot" style="background:${b.L.color}"></span>L</span>` +
+            `<span class="legend-item"><span class="legend-dot" style="background:${b.R.color}"></span>R</span>` +
+            `<span class="legend-item"><span class="legend-dot" style="background:${b.S.color}"></span>S</span>` +
+            `</div>`;
+    } else { // era (default)
+        const bar = ERAS.map(e => `<span style="background:${e.color}"></span>`).join("");
+        // Lower bound from the ramp; upper is the dataset's last season (1871–2025).
+        el.innerHTML =
+            `<div class="legend-encoding">` +
+            `<span class="legend-enc-label">Era</span>` +
+            `<div class="legend-era-bar">${bar}</div>` +
+            `<div class="legend-era-scale"><span>${ERAS[0].start}</span><span>2025</span></div>` +
+            `</div>`;
+    }
 }
 
 const COUNTRY_FLAGS = {
@@ -157,7 +283,7 @@ let animExtentCache = null;     // { key, x, y } — full-range axis extents cac
 const URL_DEFAULTS = {
     ds: "batting",
     x: "HR", y: "SB", sy: "1920", ey: "2024", pa: "502",
-    m: "season", lg: "all", bt: "all", co: "all",
+    m: "season", lg: "all", bt: "all", cb: "era", co: "all",
     fr: "all", hl: "",
 };
 
@@ -401,6 +527,9 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     });
     setupSegGroup("league-seg", () => { clearHighlights(); syncPlayerHint(); refreshChart(); });
     setupSegGroup("bats-seg",   () => { clearHighlights(); syncPlayerHint(); refreshChart(); });
+    // Color encoding is a display option, not a filter — no need to clear the
+    // highlight or touch playing-time; just recolor the cloud + legend.
+    setupSegGroup("colorby-seg", () => refreshChart());
     ["country-select", "franchise-select"].forEach((id) => {
         document.getElementById(id)?.addEventListener("change", () => {
             clearHighlights();
@@ -439,6 +568,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         const mode = getCurrentMode();
         const league = getSegValue("league-seg", "league") || "all";
         const bats = getSegValue("bats-seg", "bats") || "all";
+        const colorBy = getSegValue("colorby-seg", "colorby") || "era";
         const country = document.getElementById("country-select").value || "all";
         const franchise = document.getElementById("franchise-select")?.value || "all";
         const def = activeDataset();
@@ -458,17 +588,29 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
 
         updateYearHint(sYear, eYear);
         syncPlayerHint();
+        syncMobileAxisBar();
 
 
         loadingIndicator.classList.add("active");
         cancelAnimationFrame(pendingRender);
         pendingRender = requestAnimationFrame(() => {
             drawScatterPlot(data.points, xDim, yDim, sYear, eYear, minThreshold, formatStat, mode,
-                { league, bats, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey });
+                { league, bats, colorBy, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey });
             loadingIndicator.classList.remove("active");
-            writeUrlState({ xDim, yDim, sYear, eYear, minPa: thresholdValue, mode, league, bats, country, franchise });
+            writeUrlState({ xDim, yDim, sYear, eYear, minPa: thresholdValue, mode, league, bats, colorBy, country, franchise });
         });
     }
+
+    // Apply the persisted theme before the first render so the chart's color
+    // tables (era ramp, league) are themed when drawScatterPlot first runs.
+    applyTheme(initialTheme());
+    document.querySelectorAll("#theme-switch .theme-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            if (btn.classList.contains("active")) return;
+            applyTheme(btn.dataset.theme);
+            refreshChart();
+        });
+    });
 
     // Restore state from URL hash (if present) before first render so the
     // shareable-URL flow lands on the exact view the link encoded.
@@ -495,6 +637,15 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     };
     ["x-axis-select", "y-axis-select"].forEach((id) => {
         document.getElementById(id).addEventListener("change", axisOrViewChanged);
+    });
+    // Mobile axis bar: forward its changes to the real selects (which fire the
+    // handler above). The bar stays in sync via syncMobileAxisBar() in refreshChart.
+    ["x", "y"].forEach((ax) => {
+        document.getElementById(`${ax}-axis-mobile`)?.addEventListener("change", (e) => {
+            const main = document.getElementById(`${ax}-axis-select`);
+            main.value = e.target.value;
+            main.dispatchEvent(new Event("change"));
+        });
     });
     ["s-year-select", "e-year-select"].forEach((id) => {
         document.getElementById(id).addEventListener("change", () => {
@@ -722,6 +873,7 @@ function populateSelectorsForActive() {
     });
     xSelect.value = def.defaultX;
     ySelect.value = def.defaultY;
+    syncMobileAxisBar();
 
     document.getElementById("threshold-label").textContent = def.thresholdLabel;
 
@@ -739,6 +891,19 @@ function populateSelectorsForActive() {
         switchBtn.classList.remove("active");
         document.querySelector("#bats-seg .seg-btn[data-bats='all']").classList.add("active");
     }
+}
+
+// Mirror the in-drawer axis selects into the mobile axis bar (options + value).
+// The bar's selects are display clones; their change handler drives the real
+// selects, and this keeps them in sync after dataset swaps / on-chart picks.
+function syncMobileAxisBar() {
+    ["x", "y"].forEach((ax) => {
+        const main = document.getElementById(`${ax}-axis-select`);
+        const mob = document.getElementById(`${ax}-axis-mobile`);
+        if (!main || !mob) return;
+        if (mob.innerHTML !== main.innerHTML) mob.innerHTML = main.innerHTML;
+        mob.value = main.value;
+    });
 }
 
 function parseUrlHash() {
@@ -797,6 +962,7 @@ function applyUrlState() {
     if (u.pa) document.getElementById("pa-min-select").value = u.pa;
     setSeg("league-seg", "league", u.lg);
     setSeg("bats-seg", "bats", u.bt);
+    setSeg("colorby-seg", "colorby", u.cb);
     setSelect("country-select", u.co);
     updateCountrySelection(document.getElementById("country-select")?.value || "all");
     setSelect("franchise-select", u.fr);
@@ -821,6 +987,7 @@ function writeUrlState(state) {
             m: state.mode,
             lg: state.league,
             bt: state.bats,
+            cb: state.colorBy,
             co: state.country,
             fr: state.franchise,
             hl: [...careerHighlights.keys()].join(","),
@@ -1815,6 +1982,8 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const country   = filters.country   || "all";
     const franchise = filters.franchise || "all";
     const handField = filters.handField || "bats";
+    const colorBy = filters.colorBy || "era";
+    renderLegend(colorBy);
 
     // Cache meta lookups per playerID across the filter pass.
     const metaCache = new Map();
@@ -2227,7 +2396,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const regular = unique.filter(d => !frontierSet.has(d));
     const special = unique.filter(d => frontierSet.has(d));
 
-    const cloudOpacity = careerHighlights.size > 0 ? 0.1 : 0.4;
+    const cloudOpacity = careerHighlights.size > 0 ? 0.1 : themeCloudOpacity;
     g.append("g").selectAll("circle.regular-point")
         .data(regular).enter()
         .append("circle")
@@ -2235,7 +2404,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         .attr("cx", d => xScale(d.x))
         .attr("cy", d => yScale(d.y))
         .attr("r", pointRadius)
-        .attr("fill", d => colorOf(d, "league", getMeta))
+        .attr("fill", d => colorOf(d, colorBy, getMeta))
         .style("fill-opacity", cloudOpacity);
 
     // Career-highlight layer: dots only (no connecting line — the
@@ -2316,6 +2485,17 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // per-season encoding.
     const labelRadius = hvEncodingEnabled ? FRONTIER_R_MAX : frontierRadius;
     const labels = layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, labelRadius, width < 480);
+    // Leader lines for dodged labels (drawn under the text).
+    g.append("g")
+        .attr("class", "frontier-leaders")
+        .selectAll("line")
+        .data(labels.filter(d => d.leader)).enter()
+        .append("line")
+        .attr("class", "frontier-leader")
+        .attr("x1", d => d.leader.x1)
+        .attr("y1", d => d.leader.y1)
+        .attr("x2", d => d.leader.x2)
+        .attr("y2", d => d.leader.y2);
     g.append("g")
         .attr("class", "frontier-labels")
         .selectAll("text")
@@ -2614,40 +2794,55 @@ function lastNameOf(playerID) {
 }
 
 function layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, pointR, isSmall) {
-    if (!frontier.length) return [];
+    if (!frontier.length) { window.__bl2d_labelOverlaps = 0; return []; }
 
-    // On narrow phones: show full last names below each dot. To keep them
-    // readable we lay them out left-to-right across two staggered rows,
-    // skipping a label only when it would still collide horizontally with an
-    // already-placed one in both rows.
+    const overlap = (a, b) =>
+        !(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y);
+    // Count post-layout overlaps among the placed boxes — the T3 invariant
+    // (must be 0). Read headlessly via window.__bl2d_labelOverlaps.
+    const recordOverlaps = (boxes) => {
+        let n = 0;
+        for (let i = 0; i < boxes.length; i++)
+            for (let j = i + 1; j < boxes.length; j++)
+                if (overlap(boxes[i], boxes[j])) n++;
+        window.__bl2d_labelOverlaps = n;
+    };
+
+    // Measure real text width with a hidden <text> in the live SVG, so collision
+    // boxes match what actually renders (replaces the old per-char estimate that
+    // could under/over-shoot and let labels overlap).
+    const svgNode = document.getElementById("scatter-plot");
+    const measurer = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    measurer.setAttribute("class", isSmall ? "frontier-label frontier-label--mobile" : "frontier-label");
+    measurer.setAttribute("visibility", "hidden");
+    svgNode.appendChild(measurer);
+    const measureW = (t) => { measurer.textContent = t; return measurer.getComputedTextLength(); };
+
+    // On narrow phones: show full last names below each dot, laid out
+    // left-to-right across two staggered rows, skipping a label only when it
+    // would still collide horizontally with an already-placed one in both rows.
     if (isSmall) {
-        const CHAR_W = 5.4;     // ~9px label font
-        const ROW_DY = 11;
+        const ROW_DY = 11, H = 10;
         const sorted = [...frontier].sort((a, b) => xScale(a.x) - xScale(b.x));
         const rowRight = [-Infinity, -Infinity];
-        const out = [];
+        const out = [], boxes = [];
         for (const p of sorted) {
             const text = lastNameOf(p.playerID);
-            const halfW = (text.length * CHAR_W) / 2;
+            const halfW = measureW(text) / 2;
             const cx = xScale(p.x);
             const left = cx - halfW;
             const row = left >= rowRight[0] + 2 ? 0 : (left >= rowRight[1] + 2 ? 1 : -1);
             if (row === -1) continue;   // too crowded here → drop this label
-            out.push({
-                text,
-                x: cx,
-                y: yScale(p.y) + pointR + 10 + row * ROW_DY,
-                anchor: "middle",
-                small: true,
-            });
+            const y = yScale(p.y) + pointR + 10 + row * ROW_DY;
+            out.push({ text, x: cx, y, anchor: "middle", small: true });
+            boxes.push({ x: left, y: y - H, w: halfW * 2, h: H });
             rowRight[row] = cx + halfW;
         }
+        svgNode.removeChild(measurer);
+        recordOverlaps(boxes);
         return out;
     }
 
-    let candidates = frontier;
-
-    const CHAR_W = 6.2;
     const H = 12;
     const GAP = 5;
 
@@ -2658,18 +2853,17 @@ function layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, pointR, is
         h: pointR * 2,
     }));
     const placed = [];
-    const overlap = (a, b) =>
-        !(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y);
 
     const out = [];
-    for (const p of candidates) {
+    for (const p of frontier) {
         const text = `${lastNameOf(p.playerID)} ${p.year}`;
-        const w = text.length * CHAR_W;
+        const w = measureW(text);
         const cx = xScale(p.x);
         const cy = yScale(p.y);
 
         // Try cardinal positions first, then diagonal corners as fallbacks
         // for points near the plot edges (e.g. the topmost frontier point).
+        // `far` positions (index ≥ 2) sit off the dot and get a leader line.
         const positions = [
             // right
             { x: cx + pointR + GAP, y: cy + H / 3, anchor: "start",
@@ -2697,16 +2891,24 @@ function layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, pointR, is
               bx: cx - pointR - GAP - w, by: cy - pointR - GAP - H },
         ];
 
-        for (const pos of positions) {
+        for (let idx = 0; idx < positions.length; idx++) {
+            const pos = positions[idx];
             const bbox = { x: pos.bx, y: pos.by, w, h: H };
             if (bbox.x < 0 || bbox.y < 0 || bbox.x + bbox.w > plotW || bbox.y + bbox.h > plotH) continue;
             if (placed.some(b => overlap(b, bbox))) continue;
             if (pointBoxes.some(b => overlap(b, bbox))) continue;
             placed.push(bbox);
-            out.push({ text, x: pos.x, y: pos.y, anchor: pos.anchor });
+            // Leader line for dodged (non-adjacent) placements: connect the dot
+            // to the label box edge so a pushed-away label still reads as its dot's.
+            const leader = idx >= 2
+                ? { x1: cx, y1: cy, x2: bbox.x + bbox.w / 2, y2: bbox.y + (pos.by < cy ? bbox.h : 0) }
+                : null;
+            out.push({ text, x: pos.x, y: pos.y, anchor: pos.anchor, leader });
             break;
         }
     }
+    svgNode.removeChild(measurer);
+    recordOverlaps(placed);
     return out;
 }
 
