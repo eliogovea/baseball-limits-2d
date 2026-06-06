@@ -707,17 +707,39 @@ function pbpMaybePrefetch(tl, yearIdx, withinIdx) {
 // loaded and is stable for the whole animation. Cheap point-level filters
 // (league, franchise) are applied; bats/country are not — they can only shrink
 // the envelope, and a slightly-wider stable axis is preferable to one that jitters.
-function pbpComputeExtent(tl, xDim, yDim, filters, windowPoints) {
-    const key = `${tl.dataset}|${xDim}|${yDim}|${filters.league}|${filters.franchise}|${tl.sYear}|${tl.eYear}`;
+function pbpComputeExtent(tl, xDim, yDim, filters, windowPoints, mode, datasetKey) {
+    const key = `${tl.dataset}|${mode}|${xDim}|${yDim}|${filters.league}|${filters.franchise}|${tl.sYear}|${tl.eYear}`;
     if (pbpExtentCache && pbpExtentCache.key === key) return { x: pbpExtentCache.x, y: pbpExtentCache.y };
     let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-    for (const p of windowPoints) {
-        if (p.yearID < tl.sYear || p.yearID > tl.eYear) continue;
-        if (filters.league !== "all" && p.lgID !== filters.league) continue;
-        if (filters.franchise !== "all" && FRANCHISE_BY_TEAM.get(p.teamID) !== filters.franchise) continue;
-        const vx = +p[xDim], vy = +p[yDim];
+    const acc = (vx, vy) => {
         if (isFinite(vx)) { if (vx < x0) x0 = vx; if (vx > x1) x1 = vx; }
         if (isFinite(vy)) { if (vy < y0) y0 = vy; if (vy > y1) y1 = vy; }
+    };
+    const inWindow = (p) => p.yearID >= tl.sYear && p.yearID <= tl.eYear
+        && (filters.league === "all" || p.lgID === filters.league)
+        && (filters.franchise === "all" || FRANCHISE_BY_TEAM.get(p.teamID) === filters.franchise);
+    if (mode === "career") {
+        // Career mode aggregates each player's seasons into one career point, so the
+        // envelope must be over FULL career totals (career HR reaches the hundreds),
+        // not season totals — otherwise the axes lock to season maxima (~80 HR) and
+        // the growing career dots run off the chart.
+        const byPlayer = new Map();
+        for (const p of windowPoints) {
+            if (!inWindow(p)) continue;
+            let arr = byPlayer.get(p.playerID);
+            if (!arr) { arr = []; byPlayer.set(p.playerID, arr); }
+            arr.push(p);
+        }
+        for (const seasons of byPlayer.values()) {
+            seasons.sort((a, b) => a.yearID - b.yearID);
+            const agg = aggregateCareer(seasons, datasetKey);
+            acc(+agg[xDim], +agg[yDim]);
+        }
+    } else {
+        for (const p of windowPoints) {
+            if (!inWindow(p)) continue;
+            acc(+p[xDim], +p[yDim]);
+        }
     }
     const x = isFinite(x0) ? [x0, x1] : undefined;
     const y = isFinite(y0) ? [y0, y1] : undefined;
@@ -908,7 +930,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             points = pbpCompletedCache.points.concat(openPartial);
             sY = pbpTimeline.sYear;
             eY = openYear;
-            pbpExtent = pbpComputeExtent(pbpTimeline, xDim, yDim, { league, franchise }, data.points);
+            pbpExtent = pbpComputeExtent(pbpTimeline, xDim, yDim, { league, franchise }, data.points, mode, activeDatasetKey);
             pbpMaybePrefetch(pbpTimeline, yearIdx, withinIdx);
         }
 
@@ -933,7 +955,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         cancelAnimationFrame(pendingRender);
         pendingRender = requestAnimationFrame(() => {
             drawScatterPlot(points, xDim, yDim, sY, eY, minThreshold, formatStat, mode,
-                { league, bats, colorBy, depth, compareEras, sB, eB, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey, pbpExtent });
+                { league, bats, colorBy, depth, compareEras, sB, eB, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey, pbpExtent, smooth: !!pbpTimeline });
             loadingIndicator.classList.remove("active");
             writeUrlState({ xDim, yDim, sYear, eYear, minPa: thresholdValue, mode, league, bats, colorBy, depth, compareEras, sB, eB, country, franchise });
         });
@@ -3137,16 +3159,36 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // year-order trail tended to add zigzag noise more than it clarified
     // the trajectory). Rendered BEFORE the red frontier dots so the
     // clicked-on frontier point keeps its red marker on top.
-    if (careerHighlights.size > 0 && playerIndex) {
+    // During the smooth sweep we highlight each selected player's CURRENT points
+    // (their as-of-date seasons in the active window, so the open season's dot
+    // grows with the cursor) and pin a name label to the live (latest) one — so a
+    // selected player like Ohtani is highlighted and named the moment their season
+    // opens, even before they reach the frontier. (On-frontier seasons already get
+    // their highlight colour + a frontier label, so we skip the extra label there.)
+    // Outside smooth mode we fall back to the player's full-career season dots.
+    const highlightLabels = [];
+    if (careerHighlights.size > 0) {
         for (const [pid, hcolor] of careerHighlights) {
-            if (!playerIndex.has(pid)) continue;
-            const allSeasons = playerIndex.get(pid)
-                .map(p => ({ x: p[xDim], y: p[yDim], year: p.yearID }))
-                .filter(s => !isNaN(s.x) && !isNaN(s.y));
-            if (!allSeasons.length) continue;
+            let pts;
+            if (filters.smooth) {
+                // buildFrontier points carry `.year` (not `.yearID`), `.x`, `.y`.
+                pts = filtered.filter(d => d.playerID === pid && !isNaN(d.x) && !isNaN(d.y));
+                if (pts.length) {
+                    const live = pts.reduce((a, b) => (b.year >= a.year ? b : a));
+                    const onFrontier = frontier.some(fp => fp.playerID === pid && fp.year === live.year);
+                    if (!onFrontier) highlightLabels.push({ x: xScale(live.x), y: yScale(live.y), text: lastNameOf(pid), color: hcolor });
+                }
+            } else if (playerIndex && playerIndex.has(pid)) {
+                pts = playerIndex.get(pid)
+                    .map(p => ({ x: p[xDim], y: p[yDim], year: p.yearID }))
+                    .filter(s => !isNaN(s.x) && !isNaN(s.y));
+            } else {
+                pts = [];
+            }
+            if (!pts.length) continue;
             g.append("g").attr("class", "career-trail")
                 .selectAll("circle")
-                .data(allSeasons).enter()
+                .data(pts).enter()
                 .append("circle")
                 .attr("class", "career-point")
                 .attr("cx", d => xScale(d.x))
@@ -3259,6 +3301,25 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         .attr("y", d => d.y)
         .attr("text-anchor", d => d.anchor)
         .text(d => d.text);
+
+    // Persistent name labels for selected players during the smooth sweep (their
+    // live, off-frontier point). White halo via paint-order so they read over the
+    // dimmed cloud; coloured to match the player's highlight.
+    if (highlightLabels.length) {
+        g.append("g").attr("class", "highlight-labels")
+            .selectAll("text")
+            .data(highlightLabels).enter()
+            .append("text")
+            .attr("class", "frontier-label")
+            .attr("x", d => d.x + 9)
+            .attr("y", d => d.y + 4)
+            .attr("text-anchor", "start")
+            .style("fill", d => d.color)
+            .style("paint-order", "stroke")
+            .style("stroke", "#ffffff")
+            .style("stroke-width", "3px")
+            .text(d => d.text);
+    }
 
     // Isolation ring: precompute nearest-neighbour distance (pixel space) for each
     // frontier point. Drawn on hover; locked in place by click.
