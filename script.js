@@ -1720,6 +1720,12 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             syncScrubber();
             refreshChart();
         });
+    } else if (evtEligible(document.getElementById("x-axis-select").value, document.getElementById("y-axis-select").value)) {
+        // Smooth is the default view: auto-enable it on load whenever the axes are
+        // .evt-eligible (full-history animation, lands on the present-day frame). The
+        // Smooth toggle still turns it off → the static scatter (the fallback for
+        // pre-1920-only/pitching/offline/filtered cases the .evt path can't cover).
+        enableSmooth();
     }
 
     setupZoomToolbar();
