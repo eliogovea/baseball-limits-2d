@@ -293,27 +293,52 @@ const GROUP_TRAIL_LEN = 40;     // max retained positions per player in a group-
 let pbpEvt = null;              // resident .evt full-history model (one counting-stat pair) when active, else null
 let smoothLite = false;        // while playing/scrubbing: skip interaction-only work (HV, cards, rings, quadtree) for demo-smooth frames; a full render fires when idle
 let smoothLiteTimer = null;    // debounce → full (interactive) render after the user stops scrubbing
-const evtStreamCache = new Map(); // stat -> Promise<decoded STEV>  (resident once loaded)
-// Raw counting columns with committed data/pbp/<stat>.evt.gz streams. A chart axis is
-// .evt-eligible if it's one of these OR a derived stat (below) whose components all are.
-// Both axes eligible (batting) routes the smooth cursor through the resident .evt path
-// (instant full-history scrub) vs per-season .bl2p. Extend: `build_stat_streams.js <STAT>`.
-const EVT_STATS = new Set(["HR", "SB", "H", "2B", "3B", "RBI", "R", "BB", "SO", "CS", "AB", "HBP", "SF", "SH", "IBB", "GIDP", "G"]);
-// Derived axes computed per player from cumulative components (rate stats are derivable
-// "later from the cumulative streams", as planned). `rate:true` → a ratio (needs the
-// min-PA threshold + axis lock over qualified players); `rate:false` → a monotonic sum.
-const EVT_DERIVED = {
-    TB:   { deps: ["H", "2B", "3B", "HR"], rate: false, fn: (c) => c.H + c["2B"] + 2 * c["3B"] + 3 * c.HR },
-    PA:   { deps: ["AB", "BB", "HBP", "SH", "SF"], rate: false, fn: (c) => c.AB + c.BB + c.HBP + c.SH + c.SF },
-    AVG:  { deps: ["H", "AB"], rate: true, fn: (c) => c.AB > 0 ? c.H / c.AB : NaN },
-    SLG:  { deps: ["H", "2B", "3B", "HR", "AB"], rate: true, fn: (c) => c.AB > 0 ? (c.H + c["2B"] + 2 * c["3B"] + 3 * c.HR) / c.AB : NaN },
-    ISO:  { deps: ["2B", "3B", "HR", "AB"], rate: true, fn: (c) => c.AB > 0 ? (c["2B"] + 2 * c["3B"] + 3 * c.HR) / c.AB : NaN },
-    OBP:  { deps: ["H", "BB", "HBP", "AB", "SF"], rate: true, fn: (c) => { const d = c.AB + c.BB + c.HBP + c.SF; return d > 0 ? (c.H + c.BB + c.HBP) / d : NaN; } },
-    OPS:  { deps: ["H", "2B", "3B", "HR", "AB", "BB", "HBP", "SF"], rate: true, fn: (c) => { const slg = c.AB > 0 ? (c.H + c["2B"] + 2 * c["3B"] + 3 * c.HR) / c.AB : NaN; const d = c.AB + c.BB + c.HBP + c.SF; const obp = d > 0 ? (c.H + c.BB + c.HBP) / d : NaN; return obp + slg; } },
-    BABIP:{ deps: ["H", "HR", "AB", "SO", "SF"], rate: true, fn: (c) => { const d = c.AB - c.SO - c.HR + c.SF; return d > 0 ? (c.H - c.HR) / d : NaN; } },
-    "BB%":{ deps: ["BB", "AB", "HBP", "SH", "SF"], rate: true, fn: (c) => { const pa = c.AB + c.BB + c.HBP + c.SH + c.SF; return pa > 0 ? c.BB / pa : NaN; } },
-    "K%": { deps: ["SO", "AB", "BB", "HBP", "SH", "SF"], rate: true, fn: (c) => { const pa = c.AB + c.BB + c.HBP + c.SH + c.SF; return pa > 0 ? c.SO / pa : NaN; } },
+const evtStreamCache = new Map(); // `${dataset}:${stat}` -> Promise<decoded STEV>  (resident once loaded)
+// Per-dataset .evt registry. `stats` = raw streamed counting columns (committed as
+// data/pbp/<prefix><stat>.evt.gz); `derived` = axes computed per player from cumulative
+// components (rate:true → ratio needing the qualifier threshold + qualified axis lock;
+// rate:false → monotonic sum). `qual` = the playing-time total (PA / IP) for the
+// rate-axis threshold and axis-lock floor. Keep in sync with build_stat_streams.js.
+const EVT_REGISTRY = {
+    batting: {
+        prefix: "", thresholdField: "PA", qualDeps: ["AB", "BB", "HBP", "SH", "SF"],
+        qual: (c) => c.AB + c.BB + c.HBP + c.SH + c.SF,
+        stats: new Set(["HR", "SB", "H", "2B", "3B", "RBI", "R", "BB", "SO", "CS", "AB", "HBP", "SF", "SH", "IBB", "GIDP", "G"]),
+        derived: {
+            TB:   { deps: ["H", "2B", "3B", "HR"], rate: false, fn: (c) => c.H + c["2B"] + 2 * c["3B"] + 3 * c.HR },
+            PA:   { deps: ["AB", "BB", "HBP", "SH", "SF"], rate: false, fn: (c) => c.AB + c.BB + c.HBP + c.SH + c.SF },
+            AVG:  { deps: ["H", "AB"], rate: true, fn: (c) => c.AB > 0 ? c.H / c.AB : NaN },
+            SLG:  { deps: ["H", "2B", "3B", "HR", "AB"], rate: true, fn: (c) => c.AB > 0 ? (c.H + c["2B"] + 2 * c["3B"] + 3 * c.HR) / c.AB : NaN },
+            ISO:  { deps: ["2B", "3B", "HR", "AB"], rate: true, fn: (c) => c.AB > 0 ? (c["2B"] + 2 * c["3B"] + 3 * c.HR) / c.AB : NaN },
+            OBP:  { deps: ["H", "BB", "HBP", "AB", "SF"], rate: true, fn: (c) => { const d = c.AB + c.BB + c.HBP + c.SF; return d > 0 ? (c.H + c.BB + c.HBP) / d : NaN; } },
+            OPS:  { deps: ["H", "2B", "3B", "HR", "AB", "BB", "HBP", "SF"], rate: true, fn: (c) => { const slg = c.AB > 0 ? (c.H + c["2B"] + 2 * c["3B"] + 3 * c.HR) / c.AB : NaN; const d = c.AB + c.BB + c.HBP + c.SF; const obp = d > 0 ? (c.H + c.BB + c.HBP) / d : NaN; return obp + slg; } },
+            BABIP:{ deps: ["H", "HR", "AB", "SO", "SF"], rate: true, fn: (c) => { const d = c.AB - c.SO - c.HR + c.SF; return d > 0 ? (c.H - c.HR) / d : NaN; } },
+            "BB%":{ deps: ["BB", "AB", "HBP", "SH", "SF"], rate: true, fn: (c) => { const pa = c.AB + c.BB + c.HBP + c.SH + c.SF; return pa > 0 ? c.BB / pa : NaN; } },
+            "K%": { deps: ["SO", "AB", "BB", "HBP", "SH", "SF"], rate: true, fn: (c) => { const pa = c.AB + c.BB + c.HBP + c.SH + c.SF; return pa > 0 ? c.SO / pa : NaN; } },
+        },
+    },
+    pitching: {
+        prefix: "p_", thresholdField: "IP", qualDeps: ["IPouts"],
+        qual: (c) => c.IPouts / 3,
+        stats: new Set(["W", "L", "G", "GS", "CG", "SHO", "SV", "IPouts", "H", "ER", "HR", "BB", "SO", "IBB", "WP", "HBP", "BK", "BFP", "GF", "R", "SH", "SF", "GIDP"]),
+        derived: {
+            // ERA = 9·ER / (IPouts/3) = 27·ER / IPouts, etc. (per-9-innings → ×27/IPouts).
+            IP:     { deps: ["IPouts"], rate: false, fn: (c) => c.IPouts / 3 },
+            ERA:    { deps: ["ER", "IPouts"], rate: true, fn: (c) => c.IPouts > 0 ? 27 * c.ER / c.IPouts : NaN },
+            WHIP:   { deps: ["BB", "H", "IPouts"], rate: true, fn: (c) => c.IPouts > 0 ? 3 * (c.BB + c.H) / c.IPouts : NaN },
+            "K/9":  { deps: ["SO", "IPouts"], rate: true, fn: (c) => c.IPouts > 0 ? 27 * c.SO / c.IPouts : NaN },
+            "BB/9": { deps: ["BB", "IPouts"], rate: true, fn: (c) => c.IPouts > 0 ? 27 * c.BB / c.IPouts : NaN },
+            "H/9":  { deps: ["H", "IPouts"], rate: true, fn: (c) => c.IPouts > 0 ? 27 * c.H / c.IPouts : NaN },
+            "HR/9": { deps: ["HR", "IPouts"], rate: true, fn: (c) => c.IPouts > 0 ? 27 * c.HR / c.IPouts : NaN },
+            "K/BB": { deps: ["SO", "BB"], rate: true, fn: (c) => c.BB > 0 ? c.SO / c.BB : NaN },
+            "K%":   { deps: ["SO", "BFP"], rate: true, fn: (c) => c.BFP > 0 ? c.SO / c.BFP : NaN },
+            "BB%":  { deps: ["BB", "BFP"], rate: true, fn: (c) => c.BFP > 0 ? c.BB / c.BFP : NaN },
+            "K-BB%":{ deps: ["SO", "BB", "BFP"], rate: true, fn: (c) => c.BFP > 0 ? (c.SO - c.BB) / c.BFP : NaN },
+            BAOpp:  { deps: ["H", "BFP", "BB", "HBP", "SH", "SF"], rate: true, fn: (c) => { const ab = c.BFP - c.BB - c.HBP - c.SH - c.SF; return ab > 0 ? c.H / ab : NaN; } },
+        },
+    },
 };
+const evtReg = () => EVT_REGISTRY[activeDatasetKey];
 const PBP_NOMINAL_DATES = 185;  // assumed game-date count for a not-yet-loaded season (scrubber estimate)
 const PBP_PREFETCH_TAIL = 10;   // prefetch the neighbouring season when within this many dates of an edge
 const PBP_PLAY_FRAME_MS = 66;   // min ms between full chart re-renders while playing (~15fps) — keeps the main thread responsive on wide windows
@@ -896,14 +921,15 @@ function pbpBuildGroupCareer(tl, resolved, xDim, yDim, filt, datasetKey) {
 // Resolve a chart dimension to {deps, fn, rate}: a raw streamed column, or a derived
 // stat whose components are all streamed. Returns null if not .evt-eligible.
 function evtDimSpec(dim) {
-    if (EVT_DERIVED[dim]) return EVT_DERIVED[dim].deps.every((d) => EVT_STATS.has(d)) ? EVT_DERIVED[dim] : null;
-    return EVT_STATS.has(dim) ? { deps: [dim], rate: false, fn: (c) => c[dim] } : null;
+    const reg = evtReg(); if (!reg) return null;
+    if (reg.derived[dim]) return reg.derived[dim].deps.every((d) => reg.stats.has(d)) ? reg.derived[dim] : null;
+    return reg.stats.has(dim) ? { deps: [dim], rate: false, fn: (c) => c[dim] } : null;
 }
 function evtEligible(xDim, yDim) {
-    // .evt drives BOTH modes over all history. Career: one career-cumulative point per
-    // player. Season: one point per player per season — completed seasons at their full
-    // (Lahman) totals from data.points, the open season growing game-by-game from .evt.
-    return activeDatasetKey === "batting" && !!evtDimSpec(xDim) && !!evtDimSpec(yDim);
+    // .evt drives BOTH modes over all history, batting AND pitching. Career: one
+    // cumulative point per player. Season: one point per player per season (completed
+    // from Lahman data.points, open growing from .evt — pitching is all step events).
+    return !!evtReg() && !!evtDimSpec(xDim) && !!evtDimSpec(yDim);
 }
 function decodeStev(buf) {
     const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -931,22 +957,24 @@ function decodeStev(buf) {
     return { stat, numDates, seasons, doy, byName };
 }
 function loadEvtStat(stat) {
-    if (evtStreamCache.has(stat)) return evtStreamCache.get(stat);
-    const p = fetch(`data/pbp/${stat.toLowerCase()}.evt.gz`).then(async (r) => {
+    const reg = evtReg();
+    const key = `${activeDatasetKey}:${stat}`;
+    if (evtStreamCache.has(key)) return evtStreamCache.get(key);
+    const p = fetch(`data/pbp/${reg.prefix}${stat.toLowerCase()}.evt.gz`).then(async (r) => {
         if (!r.ok) return null;
         const ds = r.body.pipeThrough(new DecompressionStream("gzip"));
         return decodeStev(new Uint8Array(await new Response(ds).arrayBuffer()));
     }).catch(() => null);
-    evtStreamCache.set(stat, p);
+    evtStreamCache.set(key, p);
     return p;
 }
-const EVT_PA_DEPS = ["AB", "BB", "HBP", "SH", "SF"];    // PA = sum, for the rate-axis threshold
 async function buildEvtModel(xDim, yDim) {
+    const reg = evtReg();
     const xs = evtDimSpec(xDim), ys = evtDimSpec(yDim);
     if (!xs || !ys) return null;
-    const usesPA = xs.rate || ys.rate;
+    const usesQual = xs.rate || ys.rate;                  // a rate axis → need the qualifier (PA/IP) for the threshold
     const deps = new Set([...xs.deps, ...ys.deps]);
-    if (usesPA) EVT_PA_DEPS.forEach((d) => deps.add(d));   // need PA components for min-PA threshold
+    if (usesQual) reg.qualDeps.forEach((d) => deps.add(d));
     const depList = [...deps];
     const loaded = await Promise.all(depList.map(loadEvtStat));
     if (loaded.some((s) => !s)) return null;
@@ -974,13 +1002,14 @@ async function buildEvtModel(xDim, yDim) {
         // axis lock: career-end value; for rate axes only count players with enough PA
         // so a 3-for-3 cup-of-coffee 1.000 AVG doesn't blow out the frame.
         for (const d of depList) cEnd[d] = (comp[d].cum.length ? comp[d].cum[comp[d].cum.length - 1] : 0);
-        const paEnd = usesPA ? EVT_PA_DEPS.reduce((a, d) => a + (cEnd[d] || 0), 0) : Infinity;
+        const qEnd = usesQual ? reg.qual(cEnd) : Infinity;
         const xv = xs.fn(cEnd), yv = ys.fn(cEnd);
-        const qual = paEnd >= 1000;                       // career-qualifier-ish floor for axis framing
+        const qual = qEnd >= 1000;                         // ~career qualifier (1000 PA / 1000 IP) for axis framing
         if (isFinite(xv) && (!xs.rate || qual)) xMax = Math.max(xMax, xv);
         if (isFinite(yv) && (!ys.rate || qual)) yMax = Math.max(yMax, yv);
     }
-    return { xDim, yDim, xs, ys, usesPA: usesPA, depList, numDates, players, doy: ref.doy, yearOf, seasonStartByYear,
+    return { xDim, yDim, xs, ys, usesQual, qual: reg.qual, thresholdField: reg.thresholdField, depList,
+             numDates, players, doy: ref.doy, yearOf, seasonStartByYear,
              xMax, yMax, minYear: ref.seasons[0].year, maxYear: ref.seasons[ref.seasons.length - 1].year };
 }
 // Season mode: one point per player for the OPEN season `O`, accumulated game-by-game to
@@ -1000,8 +1029,8 @@ function evtOpenSeasonPoints(model, d, O) {
         const x = model.xs.fn(c), y = model.ys.fn(c);
         if (!isFinite(x) || !isFinite(y)) continue;
         if (!model.xs.rate && !model.ys.rate && x === 0 && y === 0) continue;
-        const pa = model.usesPA ? EVT_PA_DEPS.reduce((a, dep) => a + (c[dep] || 0), 0) : 1e9;
-        rows.push({ playerID: p.name, teamID: "—", lgID: "—", yearID: O, PA: pa, [model.xDim]: x, [model.yDim]: y });
+        const q = model.usesQual ? model.qual(c) : 1e9;
+        rows.push({ playerID: p.name, teamID: "—", lgID: "—", yearID: O, [model.thresholdField]: q, [model.xDim]: x, [model.yDim]: y });
     }
     return rows;
 }
@@ -1022,8 +1051,8 @@ function evtPointsAsOf(model, d) {                      // season-shaped rows fo
         // yearID = the player's debut year so the era colour reflects their cohort
         // (an as-of career point has no single season year). sY/eY span all history,
         // so this never filters anyone out.
-        const pa = model.usesPA ? EVT_PA_DEPS.reduce((a, dep) => a + (c[dep] || 0), 0) : 1e9;
-        rows.push({ playerID: p.name, teamID: "—", lgID: "—", yearID: p.debutYear, PA: pa, [model.xDim]: x, [model.yDim]: y });
+        const q = model.usesQual ? model.qual(c) : 1e9;
+        rows.push({ playerID: p.name, teamID: "—", lgID: "—", yearID: p.debutYear, [model.thresholdField]: q, [model.xDim]: x, [model.yDim]: y });
     }
     return rows;
 }
@@ -1118,7 +1147,10 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         populateSelectorsForActive();
         resetThresholdToDefault();
         applyModeConfig(getCurrentMode());
-        refreshChart();
+        // Smooth is the default: re-enable it on the new dataset if its axes are
+        // .evt-eligible (pitching now has its own streams), else stay static.
+        if (evtEligible(document.getElementById("x-axis-select").value, document.getElementById("y-axis-select").value)) enableSmooth();
+        else refreshChart();
     });
     setupSegGroup("league-seg", () => { clearHighlights(); syncPlayerHint(); refreshChart(); });
     setupSegGroup("bats-seg",   () => { clearHighlights(); syncPlayerHint(); refreshChart(); });
@@ -1536,6 +1568,11 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         const yDim = document.getElementById("y-axis-select").value;
         smoothToggle.classList.add("active"); dateLabel.hidden = false; dateLabel.textContent = "Loading full history…";
         const model = await buildEvtModel(xDim, yDim);
+        // Guard a rapid axis/dataset change: if the selectors moved while we awaited,
+        // a newer enableEvt is in flight — discard this stale model.
+        if (document.getElementById("x-axis-select").value !== xDim ||
+            document.getElementById("y-axis-select").value !== yDim ||
+            !evtEligible(xDim, yDim)) return;
         if (!model) { smoothToggle.classList.remove("active"); dateLabel.textContent = "No event streams for these stats"; return; }
         // Clamp the played window to the selected year range (values stay all-time
         // career-cumulative; only the swept dates narrow). Full history if unset.

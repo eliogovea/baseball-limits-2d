@@ -16,13 +16,22 @@ const fs = require("fs");
 const zlib = require("zlib");
 const path = require("path");
 
-// Default set = the committed offensive counting streams (must match EVT_STATS in
-// script.js). Pass stat names to (re)build a subset.
-const DEFAULT_STATS = ["HR", "SB", "H", "2B", "3B", "RBI", "R", "BB", "SO", "CS", "AB", "HBP", "SF", "SH", "IBB", "GIDP", "G"];
-const STATS = (process.argv.slice(2).length ? process.argv.slice(2) : DEFAULT_STATS).map((s) => s.toUpperCase());
+// `--pitching` builds pitching streams (p_<stat>.evt.gz) entirely from Lahman season
+// totals — there's no pitching .bl2p corpus, so every season is an end-of-season step
+// event. Batting (default) uses the .bl2p per-game corpus for 1920+ and Lahman for
+// 1871-1919. Default stat set per dataset must match EVT_REGISTRY in script.js.
+const DATASET = process.argv.includes("--pitching") ? "pitching" : "batting";
+const args = process.argv.slice(2).filter((a) => !a.startsWith("--"));
+const DEFAULTS = {
+    batting:  ["HR", "SB", "H", "2B", "3B", "RBI", "R", "BB", "SO", "CS", "AB", "HBP", "SF", "SH", "IBB", "GIDP", "G"],
+    pitching: ["W", "L", "G", "GS", "CG", "SHO", "SV", "IPouts", "H", "ER", "HR", "BB", "SO", "IBB", "WP", "HBP", "BK", "BFP", "GF", "R", "SH", "SF", "GIDP"],
+};
+const STATS = (args.length ? args : DEFAULTS[DATASET]).map((s) => s.toUpperCase());
+const CSV = path.join(__dirname, "..", "data", `${DATASET}_limits_1871-2025.csv`);
+const OUT_PREFIX = DATASET === "pitching" ? "p_" : "";
 const PBP_DIR = path.join(__dirname, "..", "data", "pbp");
-const files = fs.readdirSync(PBP_DIR).filter((f) => /^b\d+\.bl2p\.gz$/.test(f)).sort();
-if (!files.length) { console.error("no data/pbp/b*.bl2p.gz found"); process.exit(1); }
+// Batting: 1920+ from .bl2p. Pitching: no .bl2p → all years from Lahman (step events).
+const files = DATASET === "batting" ? fs.readdirSync(PBP_DIR).filter((f) => /^b\d+\.bl2p\.gz$/.test(f)).sort() : [];
 
 // Decode a BL2P season: season dates (day-of-year per game-date) + per-game DELTAS
 // for the requested stat columns + each game's date index + player game counts.
@@ -68,18 +77,21 @@ let gbase = 0;
 // the streams span all of history. The animation steps across these years (no
 // intra-season growth) and is smooth within the PBP years — same STEV format,
 // coarser granularity. (Career mode then includes pre-1920 totals, e.g. Ty Cobb.)
-const PBP_START = parseInt(files[0].match(/b(\d+)/)[1]);           // first .bl2p year (1920)
+const PBP_START = files.length ? parseInt(files[0].match(/b(\d+)/)[1]) : 9999;  // 1920 (batting) or "all years" (pitching)
 const SEASON_END_DOY = 273;                                        // ~Sep 30
 {
-    const lines = fs.readFileSync(path.join(__dirname, "..", "data", "batting_limits_1871-2025.csv"), "utf8").split("\n");
-    const col = {}; lines[0].split(",").forEach((h, i) => col[h] = i);
+    const lines = fs.readFileSync(CSV, "utf8").split("\n");
+    // Case-insensitive column map: STATS are upper-cased, but CSV headers may be mixed
+    // case (e.g. "IPouts", "yearID", "playerID").
+    const col = {}; lines[0].split(",").forEach((h, i) => col[h.toUpperCase()] = i);
+    const C_YEAR = col.YEARID, C_PID = col.PLAYERID;
     const byYear = new Map();                                      // year → pid → {stat: total} (stints summed)
     for (let li = 1; li < lines.length; li++) {
         const ln = lines[li]; if (!ln) continue;
         const f = ln.split(",");
-        const year = parseInt(f[col.yearID]);
+        const year = parseInt(f[C_YEAR]);
         if (!(year < PBP_START)) continue;
-        const pid = f[col.playerID];
+        const pid = f[C_PID];
         let ym = byYear.get(year); if (!ym) { ym = new Map(); byYear.set(year, ym); }
         let rec = ym.get(pid); if (!rec) { rec = {}; ym.set(pid, rec); }
         for (const st of STATS) { const v = parseInt(f[col[st]]); if (v) rec[st] = (rec[st] || 0) + v; }
@@ -164,7 +176,7 @@ const kb = (x) => (x / 1024).toFixed(0);
 for (const st of STATS) {
     const raw = buildStev(st, ev[st]);
     const gzipped = zlib.gzipSync(raw, { level: 9 });
-    const outPath = path.join(PBP_DIR, `${st.toLowerCase()}.evt.gz`);
+    const outPath = path.join(PBP_DIR, `${OUT_PREFIX}${st.toLowerCase()}.evt.gz`);
     fs.writeFileSync(outPath, gzipped);
     const cells = [...ev[st].values()].reduce((a, l) => a + l.length, 0);
     console.log(`${st}: ${ev[st].size.toLocaleString()} players, ${cells.toLocaleString()} events -> ${path.relative(path.join(__dirname, ".."), outPath)}  (raw ${kb(raw.length)} KB, gz ${kb(gzipped.length)} KB)`);
