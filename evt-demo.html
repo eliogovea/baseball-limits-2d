@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Baseball Limits — full-history HR×SB (.evt experiment)</title>
+<style>
+  :root { --bg:#0f1320; --panel:#171c2e; --ink:#e7ecf5; --muted:#8b95ad; --accent:#e23b3b; --grid:#272d42; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font:14px/1.4 -apple-system, system-ui, sans-serif; }
+  .wrap { display:flex; flex-direction:column; height:100%; }
+  header { padding:12px 18px; border-bottom:1px solid var(--grid); }
+  header h1 { margin:0; font-size:15px; font-weight:650; }
+  header p { margin:2px 0 0; color:var(--muted); font-size:12px; }
+  header b { color:var(--ink); }
+  .chart-region { position:relative; flex:1 1 auto; min-height:0; }
+  #chart { position:absolute; inset:0; width:100%; height:100%; }
+  .controls { display:flex; align-items:center; gap:14px; padding:12px 18px;
+    border-top:1px solid var(--grid); background:var(--panel); }
+  button#play { width:40px; height:40px; border-radius:50%; border:none; cursor:pointer;
+    background:var(--accent); color:#fff; font-size:16px; flex:none; }
+  #scrubber { flex:1 1 auto; accent-color:var(--accent); }
+  .readout { font-variant-numeric:tabular-nums; white-space:nowrap; min-width:170px; text-align:right; }
+  .readout .date { font-size:18px; font-weight:650; }
+  .readout .sub { color:var(--muted); font-size:12px; }
+  label.speed { color:var(--muted); font-size:12px; display:flex; align-items:center; gap:6px; }
+  #status { padding:40px; color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>The limits of MLB — Home Runs × Stolen Bases, game-by-game since 1920</h1>
+    <p>Driven entirely by two <b>.evt</b> event streams (<b id="size">…</b>) loaded once and held resident —
+       every player's cumulative career as of each game-date, no per-season streaming. Red = the Pareto frontier (the limits).</p>
+  </header>
+  <div class="chart-region">
+    <canvas id="chart"></canvas>
+    <div id="status">Loading hr.evt.gz / sb.evt.gz…</div>
+  </div>
+  <div class="controls">
+    <button id="play" title="Play / pause">▶</button>
+    <input id="scrubber" type="range" min="0" max="0" value="0">
+    <label class="speed">speed
+      <input id="speed" type="range" min="1" max="60" value="24" style="width:90px; accent-color:var(--accent)">
+    </label>
+    <div class="readout"><div class="date" id="dateLabel">—</div><div class="sub" id="subLabel"></div></div>
+  </div>
+</div>
+<script src="evt-demo.js"></script>
+</body>
+</html>
