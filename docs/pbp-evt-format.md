@@ -9,13 +9,22 @@ where each player's total increased is ~20× smaller than the general 17-column
 instant full-history scrubbing with no per-season streaming.
 
 Built by [`scripts/build_stat_streams.js`](../scripts/build_stat_streams.js) from the
-committed `data/pbp/b*.bl2p.gz` corpus; consumed by the standalone demo
-[`evt-demo.html`](../evt-demo.html) / [`evt-demo.js`](../evt-demo.js).
+committed `data/pbp/b*.bl2p.gz` corpus. Consumed by **both**:
+- the standalone demo [`evt-demo.html`](../evt-demo.html) / [`evt-demo.js`](../evt-demo.js); and
+- **the main app** — when the Smooth toggle is on and both chart axes are counting
+  stats with `.evt` streams, `script.js` routes the cursor through the resident `.evt`
+  path (full-history scrub, no per-season `.bl2p` streaming) instead of the season
+  engine. The eligible set is `EVT_STATS` in `script.js`, kept in sync with the
+  `DEFAULT_STATS` this builder emits. Rate stats (AVG, OBP, …) and any pair with a
+  non-streamed stat fall back to the `.bl2p` season path.
 
 ```
-node scripts/build_stat_streams.js          # writes data/pbp/hr.evt.gz, sb.evt.gz
-node scripts/build_stat_streams.js HR SB RBI
+node scripts/build_stat_streams.js          # rebuilds the committed set (HR SB H 2B 3B RBI R BB SO CS)
+node scripts/build_stat_streams.js HR SB    # or a subset
 ```
+
+Committed streams (offensive counting axes), ~7.4 MB total: `hr sb h 2b 3b rbi r bb so cs`.
+Rate stats are *derivable* from these later (e.g. AVG = H ÷ AB) rather than stored.
 
 ## Files
 
