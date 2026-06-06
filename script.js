@@ -282,8 +282,14 @@ let pbpTimeline = null;         // multi-year cursor model (buildPbpTimeline) wh
 let pbpCursorIdx = 0;           // global index into the concatenated multi-year game-date space
 let pbpExtentCache = null;      // { key, x, y } — axis-extent lock held across the smooth sweep
 let pbpCompletedCache = null;   // { key, points } — completed-season points (yearID < openYear) cached per open year so play doesn't re-filter all of data.points every frame
+let pbpFrontierPrepCache = null; // { key, filtered } — completed-season frontier rows, sorted for merge with the open season
 let pbpRaf = null;              // requestAnimationFrame handle while the cursor is playing
 let pendingCursorYmd = null;    // a t=YYYYMMDD from a deep-link, applied once data is loaded
+let chartCanvasLayers = null;   // { bg, fg } — high-cardinality point layers under the SVG overlay
+let chartCanvasBgCacheKey = null;
+let groupCareerMode = false;    // group-career animation: the selected players' cumulative careers race through stat-space (vs. the all-player accumulating cloud)
+let groupTrailHistory = new Map(); // playerID → [{x,y,cursor}] recent career positions (DATA coords) for the fading trail
+const GROUP_TRAIL_LEN = 40;     // max retained positions per player in a group-career trail (~ the last few seconds at 15fps)
 const PBP_NOMINAL_DATES = 185;  // assumed game-date count for a not-yet-loaded season (scrubber estimate)
 const PBP_PREFETCH_TAIL = 10;   // prefetch the neighbouring season when within this many dates of an edge
 const PBP_PLAY_FRAME_MS = 66;   // min ms between full chart re-renders while playing (~15fps) — keeps the main thread responsive on wide windows
@@ -699,6 +705,49 @@ function pbpMaybePrefetch(tl, yearIdx, withinIdx) {
     }
 }
 
+// Eagerly load the next `ahead` not-yet-loaded seasons. Group-career sweeps span the
+// whole career (decades), and the per-year prefetch above only kicks in within a few
+// dates of a boundary — too late when the play loop crosses a year in one frame. With
+// several years of lead the small (~130 KB) fetches land before the cursor arrives, so
+// the sweep doesn't stall on "Loading <year>…" at every boundary. Idempotent.
+function pbpEnsureAhead(tl, yearIdx, ahead) {
+    for (let k = 1; k <= ahead; k++) {
+        const i = yearIdx + k;
+        if (i >= tl.years.length) break;
+        if (tl.years[i].status === "unknown") pbpEnsureYearLoaded(tl, i);
+    }
+}
+
+// Memory bound for long sweeps. Only the OPEN year's decoded PBP is ever read
+// (completed years render from Lahman season totals in `data.points`), so a sweep
+// across a wide span — e.g. a group-career spanning 1920–2025 — otherwise retains
+// ~100 decoded seasons (hundreds of MB, OOM-crashes the tab). Drop decoded payloads
+// for years outside a small window around the cursor AND evict them from `pbpCache`
+// so they're actually GC'd (both hold a reference). Status + dateCount are kept, so
+// offsets and the cursor are undisturbed; a step back re-decodes on demand.
+function pbpReleaseFarYears(tl, openIdx, behind, ahead) {
+    for (let i = 0; i < tl.years.length; i++) {
+        if (i >= openIdx - behind && i <= openIdx + ahead) continue;
+        const e = tl.years[i];
+        if (e.decoded) {
+            e.decoded = null;
+            pbpCache.delete(`${tl.dataset}:${e.year}`);
+        }
+    }
+}
+
+// Re-decode a year whose decoded payload was released (a backward scrub landed on it),
+// WITHOUT touching status/offsets — dateCount is preserved, so the cursor stays put.
+function pbpReloadDecoded(tl, idx) {
+    const e = tl.years[idx];
+    if (!e || e.status !== "covered" || e.decoded || e.reloading) return Promise.resolve();
+    e.reloading = true;
+    return decodePbpSeason(e.year, tl.dataset).then((decoded) => {
+        if (decoded) e.decoded = decoded;
+        e.reloading = false;
+    });
+}
+
 // Axis-extent lock for the smooth sweep: the extent of every season in the full
 // selected window (sYear..eYear) at its full totals, so the axes are fixed from
 // the first frame and the accumulating frontier visibly grows into that frame
@@ -707,8 +756,9 @@ function pbpMaybePrefetch(tl, yearIdx, withinIdx) {
 // loaded and is stable for the whole animation. Cheap point-level filters
 // (league, franchise) are applied; bats/country are not — they can only shrink
 // the envelope, and a slightly-wider stable axis is preferable to one that jitters.
-function pbpComputeExtent(tl, xDim, yDim, filters, windowPoints, mode, datasetKey) {
-    const key = `${tl.dataset}|${mode}|${xDim}|${yDim}|${filters.league}|${filters.franchise}|${tl.sYear}|${tl.eYear}`;
+function pbpComputeExtent(tl, xDim, yDim, filters, windowPoints, mode, datasetKey, group = null) {
+    const grpKey = group ? [...group].sort().join(",") : "";
+    const key = `${tl.dataset}|${mode}|${xDim}|${yDim}|${filters.league}|${filters.franchise}|${tl.sYear}|${tl.eYear}|grp=${grpKey}`;
     if (pbpExtentCache && pbpExtentCache.key === key) return { x: pbpExtentCache.x, y: pbpExtentCache.y };
     let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
     const acc = (vx, vy) => {
@@ -726,6 +776,7 @@ function pbpComputeExtent(tl, xDim, yDim, filters, windowPoints, mode, datasetKe
         const byPlayer = new Map();
         for (const p of windowPoints) {
             if (!inWindow(p)) continue;
+            if (group && !group.has(p.playerID)) continue;   // group-career: envelope over just the selected players' careers
             let arr = byPlayer.get(p.playerID);
             if (!arr) { arr = []; byPlayer.set(p.playerID, arr); }
             arr.push(p);
@@ -735,6 +786,9 @@ function pbpComputeExtent(tl, xDim, yDim, filters, windowPoints, mode, datasetKe
             const agg = aggregateCareer(seasons, datasetKey);
             acc(+agg[xDim], +agg[yDim]);
         }
+        // Anchor the group-career frame at the origin so trajectories grow outward
+        // from (0,0) into the fixed career-end envelope rather than starting cramped.
+        if (group) acc(0, 0);
     } else {
         for (const p of windowPoints) {
             if (!inWindow(p)) continue;
@@ -745,6 +799,69 @@ function pbpComputeExtent(tl, xDim, yDim, filters, windowPoints, mode, datasetKe
     const y = isFinite(y0) ? [y0, y1] : undefined;
     pbpExtentCache = { key, x, y };
     return { x, y };
+}
+
+// ── Group-career mode ────────────────────────────────────────────────────────
+// The selected players (careerHighlights) race their CUMULATIVE careers through
+// stat-space as the cursor sweeps calendar time. Shares the whole pbpTimeline
+// engine (cursor, scrubber, play loop, lazy season decode) — only the per-frame
+// point-builder differs: one cumulative-career point per player instead of the
+// all-player accumulating cloud.
+
+function groupCareerActive() {
+    return groupCareerMode && pbpTimeline && careerHighlights.size >= 1;
+}
+
+// The group's combined career span: earliest debut → latest final season, across
+// every selected player's Lahman seasons. Used to set the timeline window so a
+// short-career player and a long-career one both fit in one animation.
+function groupCareerSpan(datasetKey) {
+    const idx = datasetState[datasetKey]?.playerIndex;
+    let lo = Infinity, hi = -Infinity;
+    if (idx) {
+        for (const pid of careerHighlights.keys()) {
+            const seasons = idx.get(pid);
+            if (!seasons || !seasons.length) continue;
+            for (const s of seasons) {
+                if (s.yearID < lo) lo = s.yearID;
+                if (s.yearID > hi) hi = s.yearID;
+            }
+        }
+    }
+    return isFinite(lo) ? { lo, hi } : null;
+}
+
+// Per-frame builder: for each selected player, the cumulative-career point as of
+// the cursor = aggregateCareer(prior completed seasons at full totals  +  the open
+// season's PBP partial). Players with no game yet hold at their prior career total
+// (a step); players whose career hasn't started are omitted.
+function pbpBuildGroupCareer(tl, resolved, xDim, yDim, filt, datasetKey) {
+    const { yearEntry, withinIdx } = resolved;
+    const openYear = yearEntry.year;
+    const group = new Set(careerHighlights.keys());
+    const seasonIndex = datasetState[datasetKey]?.playerIndex;
+    // Open-season cumulative-to-date partials, filtered to the group; normalize the
+    // String yearID emitted by pbpPointsAsOf to a number for aggregateCareer/sorts.
+    const openByPid = new Map();
+    for (const r of pbpPointsAsOf(yearEntry.decoded, withinIdx, tl.dataset)) {
+        if (!group.has(r.playerID)) continue;
+        r.yearID = openYear;
+        openByPid.set(r.playerID, r);
+    }
+    const pts = [];
+    for (const pid of group) {
+        const seasons = (seasonIndex && seasonIndex.get(pid)) || [];
+        const priorFull = seasons.filter(s => s.yearID < openYear);   // strict: the open year is represented only by its partial
+        const openRow = openByPid.get(pid);
+        const careerSeasons = openRow ? priorFull.concat(openRow) : priorFull;
+        if (!careerSeasons.length) continue;                          // career not started by the cursor
+        careerSeasons.sort((a, b) => a.yearID - b.yearID);
+        pts.push(aggregateCareer(careerSeasons, datasetKey));
+    }
+    const pbpExtent = pbpComputeExtent(tl, xDim, yDim, filt, datasetState[datasetKey].points, "career", datasetKey, group);
+    window.__bl2d_groupCareerPoints = pts.map(p => ({ pid: p.playerID, x: p[xDim], y: p[yDim] }));
+    window.__bl2d_groupCareerActive = true;
+    return { points: pts, sY: tl.sYear, eY: openYear, pbpExtent };
 }
 
 function pbpFindLastCoveredYearIdx(tl) {
@@ -879,6 +996,10 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     let pendingRender = null;
 
     function refreshChart() {
+        // Drop any draw still queued from a prior call: the guards below early-return
+        // to hold the current frame, and a stale rAF would otherwise run against
+        // now-mutated cursor/openYearIdx state (e.g. a released season).
+        cancelAnimationFrame(pendingRender);
         const xDim = document.getElementById("x-axis-select").value;
         const yDim = document.getElementById("y-axis-select").value;
         const sYear = parseInt(document.getElementById("s-year-select").value);
@@ -902,8 +1023,10 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         let points = data.points;
         let sY = sYear, eY = eYear;
         let pbpExtent = null;
+        let groupCareer = false;
         if (pbpTimeline) {
-            const { yearEntry, yearIdx, withinIdx } = pbpResolveGlobal(pbpTimeline, pbpCursorIdx);
+            const resolved = pbpResolveGlobal(pbpTimeline, pbpCursorIdx);
+            const { yearEntry, yearIdx, withinIdx } = resolved;
             pbpTimeline.openYearIdx = yearIdx;
             if (yearEntry.status === "unknown") {
                 // Cursor entered a not-yet-loaded season: kick the fetch and redraw
@@ -912,6 +1035,21 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
                 return;
             }
             if (yearEntry.status !== "covered") return;   // transient "loading" — hold frame
+            if (!yearEntry.decoded) {
+                // Open year's decoded PBP was released to bound memory (a backward
+                // scrub landed past the retained window) — re-decode, hold the frame.
+                if (!yearEntry.reloading) pbpReloadDecoded(pbpTimeline, yearIdx).then(() => { syncScrubber(); refreshChart(); });
+                return;
+            }
+            if (groupCareerActive()) {
+                // Group-career: build one cumulative-career point per selected player.
+                const built = pbpBuildGroupCareer(pbpTimeline, resolved, xDim, yDim, { league, franchise }, activeDatasetKey);
+                points = built.points;
+                sY = built.sY; eY = built.eY; pbpExtent = built.pbpExtent;
+                groupCareer = true;
+                pbpEnsureAhead(pbpTimeline, yearIdx, 4);   // keep several seasons loaded ahead of the sweep
+                pbpReleaseFarYears(pbpTimeline, yearIdx, 2, 6);  // …and drop the rest so a wide span doesn't OOM
+            } else {
             // Accumulating multi-year frontier: completed seasons stay on the chart
             // at their full (Lahman) season totals and only the OPEN season grows
             // game-by-game from its PBP partial. The window runs sYear..openYear, so
@@ -932,6 +1070,9 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             eY = openYear;
             pbpExtent = pbpComputeExtent(pbpTimeline, xDim, yDim, { league, franchise }, data.points, mode, activeDatasetKey);
             pbpMaybePrefetch(pbpTimeline, yearIdx, withinIdx);
+            pbpReleaseFarYears(pbpTimeline, yearIdx, 2, 6);  // bound memory on long accumulating sweeps too
+            window.__bl2d_groupCareerActive = false;
+            }
         }
 
         // The playing-time threshold only matters for rate stats — for counting
@@ -951,12 +1092,25 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         syncMobileAxisBar();
 
 
-        loadingIndicator.classList.add("active");
+        // The "Loading data…" indicator is for the initial load and heavy filter
+        // changes — NOT the smooth/group-career sweep, where every ~66ms frame would
+        // strobe it on and off. Each cursor draw is only a couple of ms, so skip it.
+        const showLoader = !pbpTimeline;
+        if (showLoader) loadingIndicator.classList.add("active");
         cancelAnimationFrame(pendingRender);
         pendingRender = requestAnimationFrame(() => {
-            drawScatterPlot(points, xDim, yDim, sY, eY, minThreshold, formatStat, mode,
-                { league, bats, colorBy, depth, compareEras, sB, eB, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey, pbpExtent, smooth: !!pbpTimeline });
-            loadingIndicator.classList.remove("active");
+            // Group-career: the N points are already aggregated careers, so draw them
+            // as-is (season pipeline, no re-aggregation) and neutralize the attribute
+            // filters — the selected group IS the filter, and career points carry no
+            // single lgID/team, so a league filter would otherwise drop them all.
+            const drawMode = groupCareer ? "season" : mode;
+            const drawFilters = groupCareer
+                ? { league: "all", bats: "all", colorBy, depth: 1, compareEras: false, country: "all", franchise: "all",
+                    thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey,
+                    pbpExtent, smooth: true, groupCareer: true, group: new Set(careerHighlights.keys()) }
+                : { league, bats, colorBy, depth, compareEras, sB, eB, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey, pbpExtent, smooth: !!pbpTimeline };
+            drawScatterPlot(points, xDim, yDim, sY, eY, minThreshold, formatStat, drawMode, drawFilters);
+            if (showLoader) loadingIndicator.classList.remove("active");
             writeUrlState({ xDim, yDim, sYear, eYear, minPa: thresholdValue, mode, league, bats, colorBy, depth, compareEras, sB, eB, country, franchise });
         });
     }
@@ -1022,8 +1176,13 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     };
     const axisOrViewChanged = () => {
         // Axis dimension changes invalidate any zoom rectangle (the domain
-        // values are in the old dimension's units).
+        // values are in the old dimension's units) and any group-career trail
+        // (its stored x/y are in the OLD stat dimensions).
         viewDomain = null;
+        groupTrailHistory.clear();
+        // In group-career mode keep the selected group and just re-plot their
+        // careers on the new axes — swapping HR×SB → AVG×OBP keeps them racing.
+        if (groupCareerActive()) { refreshChart(); return; }
         filterChanged();
     };
     ["x-axis-select", "y-axis-select"].forEach((id) => {
@@ -1093,7 +1252,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         pbpTimeline.openYearIdx = yearIdx;
         scrubber.max = String(Math.max(0, pbpTimeline.totalEstimate - 1));
         scrubber.value = String(pbpCursorIdx);
-        if (yearEntry.status === "covered") {
+        if (yearEntry.status === "covered" && yearEntry.decoded) {
             const doy = yearEntry.decoded.dates[withinIdx];
             dateLabel.textContent = pbpDayLabel(yearEntry.year, doy);
             window.__bl2d_pbpCursorYmd = pbpDayToYmd(yearEntry.year, doy);
@@ -1121,6 +1280,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         const perYearMs = 10000;                   // ~10s per covered season …
         const begin = performance.now();
         pbpCursorIdx = 0;
+        groupTrailHistory.clear();                 // restart trails from the sweep's origin
         let lastDraw = 0;
         const btn = document.getElementById("anim-play-btn");
         btn.classList.add("playing");
@@ -1169,6 +1329,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         pbpTimeline = tl;
         pbpExtentCache = null;
         pbpCompletedCache = null;
+        pbpFrontierPrepCache = null;
         pbpCursorIdx = (startIdx != null)
             ? Math.max(0, Math.min(tl.totalEstimate - 1, startIdx))
             : pbpGlobalFor(tl, idx, entry.decoded.dateCount - 1);
@@ -1181,16 +1342,70 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         pbpTimeline = null;
         pbpExtentCache = null;
         pbpCompletedCache = null;
+        pbpFrontierPrepCache = null;
+        groupCareerMode = false;
+        groupTrailHistory.clear();
+        window.__bl2d_groupCareerActive = false;
+        syncGroupCareerToggle();
         showSmoothControls(false);
         refreshChart();
     }
     smoothToggle?.addEventListener("click", () => {
         if (pbpTimeline) disableSmooth(); else enableSmooth();
     });
+
+    // ── Group-career mode ───────────────────────────────────────────────────
+    // Reuses the entire smooth engine; sets the year window to the group's combined
+    // career span first, then turns on the cursor with groupCareerMode flagged.
+    const groupCareerToggle = document.getElementById("group-career-toggle");
+    async function enableGroupCareer() {
+        const span = groupCareerSpan(activeDatasetKey);
+        if (!span) return;
+        const sInput = document.getElementById("s-year-select");
+        const eInput = document.getElementById("e-year-select");
+        sInput.value = String(Math.max(parseInt(sInput.min) || span.lo, span.lo));
+        eInput.value = String(Math.min(parseInt(eInput.max) || span.hi, span.hi));
+        groupCareerMode = true;
+        groupTrailHistory.clear();
+        if (pbpTimeline) disableSmoothQuiet();
+        await enableSmooth(0);                 // start at the group's earliest debut
+        // Warm the first few seasons so pressing play from the start doesn't stall on
+        // "Loading <year>…"; the per-frame pbpEnsureAhead keeps the rest loaded.
+        if (pbpTimeline) pbpEnsureAhead(pbpTimeline, 0, 5);
+        syncGroupCareerToggle();
+    }
+    // Tear down the timeline without resetting groupCareerMode (used when rebuilding
+    // the span after the group changes, so the flag survives the rebuild).
+    function disableSmoothQuiet() {
+        stopPbpPlay();
+        pbpTimeline = null;
+        pbpExtentCache = null;
+        pbpCompletedCache = null;
+        pbpFrontierPrepCache = null;
+    }
+    // Rebuild the timeline span after the group membership changes mid-animation.
+    window.__bl2d_rebuildGroupCareer = null;
+    async function rebuildGroupCareer() {
+        groupTrailHistory.clear();
+        await enableGroupCareer();
+    }
+    window.__bl2d_rebuildGroupCareer = rebuildGroupCareer;
+    groupCareerToggle?.addEventListener("click", () => {
+        if (groupCareerMode) disableSmooth();
+        else enableGroupCareer();
+    });
+
     scrubber?.addEventListener("input", () => {
         if (!pbpTimeline) return;
         stopPbpPlay();
         pbpCursorIdx = parseInt(scrubber.value) || 0;
+        // Keep trails causal on a backward scrub: drop positions recorded ahead of
+        // the new cursor so the comet-tail never points "into the future".
+        if (groupCareerMode) {
+            for (const [pid, hist] of groupTrailHistory) {
+                groupTrailHistory.set(pid, hist.filter(e => e.cursor <= pbpCursorIdx));
+            }
+        }
         syncScrubber();
         refreshChart();
     });
@@ -1221,7 +1436,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         enableSmooth().then(() => {                        // builds the timeline + lands the year
             if (!pbpTimeline) return;
             const yi = pbpTimeline.years.findIndex((e) => e.year === year);
-            if (yi < 0 || pbpTimeline.years[yi].status !== "covered") return;
+            if (yi < 0 || pbpTimeline.years[yi].status !== "covered" || !pbpTimeline.years[yi].decoded) return;
             const within = pbpNearestDateIdx(pbpTimeline.years[yi].decoded.dates, pbpYmdToDay(ymd));
             pbpCursorIdx = pbpGlobalFor(pbpTimeline, yi, within);
             syncScrubber();
@@ -1603,7 +1818,7 @@ function writeUrlState(state) {
             t: (() => {
                 if (!pbpTimeline) return "";
                 const e = pbpTimeline.years[pbpTimeline.openYearIdx];
-                if (!e || e.status !== "covered") return "";
+                if (!e || e.status !== "covered" || !e.decoded) return "";   // decoded may be released to bound memory
                 const { withinIdx } = pbpResolveGlobal(pbpTimeline, pbpCursorIdx);
                 return pbpDayToYmd(e.year, e.decoded.dates[withinIdx]);
             })(),
@@ -1964,7 +2179,7 @@ function buildExportSvgString() {
         "paint-order", "font-family", "font-size", "font-weight", "text-anchor",
     ];
     // Interaction-only / affordance layers don't belong in a static image.
-    const DROP = ".hit, .zoom-overlay, .brush, .axis-caret, .isolation-ring-group, .regret-line-group";
+    const DROP = ".hit, .hit-surface, .zoom-overlay, .brush, .axis-caret, .isolation-ring-group, .regret-line-group";
     const srcNodes = [svg, ...svg.querySelectorAll("*")];
     const dstNodes = [clone, ...clone.querySelectorAll("*")];
     const toRemove = [];
@@ -1981,9 +2196,143 @@ function buildExportSvgString() {
     }
     toRemove.forEach((n) => n.remove());
 
+    // Canvas carries the high-cardinality point layers. Embed transparent PNGs
+    // behind the SVG overlay so SVG download and share-preview rasterisation keep
+    // the complete chart instead of labels/axes only.
+    const firstChild = clone.firstChild;
+    for (const canvas of [chartCanvasLayers?.bg, chartCanvasLayers?.fg]) {
+        if (!canvas) continue;
+        const img = document.createElementNS("http://www.w3.org/2000/svg", "image");
+        img.setAttribute("x", "0");
+        img.setAttribute("y", "0");
+        img.setAttribute("width", Math.round(width));
+        img.setAttribute("height", Math.round(height));
+        img.setAttribute("href", canvas.toDataURL("image/png"));
+        clone.insertBefore(img, firstChild);
+    }
+
     let svgStr = new XMLSerializer().serializeToString(clone);
     // The SVG's own background can't be captured as a presentation property.
     return svgStr.replace(/(<svg[^>]*>)/, `$1<style>svg{background:${bg};}</style>`);
+}
+
+function ensureChartCanvasLayers(width, height) {
+    const region = document.querySelector(".chart-region");
+    const svg = document.getElementById("scatter-plot");
+    if (!region || !svg) return null;
+    if (!chartCanvasLayers) {
+        const bg = document.createElement("canvas");
+        const fg = document.createElement("canvas");
+        bg.className = "plot-canvas plot-canvas--background";
+        fg.className = "plot-canvas plot-canvas--foreground";
+        bg.setAttribute("aria-hidden", "true");
+        fg.setAttribute("aria-hidden", "true");
+        region.insertBefore(bg, svg);
+        region.insertBefore(fg, svg);
+        chartCanvasLayers = { bg, fg };
+    }
+    const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 3));
+    for (const canvas of [chartCanvasLayers.bg, chartCanvasLayers.fg]) {
+        const bw = Math.max(1, Math.round(width * dpr));
+        const bh = Math.max(1, Math.round(height * dpr));
+        if (canvas.width !== bw || canvas.height !== bh) {
+            canvas.width = bw;
+            canvas.height = bh;
+        }
+        canvas.style.width = `${width}px`;
+        canvas.style.height = `${height}px`;
+    }
+    chartCanvasLayers.dpr = dpr;
+    chartCanvasLayers.width = width;
+    chartCanvasLayers.height = height;
+    return chartCanvasLayers;
+}
+
+function clearChartCanvasLayers() {
+    if (!chartCanvasLayers) return;
+    chartCanvasBgCacheKey = null;
+    for (const canvas of [chartCanvasLayers.bg, chartCanvasLayers.fg]) {
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+}
+
+function drawCanvasPointLayer(canvas, points, opts) {
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const dpr = chartCanvasLayers?.dpr || 1;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const { margin, xScale, yScale, radius, fillFor, alpha = 1, alphaFor = null, strokeFor = null, strokeWidth = 0, clear = true } = opts;
+    // clear=false lets a caller composite dots ON TOP of an under-layer it already
+    // drew on this same canvas (group-career: trails first, then head-dots).
+    if (clear) ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
+    if (!points || !points.length) return;
+    for (const d of points) {
+        const cx = margin.left + xScale(d.x);
+        const cy = margin.top + yScale(d.y);
+        if (!isFinite(cx) || !isFinite(cy)) continue;
+        ctx.globalAlpha = alphaFor ? alphaFor(d) : alpha;
+        ctx.beginPath();
+        ctx.arc(cx, cy, typeof radius === "function" ? radius(d) : radius, 0, Math.PI * 2);
+        ctx.fillStyle = fillFor(d);
+        ctx.fill();
+        const stroke = strokeFor && strokeFor(d);
+        if (stroke && strokeWidth > 0) {
+            ctx.globalAlpha = 1;
+            ctx.lineWidth = strokeWidth;
+            ctx.strokeStyle = stroke;
+            ctx.stroke();
+        }
+    }
+    ctx.globalAlpha = 1;
+}
+
+// Group-career trails: for each player, stroke their recent career positions as a
+// poly-line whose alpha ramps 0→1 from oldest to newest, so the head pulls a short
+// fading comet-tail. Positions are stored as DATA coords (so zoom/pan re-projects);
+// caller clears the canvas first, then draws trails, then composites the head-dots.
+function drawCanvasTrails(canvas, trails, opts) {
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const dpr = chartCanvasLayers?.dpr || 1;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const { margin, xScale, yScale, width = 2 } = opts;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = width;
+    for (const { color, points } of trails) {
+        if (!points || points.length < 2) continue;
+        const n = points.length;
+        for (let i = 1; i < n; i++) {
+            const a = points[i - 1], b = points[i];
+            const ax = margin.left + xScale(a.x), ay = margin.top + yScale(a.y);
+            const bx = margin.left + xScale(b.x), by = margin.top + yScale(b.y);
+            if (![ax, ay, bx, by].every(isFinite)) continue;
+            ctx.globalAlpha = (i / (n - 1)) * 0.85;   // oldest faint → newest near-opaque
+            ctx.strokeStyle = color;
+            ctx.beginPath();
+            ctx.moveTo(ax, ay);
+            ctx.lineTo(bx, by);
+            ctx.stroke();
+        }
+    }
+    ctx.globalAlpha = 1;
+}
+
+function recordPbpFrameTiming(totalMs, modelMs, renderMs, enabled) {
+    if (!enabled) return;
+    const samples = (window.__bl2d_pbpFrameMs?.samples || []).slice(-179);
+    samples.push(totalMs);
+    const sorted = [...samples].sort((a, b) => a - b);
+    const pct = (p) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))] : 0;
+    window.__bl2d_pbpFrameMs = {
+        samples,
+        p50: pct(0.50),
+        p95: pct(0.95),
+        last: totalMs,
+        lastModel: modelMs,
+        lastRender: renderMs,
+    };
 }
 
 function exportChartSVG() {
@@ -2543,6 +2892,18 @@ function syncPlayerHint() {
         search.placeholder = full ? "Max 6 players" : "Search…";
         search.value = "";
     }
+    syncGroupCareerToggle();
+}
+
+// Show the "Group careers" toggle only once the user has selected ≥1 player (the
+// group to animate); reflect the on/off state. Top-level so syncPlayerHint (called
+// on every group change) keeps it in sync.
+function syncGroupCareerToggle() {
+    const btn = document.getElementById("group-career-toggle");
+    if (!btn) return;
+    btn.hidden = careerHighlights.size < 1;
+    btn.classList.toggle("active", groupCareerMode);
+    btn.setAttribute("aria-pressed", String(groupCareerMode));
 }
 
 function setupPaPresets() {
@@ -2575,6 +2936,7 @@ function setupYearPresets() {
 
 
 function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode = "season", filters = {}) {
+    const frameStart = performance.now();
     // Any open axis-stat menu is anchored to the (about to be replaced) titles.
     closeAxisStatMenu();
     const svg = d3.select("#scatter-plot");
@@ -2644,6 +3006,32 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     let ySign = datasetDef.lowerIsBetter?.has(yDim) ? -1 : 1;
     if (showWorstFrontier) { xSign *= -1; ySign *= -1; }
 
+    const sortFrontierRows = (a, b) => {
+        const ax = a.x * xSign, bx = b.x * xSign;
+        const ay = a.y * ySign, by = b.y * ySign;
+        if (ax !== bx) return ax - bx;
+        if (ay !== by) return ay - by;
+        return b.year - a.year; // prefer more recent on ties
+    };
+
+    const toFrontierRow = (p) => {
+        const x = p[xDim];
+        const y = p[yDim];
+        if (isNaN(x) || isNaN(y)) return null;
+        if (p[thresholdField] < minPa) return null;
+        return {
+            x, y,
+            year: p.yearID,
+            yearLast: p.yearLast || p.yearID,
+            seasonsCount: p.seasonsCount || 1,
+            PA: p[thresholdField],
+            playerID: p.playerID,
+            teamID: p.teamID,
+            lgID: p.lgID,
+            orig: p,  // for size-by lookups (PA / G / AB)
+        };
+    };
+
     // Full pipeline — filter → (career aggregate) → threshold → sort → dedup →
     // Pareto sweep — parameterised by a season-match predicate, so we can build
     // both the active (attribute-filtered) frontier and the "global" reference
@@ -2669,30 +3057,11 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
 
         const flt = [];
         for (const p of workingPoints) {
-            const x = p[xDim];
-            const y = p[yDim];
-            if (isNaN(x) || isNaN(y)) continue;
-            if (p[thresholdField] < minPa) continue;
-            flt.push({
-                x, y,
-                year: p.yearID,
-                yearLast: p.yearLast || p.yearID,
-                seasonsCount: p.seasonsCount || 1,
-                PA: p[thresholdField],
-                playerID: p.playerID,
-                teamID: p.teamID,
-                lgID: p.lgID,
-                orig: p,  // for size-by lookups (PA / G / AB)
-            });
+            const row = toFrontierRow(p);
+            if (row) flt.push(row);
         }
 
-        flt.sort((a, b) => {
-            const ax = a.x * xSign, bx = b.x * xSign;
-            const ay = a.y * ySign, by = b.y * ySign;
-            if (ax !== bx) return ax - bx;
-            if (ay !== by) return ay - by;
-            return b.year - a.year; // prefer more recent on ties
-        });
+        flt.sort(sortFrontierRows);
 
         // Deduplicate exact (x, y) collisions for the rendering pass.
         const uniq = [];
@@ -2706,6 +3075,57 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         const fr = sweepFrontier(uniq);
 
         return { filtered: flt, unique: uniq, frontier: fr };
+    }
+
+    function mergeSortedFrontierRows(a, b) {
+        const out = [];
+        let i = 0, j = 0;
+        while (i < a.length || j < b.length) {
+            if (j >= b.length || (i < a.length && sortFrontierRows(a[i], b[j]) <= 0)) out.push(a[i++]);
+            else out.push(b[j++]);
+        }
+        return out;
+    }
+
+    function frontierFromSortedRows(flt) {
+        const uniq = [];
+        for (let i = 0; i < flt.length; i++) {
+            const p = flt[i];
+            if (i === 0 || p.x !== flt[i - 1].x || p.y !== flt[i - 1].y) uniq.push(p);
+        }
+        return { filtered: flt, unique: uniq, frontier: sweepFrontier(uniq) };
+    }
+
+    function buildSmoothActiveFrontier() {
+        if (mode !== "season" || !filters.smooth) return null;
+        const openYear = eYear;
+        const prepKey = [
+            datasetKey, sYear, openYear, xDim, yDim, minPa,
+            league, bats, country, franchise, handField, xSign, ySign,
+        ].join("|");
+        let completedRows;
+        if (pbpFrontierPrepCache?.key === prepKey) {
+            completedRows = pbpFrontierPrepCache.filtered;
+        } else {
+            completedRows = [];
+            for (const p of points) {
+                if (p.yearID < sYear || p.yearID >= openYear) continue;
+                if (!attrMatches(p)) continue;
+                const row = toFrontierRow(p);
+                if (row) completedRows.push(row);
+            }
+            completedRows.sort(sortFrontierRows);
+            pbpFrontierPrepCache = { key: prepKey, filtered: completedRows };
+        }
+        const openRows = [];
+        for (const p of points) {
+            if (p.yearID !== openYear) continue;
+            if (!attrMatches(p)) continue;
+            const row = toFrontierRow(p);
+            if (row) openRows.push(row);
+        }
+        openRows.sort(sortFrontierRows);
+        return frontierFromSortedRows(mergeSortedFrontierRows(completedRows, openRows));
     }
 
     // Left-to-right best-in-class envelope over an already-sorted, deduped array.
@@ -2784,9 +3204,23 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     window.__bl2d_computeHv = computeHvContributions;
 
     renderFrontierCards(frontier, xDim, yDim, formatStat, filtered.length, mode, hvByPoint);
-    renderPlayerSpotlight(frontier, hvByPoint, xDim, yDim, formatStat, mode);
+    // Group-career: hide the auto-spotlight cards — with every group member "on the
+    // frontier" they stack and overlap; the on-chart trails + labels are the story.
+    if (filters.groupCareer) {
+        const psLayer = document.getElementById("player-spotlight");
+        if (psLayer) { psLayer.innerHTML = ""; psLayer.hidden = true; }
+    } else {
+        renderPlayerSpotlight(frontier, hvByPoint, xDim, yDim, formatStat, mode);
+    }
+
+    const svgEl = document.getElementById("scatter-plot");
+    const rect = svgEl.getBoundingClientRect();
+    const width = rect.width;
+    const height = rect.height;
+    const canvasLayers = ensureChartCanvasLayers(width, height);
 
     if (unique.length === 0) {
+        clearChartCanvasLayers();
         svg.append("text")
             .attr("x", "50%").attr("y", "50%")
             .attr("text-anchor", "middle").attr("dominant-baseline", "middle")
@@ -2796,11 +3230,6 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             .text("No seasons match these filters — try widening the year range or lowering the minimum.");
         return;
     }
-
-    const svgEl = document.getElementById("scatter-plot");
-    const rect = svgEl.getBoundingClientRect();
-    const width = rect.width;
-    const height = rect.height;
 
     const margin = { top: 24, right: 24, bottom: 44, left: 56 };
     const plotW = Math.max(40, width - margin.left - margin.right);
@@ -2879,6 +3308,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const xScale = d3.scaleLinear().domain(xDomain).nice().range([0, plotW]);
     const yScale = d3.scaleLinear().domain(yDomain).nice().range([plotH, 0]);
     updateZoomResetEnabled();
+    const modelReady = performance.now();
 
     const g = svg.append("g")
         .attr("transform", `translate(${margin.left}, ${margin.top})`);
@@ -3006,7 +3436,10 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         }
     }
 
-    if (frontier.length > 0) {
+    // Group-career suppresses the staircase + HV shade: with only a handful of
+    // career dots tracing trajectories, the Pareto envelope clutters more than it
+    // clarifies — the focus is the trails + heads.
+    if (frontier.length > 0 && !filters.groupCareer) {
         const line = staircaseScreen(frontier);
 
         // Hypervolume shading: gradient fill of the dominated region beneath the
@@ -3145,15 +3578,34 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const special = unique.filter(d => frontierSet.has(d));
 
     const cloudOpacity = careerHighlights.size > 0 ? 0.1 : themeCloudOpacity;
-    g.append("g").selectAll("circle.regular-point")
-        .data(regular).enter()
-        .append("circle")
-        .attr("class", "regular-point")
-        .attr("cx", d => xScale(d.x))
-        .attr("cy", d => yScale(d.y))
-        .attr("r", pointRadius)
-        .attr("fill", d => colorOf(d, colorBy, getMeta))
-        .style("fill-opacity", cloudOpacity);
+    const smoothOpenYear = filters.smooth ? eYear : null;
+    const backgroundPoints = filters.groupCareer
+        ? []                                       // group-career: focus is the group + trails, no cloud
+        : filters.smooth
+        ? unique.filter(d => d.year < smoothOpenYear)
+        : regular;
+    const foregroundCloudPoints = filters.smooth
+        ? regular.filter(d => d.year >= smoothOpenYear)
+        : [];
+    const bgKey = [
+        filters.smooth ? "smooth" : "static",
+        smoothOpenYear ?? "all",
+        document.documentElement.dataset.theme || "",
+        sYear, eYear, mode, datasetKey, minPa, league, bats, country, franchise,
+        xDim, yDim, colorBy, cloudOpacity, pointRadius,
+        xScale.domain().join(","), yScale.domain().join(","),
+        width, height, chartCanvasLayers?.dpr || 1,
+        backgroundPoints.length,
+    ].join("|");
+    if (chartCanvasBgCacheKey !== bgKey) {
+        drawCanvasPointLayer(canvasLayers?.bg, backgroundPoints, {
+            margin, xScale, yScale,
+            radius: pointRadius,
+            fillFor: d => colorOf(d, colorBy, getMeta),
+            alpha: cloudOpacity,
+        });
+        chartCanvasBgCacheKey = bgKey;
+    }
 
     // Career-highlight layer: dots only (no connecting line — the
     // year-order trail tended to add zigzag noise more than it clarified
@@ -3167,6 +3619,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // their highlight colour + a frontier label, so we skip the extra label there.)
     // Outside smooth mode we fall back to the player's full-career season dots.
     const highlightLabels = [];
+    const highlightDrawPoints = [];
     if (careerHighlights.size > 0) {
         for (const [pid, hcolor] of careerHighlights) {
             let pts;
@@ -3175,8 +3628,22 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                 pts = filtered.filter(d => d.playerID === pid && !isNaN(d.x) && !isNaN(d.y));
                 if (pts.length) {
                     const live = pts.reduce((a, b) => (b.year >= a.year ? b : a));
+                    // Group-career: every member always carries a name label (there's
+                    // no red frontier to label them) and records a trail position.
                     const onFrontier = frontier.some(fp => fp.playerID === pid && fp.year === live.year);
-                    if (!onFrontier) highlightLabels.push({ x: xScale(live.x), y: yScale(live.y), text: lastNameOf(pid), color: hcolor });
+                    if (filters.groupCareer || !onFrontier) highlightLabels.push({ x: xScale(live.x), y: yScale(live.y), text: lastNameOf(pid), color: hcolor });
+                    if (filters.groupCareer) {
+                        // Append the player's current career position to its trail, but
+                        // only when the cursor has strictly advanced — the play loop and
+                        // FLIP both re-draw the same cursor, which would dup points.
+                        const hist = groupTrailHistory.get(pid) || [];
+                        const last = hist[hist.length - 1];
+                        if (!last || pbpCursorIdx > last.cursor) {
+                            hist.push({ x: live.x, y: live.y, cursor: pbpCursorIdx });
+                            if (hist.length > GROUP_TRAIL_LEN) hist.shift();
+                            groupTrailHistory.set(pid, hist);
+                        }
+                    }
                 }
             } else if (playerIndex && playerIndex.has(pid)) {
                 pts = playerIndex.get(pid)
@@ -3186,36 +3653,55 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                 pts = [];
             }
             if (!pts.length) continue;
-            g.append("g").attr("class", "career-trail")
-                .selectAll("circle")
-                .data(pts).enter()
-                .append("circle")
-                .attr("class", "career-point")
-                .attr("cx", d => xScale(d.x))
-                .attr("cy", d => yScale(d.y))
-                .attr("r", Math.max(pointRadius + 3, 6))
-                .style("fill", hcolor)
-                .style("stroke", "#ffffff");
+            for (const p of pts) highlightDrawPoints.push({ ...p, _highlightColor: hcolor });
         }
     }
 
     const frontierColor = showWorstFrontier ? "#8b5cf6" : null;  // purple for worst, red (CSS) for best
-    g.append("g").selectAll("circle.special-point")
-        .data(special).enter()
-        .append("circle")
-        .attr("class", "special-point")
-        .attr("cx", d => xScale(d.x))
-        .attr("cy", d => yScale(d.y))
-        .attr("r", radiusFor)
-        .style("fill", d => {
+    // Group-career: paint the fading trails on the fg canvas FIRST (clearing it), then
+    // composite the head-dots on top (clear:false) so heads always sit over their tails.
+    if (filters.groupCareer && canvasLayers?.fg) {
+        const fgctx = canvasLayers.fg.getContext("2d");
+        const dpr = chartCanvasLayers?.dpr || 1;
+        fgctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        fgctx.clearRect(0, 0, canvasLayers.fg.width / dpr, canvasLayers.fg.height / dpr);
+        const trails = [...careerHighlights].map(([pid, color]) => ({ color, points: groupTrailHistory.get(pid) || [] }));
+        drawCanvasTrails(canvasLayers.fg, trails, { margin, xScale, yScale, width: 2.5 });
+    }
+    const foregroundDrawPoints = foregroundCloudPoints.map(d => ({ ...d, _regularCloud: true }))
+        .concat(highlightDrawPoints);
+    const headRadius = filters.groupCareer ? 7 : Math.max(pointRadius + 3, 6);
+    drawCanvasPointLayer(canvasLayers?.fg, foregroundDrawPoints, {
+        margin, xScale, yScale,
+        radius: d => d._regularCloud ? pointRadius : headRadius,
+        fillFor: d => d._regularCloud ? colorOf(d, colorBy, getMeta) : d._highlightColor,
+        alpha: 1,
+        alphaFor: d => d._regularCloud ? cloudOpacity : 1,
+        strokeFor: d => d._regularCloud ? null : "#ffffff",
+        strokeWidth: 1.5,
+        clear: !filters.groupCareer,               // keep the trails drawn just above
+    });
+    if (!filters.groupCareer && canvasLayers?.fg) {
+        const ctx = canvasLayers.fg.getContext("2d");
+        const dpr = chartCanvasLayers?.dpr || 1;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        for (const d of special) {
+            const cx = margin.left + xScale(d.x);
+            const cy = margin.top + yScale(d.y);
+            if (!isFinite(cx) || !isFinite(cy)) continue;
+            ctx.beginPath();
+            ctx.arc(cx, cy, radiusFor(d), 0, Math.PI * 2);
             const careerColor = careerHighlights.get(d.playerID);
-            if (careerColor) return careerColor;
-            if (frontierColor) return frontierColor;          // worst-mode purple
+            ctx.fillStyle = careerColor || frontierColor || colorOf(d, colorBy, getMeta);
+            ctx.fill();
             // Follow the active Color-by encoding (era / league / bats), same as
             // the cloud — frontier dots stay distinct via size + the white ring,
             // not a fixed color, so the encoding isn't misrepresented.
-            return colorOf(d, colorBy, getMeta);
-        });
+            ctx.lineWidth = 1.5;
+            ctx.strokeStyle = "#ffffff";
+            ctx.stroke();
+        }
+    }
 
     // FLIP: animate dots from their previous screen positions to the new ones.
     // Hit circles (tooltip targets) are updated instantly — they must match the
@@ -3241,8 +3727,10 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     }
 
     // Fade in staircase and shade on interactive changes only — during animation
-    // playback the boundary updates every 400ms so fading from 0 each tick strobes.
-    if (FLIP_DURATION > 0 && !animTimer) {
+    // playback the boundary updates every tick, so fading from 0 each time strobes.
+    // This applies to BOTH the old ▶ animation (animTimer) and the smooth/group-career
+    // cursor (filters.smooth, driven by pbpRaf) — suppress the fade in either.
+    if (FLIP_DURATION > 0 && !animTimer && !filters.smooth) {
         const newStair = svg.select("path.frontier-staircase");
         const newStairD = newStair.node() ? newStair.node().getAttribute("d") : null;
         newStair
@@ -3279,7 +3767,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // constant size set by pointRadius+3 so the gold layer remains a clean
     // per-season encoding.
     const labelRadius = hvEncodingEnabled ? FRONTIER_R_MAX : frontierRadius;
-    const labels = layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, labelRadius, width < 480);
+    // Group-career members are labelled by their own persistent name labels below,
+    // so skip the frontier-label layout (there's no visible frontier in this mode).
+    const labels = filters.groupCareer ? [] : layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, labelRadius, width < 480);
     // Leader lines for dodged labels (drawn under the text).
     g.append("g")
         .attr("class", "frontier-leaders")
@@ -3344,8 +3834,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const regretGroup = g.append("g").attr("class", "regret-line-group");
 
     // When players are career-highlighted, show the combined polygon for what
-    // the frontier loses if all their seasons were removed.
-    if (careerHighlights.size > 0) {
+    // the frontier loses if all their seasons were removed. Skipped in group-career
+    // mode — there's no background frontier to measure "loss" against there.
+    if (careerHighlights.size > 0 && !filters.groupCareer) {
         const highlightedPids = new Set(careerHighlights.keys());
         const frSeasons = frontier.filter(p => highlightedPids.has(p.playerID));
         if (frSeasons.length > 0) {
@@ -3508,27 +3999,53 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             .on("mouseup.cursor",   function() { this.style.cursor = "grab"; });
     }
 
-    g.append("g").selectAll("circle.hit")
-        .data(unique).enter()
-        .append("circle")
-        .attr("class", "hit")
-        .attr("cx", d => xScale(d.x))
-        .attr("cy", d => yScale(d.y))
-        .attr("r", hoverRadius)
+    const hitPoints = unique.map(d => ({ ...d, sx: xScale(d.x), sy: yScale(d.y), ref: d }));
+    const hitTree = d3.quadtree()
+        .x(d => d.sx)
+        .y(d => d.sy)
+        .addAll(hitPoints);
+    let hoverTarget = null;
+    const nearestHit = (event, node) => {
+        const [mx, my] = d3.pointer(event, node);
+        const hit = hitTree.find(mx, my, hoverRadius);
+        return hit ? hit.ref : null;
+    };
+    const hitSurface = g.append("rect")
+        .attr("class", "hit-surface")
+        .attr("width", plotW)
+        .attr("height", plotH)
         .attr("fill", "transparent")
-        .style("cursor", "pointer")
-        .on("mouseover", showTooltip)
-        .on("mousemove", (event) => positionTooltip(event, tooltip))
-        .on("mouseout", hideTooltip)
-        .on("touchstart", showTooltip, { passive: true })
-        .on("click", (event, d) => {
+        .style("cursor", "default")
+        .on("mousemove", function(event) {
+            const d = nearestHit(event, this);
+            hoverTarget = d;
+            this.style.cursor = d ? "pointer" : "default";
+            if (d) showTooltip(event, d);
+            else hideTooltip();
+        })
+        .on("mouseleave", () => {
+            hoverTarget = null;
+            hideTooltip();
+        })
+        .on("touchstart", function(event) {
+            const d = nearestHit(event, this);
+            if (d) showTooltip(event, d);
+            else hideTooltip();
+        }, { passive: true })
+        .on("click", function(event) {
+            const d = nearestHit(event, this) || hoverTarget;
+            if (!d) {
+                hideTooltip(true);
+                return;
+            }
             tooltipPinned = true;
             event.stopPropagation();
             if (frontierSet.has(d)) {
                 // Clear any hover ring when clicking
                 ringGroup.selectAll(".isolation-ring--hover").remove();
-                // Season mode: also add career highlight
-                if (mode === "season") {
+                // Season mode: also add career highlight (not in group-career —
+                // the clicked head is already a member; tooltip is enough there).
+                if (mode === "season" && !filters.groupCareer) {
                     const seasons = filtered
                         .filter(p => p.x === d.x && p.y === d.y)
                         .sort((a, b) => b.year - a.year);
@@ -3545,6 +4062,8 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     document.addEventListener("touchstart", (event) => {
         if (!event.target.closest("#scatter-plot")) hideTooltip();
     }, { passive: true });
+    const frameEnd = performance.now();
+    recordPbpFrameTiming(frameEnd - frameStart, modelReady - frameStart, frameEnd - modelReady, !!filters.smooth);
 }
 
 

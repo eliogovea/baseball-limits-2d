@@ -365,7 +365,21 @@ html[data-theme="dark"] select.field {
     height: 100%;
     display: block;
     max-width: 100%;
+    position: absolute;
+    inset: 0;
+    z-index: 2;
 }
+
+.plot-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 1;
+    pointer-events: none;
+}
+
+.plot-canvas--foreground { z-index: 1; }
 
 .regular-point {
     fill-opacity: 0.4;
@@ -2334,8 +2348,11 @@ input[type="number"].field::-webkit-outer-spin-button {
 }
 
 /* Smooth (game-by-game) cursor row: a Retrosheet sub-season scrubber. */
-.ctl-smooth-row { gap: 8px; align-items: center; }
-.ctl-smooth-row .pbp-scrubber { flex: 1 1 auto; min-width: 0; accent-color: var(--mlb-red); }
+.ctl-smooth-row { gap: 8px; align-items: center; flex-wrap: wrap; }
+/* With the group-career toggle added, the row can hold two buttons + scrubber +
+   date; wrap so the scrubber drops to its own full-width line when crowded. */
+.ctl-smooth-row #group-career-toggle { white-space: nowrap; }
+.ctl-smooth-row .pbp-scrubber { flex: 1 1 100%; min-width: 0; accent-color: var(--mlb-red); }
 .ctl-smooth-row .pbp-date {
     font-size: 11px;
     color: var(--text-muted, #667);

@@ -160,6 +160,26 @@ UI, not a parallel system.
 
 ## 5. Phasing
 
+> **Status (group-career session).** Phases 1, 2 (render side), and 4 are
+> **implemented** on branch `pbp-animation`:
+> - **Phase 1 — done.** The point cloud is drawn on a Canvas (`chartCanvasLayers`
+>   {bg,fg}, `drawCanvasPointLayer`); hit-testing moved to `d3-quadtree`; SVG/PNG
+>   export rasterizes the canvas. (Pragmatic: a direct `drawCanvasPointLayer` rather
+>   than the formal `PointRenderer` interface — the abstraction can be lifted later
+>   if/when the WebGPU track happens.) Wide-window draw fell from ~90 ms to a few ms.
+> - **Phase 2 — render-side split done; incremental-frontier math pending.** The
+>   background canvas is cached by `bgKey` and only redrawn when the open year/filters
+>   change; `pbpCompletedCache` caches completed-season points. The Pareto sweep still
+>   runs full each frame (cheap at current N), so the incremental-frontier merge is the
+>   remaining Phase-2 item.
+> - **Phase 4 — done.** Group-career mode ships: `groupCareerMode` + a "Group careers"
+>   toggle, the per-frame builder `pbpBuildGroupCareer` (career = `aggregateCareer`(prior
+>   full seasons + open PBP partial)), `groupTrailHistory` fading trails on the fg canvas,
+>   and a group-aware `pbpComputeExtent`. Frame p95 ≈ 2 ms. Phase 3 (the formal
+>   point-builder strategy refactor) was done **inline** rather than as a standalone
+>   pass — `refreshChart` branches between the accumulating and group-career builders.
+> - **Phase 5 (WebGPU)** — not started; still optional/learning-track.
+
 0. **(Shipped) Persistent selected-player highlight + name label** in the smooth
    sweep — a selected player (e.g. Ohtani) is highlighted and named from the moment
    their season opens, even before they reach the frontier, using the live as-of
