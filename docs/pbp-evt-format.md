@@ -11,12 +11,24 @@ instant full-history scrubbing with no per-season streaming.
 Built by [`scripts/build_stat_streams.js`](../scripts/build_stat_streams.js) from the
 committed `data/pbp/b*.bl2p.gz` corpus. Consumed by **both**:
 - the standalone demo [`evt-demo.html`](../evt-demo.html) / [`evt-demo.js`](../evt-demo.js); and
-- **the main app** — when the Smooth toggle is on and both chart axes are counting
-  stats with `.evt` streams, `script.js` routes the cursor through the resident `.evt`
-  path (full-history scrub, no per-season `.bl2p` streaming) instead of the season
-  engine. The eligible set is `EVT_STATS` in `script.js`, kept in sync with the
-  `DEFAULT_STATS` this builder emits. Rate stats (AVG, OBP, …) and any pair with a
-  non-streamed stat fall back to the `.bl2p` season path.
+- **the main app** — when Smooth is on and both axes are `.evt`-eligible (a streamed
+  counting stat in `EVT_STATS`, or a derived stat in `EVT_DERIVED` whose components are
+  all streamed), `script.js` runs the cursor over the resident `.evt` streams for all of
+  history. The Season/Career toggle picks what a point is:
+  - **Career** — one cumulative-career point per player, as of the cursor date (all
+    move each frame → one foreground canvas; axes lock to career maxima).
+  - **Season** — one point per player per *season*: completed seasons sit at their full
+    Lahman totals (`data.points`, static → cached background canvas), the open season
+    grows game-by-game from `.evt` (foreground). The per-frame frontier is incremental
+    (`buildSmoothActiveFrontier` caches the completed-season sort, merges only the open
+    season). Watching a season's point move is the "play-by-play" view.
+
+  Performance: a "lite" path (`smoothLite`, set while playing/scrubbing) skips the
+  interaction-only work — hypervolume contributions, frontier cards, spotlight,
+  isolation rings, the hover quadtree — and a full interactive render fires when the
+  cursor goes idle. Career frames ≈ 6 ms; season ≈ 11 ms (≈40 ms at a year boundary,
+  when the completed-season slice re-sorts). Pairs that aren't `.evt`-eligible fall back
+  to the per-season `.bl2p` path.
 
 ```
 node scripts/build_stat_streams.js          # rebuilds the committed set (HR SB H 2B 3B RBI R BB SO CS)

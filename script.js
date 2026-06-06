@@ -291,6 +291,8 @@ let groupCareerMode = false;    // group-career animation: the selected players'
 let groupTrailHistory = new Map(); // playerID → [{x,y,cursor}] recent career positions (DATA coords) for the fading trail
 const GROUP_TRAIL_LEN = 40;     // max retained positions per player in a group-career trail (~ the last few seconds at 15fps)
 let pbpEvt = null;              // resident .evt full-history model (one counting-stat pair) when active, else null
+let smoothLite = false;        // while playing/scrubbing: skip interaction-only work (HV, cards, rings, quadtree) for demo-smooth frames; a full render fires when idle
+let smoothLiteTimer = null;    // debounce → full (interactive) render after the user stops scrubbing
 const evtStreamCache = new Map(); // stat -> Promise<decoded STEV>  (resident once loaded)
 // Raw counting columns with committed data/pbp/<stat>.evt.gz streams. A chart axis is
 // .evt-eligible if it's one of these OR a derived stat (below) whose components all are.
@@ -898,6 +900,9 @@ function evtDimSpec(dim) {
     return EVT_STATS.has(dim) ? { deps: [dim], rate: false, fn: (c) => c[dim] } : null;
 }
 function evtEligible(xDim, yDim) {
+    // .evt drives BOTH modes over all history. Career: one career-cumulative point per
+    // player. Season: one point per player per season — completed seasons at their full
+    // (Lahman) totals from data.points, the open season growing game-by-game from .evt.
     return activeDatasetKey === "batting" && !!evtDimSpec(xDim) && !!evtDimSpec(yDim);
 }
 function decodeStev(buf) {
@@ -950,19 +955,22 @@ async function buildEvtModel(xDim, yDim) {
     const numDates = ref.numDates;
     const empty = { dates: new Uint16Array(0), cum: new Uint16Array(0) };
     const yearOf = new Int16Array(numDates); let g = 0;
-    for (const s of ref.seasons) for (let i = 0; i < s.nDates && g < numDates; i++) yearOf[g++] = s.year;
+    const seasonStartByYear = new Map();              // year → first global date index (for season-mode differencing)
+    for (const s of ref.seasons) { if (!seasonStartByYear.has(s.year)) seasonStartByYear.set(s.year, g); for (let i = 0; i < s.nDates && g < numDates; i++) yearOf[g++] = s.year; }
 
     // One record per player who appears in any needed stream: their component series,
-    // their debut year (for era colour), and a final-state value (for axis lock).
+    // their debut/last year (debut → era colour; both → season-mode active-window skip),
+    // and a final-state value (for axis lock).
     const names = new Set(); for (const d of depList) for (const k of streams[d].byName.keys()) names.add(k);
     const players = [];
     let xMax = 0, yMax = 0;
     const cEnd = {};
     for (const nm of names) {
-        const comp = {}; let debut = numDates;
-        for (const d of depList) { const s = streams[d].byName.get(nm) || empty; comp[d] = s; if (s.dates.length) debut = Math.min(debut, s.dates[0]); }
+        const comp = {}; let debut = numDates, last = 0;
+        for (const d of depList) { const s = streams[d].byName.get(nm) || empty; comp[d] = s; if (s.dates.length) { debut = Math.min(debut, s.dates[0]); last = Math.max(last, s.dates[s.dates.length - 1]); } }
         const debutYear = debut < numDates ? yearOf[debut] : ref.seasons[0].year;
-        players.push({ name: nm, comp, debutYear });
+        const lastYear = yearOf[last] || debutYear;
+        players.push({ name: nm, comp, debutYear, lastYear });
         // axis lock: career-end value; for rate axes only count players with enough PA
         // so a 3-for-3 cup-of-coffee 1.000 AVG doesn't blow out the frame.
         for (const d of depList) cEnd[d] = (comp[d].cum.length ? comp[d].cum[comp[d].cum.length - 1] : 0);
@@ -972,8 +980,30 @@ async function buildEvtModel(xDim, yDim) {
         if (isFinite(xv) && (!xs.rate || qual)) xMax = Math.max(xMax, xv);
         if (isFinite(yv) && (!ys.rate || qual)) yMax = Math.max(yMax, yv);
     }
-    return { xDim, yDim, xs, ys, usesPA: usesPA, depList, numDates, players, doy: ref.doy, yearOf,
+    return { xDim, yDim, xs, ys, usesPA: usesPA, depList, numDates, players, doy: ref.doy, yearOf, seasonStartByYear,
              xMax, yMax, minYear: ref.seasons[0].year, maxYear: ref.seasons[ref.seasons.length - 1].year };
+}
+// Season mode: one point per player for the OPEN season `O`, accumulated game-by-game to
+// date `d` (within-season = cumulative at d minus cumulative at the season's start). The
+// completed seasons (year < O) come from Lahman data.points, so this only builds the
+// growing open-season points (a few hundred active players).
+function evtOpenSeasonPoints(model, d, O) {
+    const start = model.seasonStartByYear.get(O);
+    if (start == null) return [];
+    const before = start - 1;
+    const rows = [], c = {};
+    for (const p of model.players) {
+        if (O < p.debutYear || O > p.lastYear) continue;   // player not active in O
+        let any = false;
+        for (const dep of model.depList) { const v = evtAsOf(p.comp[dep], d) - evtAsOf(p.comp[dep], before); c[dep] = v; if (v) any = true; }
+        if (!any) continue;                                 // no games yet in O by date d
+        const x = model.xs.fn(c), y = model.ys.fn(c);
+        if (!isFinite(x) || !isFinite(y)) continue;
+        if (!model.xs.rate && !model.ys.rate && x === 0 && y === 0) continue;
+        const pa = model.usesPA ? EVT_PA_DEPS.reduce((a, dep) => a + (c[dep] || 0), 0) : 1e9;
+        rows.push({ playerID: p.name, teamID: "—", lgID: "—", yearID: O, PA: pa, [model.xDim]: x, [model.yDim]: y });
+    }
+    return rows;
 }
 function evtAsOf(series, d) {                          // cumulative value as of global date d
     const a = series.dates; let lo = 0, hi = a.length - 1, ans = -1;
@@ -1071,12 +1101,15 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             mode === "career"
                 ? "Each dot is one player's career totals across the selected year window."
                 : "Each dot is one player's single season.";
-        refreshChart();
+        // Smooth on: the mode picks the engine (career→.evt full-history, season→.bl2p),
+        // so re-init to switch. Group-career is its own thing — leave it.
+        if (!groupCareerMode && (pbpTimeline || pbpEvt)) { stopAnimation(); disableSmooth(); enableSmooth(); }
+        else refreshChart();
     });
     setupModeToggle("stats-toggle", () => {
         // The smooth cursor is tied to one dataset's corpus; switching datasets
         // drops it (the pitching corpus / read path lands in a later phase).
-        if (pbpTimeline) disableSmooth();
+        if (pbpTimeline || pbpEvt) disableSmooth();
         activeDatasetKey = getActiveModeBtnData("stats-toggle", "stats") || "batting";
         playerIndex = datasetState[activeDatasetKey].playerIndex;
         clearHighlights();
@@ -1159,15 +1192,30 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         let sY = sYear, eY = eYear;
         let pbpExtent = null;
         let groupCareer = false;
-        let evtMode = false;
+        let evtCareer = false, evtSeason = false;
         if (pbpEvt) {
-            // Full-history .evt mode: every player's cumulative (xDim, yDim) as of the
-            // cursor date, straight from the resident streams. Axes lock to the all-time
-            // career maxima so the limits grow into a fixed frame across 1920–2025.
-            points = evtPointsAsOf(pbpEvt, pbpCursorIdx);
-            sY = pbpEvt.minYear; eY = pbpEvt.maxYear;
-            pbpExtent = { x: [0, pbpEvt.xMax], y: [0, pbpEvt.yMax] };
-            evtMode = true;
+            const cur = Math.max(pbpEvt.winStart, Math.min(pbpEvt.winEnd, pbpCursorIdx));
+            if (mode === "career") {
+                // Career: every player's cumulative (xDim,yDim) as of the cursor date —
+                // one point per player, all moving each frame. Axes lock to career maxima.
+                points = evtPointsAsOf(pbpEvt, cur);
+                sY = pbpEvt.minYear; eY = pbpEvt.maxYear;
+                pbpExtent = { x: [0, pbpEvt.xMax], y: [0, pbpEvt.yMax] };
+                evtCareer = true;
+            } else {
+                // Season: one point per player per season. Completed seasons (year < open)
+                // sit at their full Lahman totals (data.points, static → cached on the bg
+                // canvas); the open season's point grows game-by-game from the .evt streams.
+                const O = pbpEvt.yearOf[cur];
+                const completedKey = `evtS|${activeDatasetKey}|${pbpEvt.winStartYear}|${O}`;
+                if (!pbpCompletedCache || pbpCompletedCache.key !== completedKey)
+                    pbpCompletedCache = { key: completedKey, points: data.points.filter((p) => p.yearID >= pbpEvt.winStartYear && p.yearID < O) };
+                points = pbpCompletedCache.points.concat(evtOpenSeasonPoints(pbpEvt, cur, O));
+                sY = pbpEvt.winStartYear; eY = O;          // eY = open year → smooth split caches year<O on bg
+                pbpExtent = pbpComputeExtent({ dataset: activeDatasetKey, sYear: pbpEvt.winStartYear, eYear: pbpEvt.winEndYear },
+                    xDim, yDim, { league: "all", franchise: "all" }, data.points, "season", activeDatasetKey);
+                evtSeason = true;
+            }
         } else if (pbpTimeline) {
             const resolved = pbpResolveGlobal(pbpTimeline, pbpCursorIdx);
             const { yearEntry, yearIdx, withinIdx } = resolved;
@@ -1239,7 +1287,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         // The "Loading data…" indicator is for the initial load and heavy filter
         // changes — NOT the smooth/group-career sweep, where every ~66ms frame would
         // strobe it on and off. Each cursor draw is only a couple of ms, so skip it.
-        const showLoader = !pbpTimeline;
+        const showLoader = !pbpTimeline && !pbpEvt;
         if (showLoader) loadingIndicator.classList.add("active");
         cancelAnimationFrame(pendingRender);
         pendingRender = requestAnimationFrame(() => {
@@ -1247,18 +1295,25 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             // as-is (season pipeline, no re-aggregation) and neutralize the attribute
             // filters — the selected group IS the filter, and career points carry no
             // single lgID/team, so a league filter would otherwise drop them all.
-            const drawMode = (groupCareer || evtMode) ? "season" : mode;
+            // .evt career: points are pre-aggregated careers → draw "season" (no
+            // re-aggregation). .evt season + .bl2p use the real mode.
+            const drawMode = (groupCareer || evtCareer) ? "season" : mode;
+            // .evt as-of points carry only a player + cumulative stat (no per-season
+            // team/league), so neutralize league/franchise; bats/country still work via
+            // metaFor(name). evtCareer → all-fg moving cloud (`evt`); evtSeason → the
+            // static/dynamic split (completed seasons cached on bg, open season on fg).
+            const evtFilters = {
+                league: "all", bats, colorBy, depth, compareEras: false, country, franchise: "all",
+                thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey,
+                pbpExtent, smooth: true, lite: smoothLite,
+            };
             const drawFilters = groupCareer
                 ? { league: "all", bats: "all", colorBy, depth: 1, compareEras: false, country: "all", franchise: "all",
                     thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey,
                     pbpExtent, smooth: true, groupCareer: true, group: new Set(careerHighlights.keys()) }
-                : evtMode
-                // .evt as-of points carry only a player + cumulative stat (no per-season
-                // team/league), so neutralize league/franchise; bats/country still work
-                // via metaFor(name). Season pipeline, no re-aggregation.
-                ? { league: "all", bats, colorBy, depth, compareEras: false, country, franchise: "all",
-                    thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey, pbpExtent, smooth: true }
-                : { league, bats, colorBy, depth, compareEras, sB, eB, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey, pbpExtent, smooth: !!pbpTimeline };
+                : evtCareer ? { ...evtFilters, evt: true }
+                : evtSeason ? evtFilters
+                : { league, bats, colorBy, depth, compareEras, sB, eB, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey, pbpExtent, smooth: !!pbpTimeline, lite: smoothLite && !!pbpTimeline };
             drawScatterPlot(points, xDim, yDim, sY, eY, minThreshold, formatStat, drawMode, drawFilters);
             if (showLoader) loadingIndicator.classList.remove("active");
             writeUrlState({ xDim, yDim, sYear, eYear, minPa: thresholdValue, mode, league, bats, colorBy, depth, compareEras, sB, eB, country, franchise });
@@ -1433,15 +1488,19 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         dateLabel.hidden = !on;
     }
     function stopPbpPlay() {
+        const wasPlaying = !!pbpRaf;
         if (pbpRaf) { cancelAnimationFrame(pbpRaf); pbpRaf = null; }
         const btn = document.getElementById("anim-play-btn");
         btn.classList.remove("playing");
         document.getElementById("anim-icon-play").hidden = false;
         document.getElementById("anim-icon-stop").hidden = true;
+        if (wasPlaying && smoothLite) { smoothLite = false; refreshChart(); }   // final interactive render
     }
     function startPbpPlay() {
         if (!pbpTimeline && !pbpEvt) return;
         stopAnimation();
+        smoothLite = true;                         // lighten frames during playback
+        clearTimeout(smoothLiteTimer);
         const perYearMs = 10000;                   // ~10s per covered season …
         const begin = performance.now();
         // .evt sweeps only the selected-year window; .bl2p sweeps its whole timeline.
@@ -1487,6 +1546,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         for (let i = model.numDates - 1; i >= 0; i--) if (model.yearOf[i] <= eYear) { winEnd = i; break; }
         if (winEnd < winStart) { winStart = 0; winEnd = model.numDates - 1; }
         model.winStart = winStart; model.winEnd = winEnd;
+        model.winStartYear = model.yearOf[winStart]; model.winEndYear = model.yearOf[winEnd];
         pbpEvt = model; pbpTimeline = null; pbpExtentCache = null;
         window.__bl2d_pbpFallback = false;
         pbpCursorIdx = (startIdx != null) ? Math.max(winStart, Math.min(winEnd, startIdx)) : winEnd;
@@ -1598,7 +1658,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
 
     scrubber?.addEventListener("input", () => {
         if (!pbpTimeline && !pbpEvt) return;
-        stopPbpPlay();
+        if (pbpRaf) stopPbpPlay();
         pbpCursorIdx = parseInt(scrubber.value) || 0;
         // Keep trails causal on a backward scrub: drop positions recorded ahead of
         // the new cursor so the comet-tail never points "into the future".
@@ -1607,8 +1667,12 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
                 groupTrailHistory.set(pid, hist.filter(e => e.cursor <= pbpCursorIdx));
             }
         }
+        // Lite frames while dragging; one full (interactive) render when it settles.
+        smoothLite = true;
         syncScrubber();
         refreshChart();
+        clearTimeout(smoothLiteTimer);
+        smoothLiteTimer = setTimeout(() => { smoothLite = false; refreshChart(); }, 160);
     });
     // Expose for headless verification (scripts/snap.js evalJS). pbpPointsAsOf
     // and pbpActive take/return the OPEN year resolved from the global cursor.
@@ -3311,8 +3375,13 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         return { filtered: flt, unique: uniq, frontier: sweepFrontier(uniq) };
     }
 
+    // Incremental frontier for the season-accumulating sweep (.bl2p and .evt-season):
+    // completed seasons (year < open) are static, so cache their sorted rows per open
+    // year and only sort+merge the open season each frame — avoids re-sorting ~100k
+    // completed player-seasons every frame. Not for career / group-career / evt-career
+    // (their points aren't a completed-vs-open-season split).
     function buildSmoothActiveFrontier() {
-        if (mode !== "season" || !filters.smooth) return null;
+        if (mode !== "season" || !filters.smooth || filters.groupCareer || filters.evt) return null;
         const openYear = eYear;
         const prepKey = [
             datasetKey, sYear, openYear, xDim, yDim, minPa,
@@ -3373,7 +3442,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         return layers;
     }
 
-    const { filtered, unique, frontier } = buildFrontier(seasonMatches);
+    const { filtered, unique, frontier } = buildSmoothActiveFrontier() || buildFrontier(seasonMatches);
     const frontierSet = new Set(frontier);
     // Headless-verification hook: the current frontier's player keys + (x,y).
     window.__bl2d_frontierPids = frontier.map(d => d.playerID);
@@ -3404,26 +3473,35 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const legendGlobalEl = document.getElementById("legend-global");
     if (legendGlobalEl) legendGlobalEl.hidden = true;
 
-    const hvInfo = computeHvContributions(frontier, xSign, ySign, unique);
+    // Lite frame (playing/scrubbing): skip the interaction-only work — hypervolume
+    // contributions, frontier cards, spotlight, isolation rings, regret/HV overlays,
+    // and the hover quadtree — so the moving frame is as cheap as the standalone demo.
+    // A full (interactive) render fires when the cursor goes idle (see refreshChart).
+    const lite = !!filters.lite;
+    const hvInfo = lite
+        ? { items: [], totalHv: 0, refPoint: { x: 0, y: 0 }, playerContribs: new Map() }
+        : computeHvContributions(frontier, xSign, ySign, unique);
     const hvByPoint = new Map(hvInfo.items.map(it => [it.point, it]));
-    window.__bl2d_hv = {
-        contributions: hvInfo.items.map(it => ({
-            playerID: it.point.playerID, year: it.point.year,
-            x: it.point.x, y: it.point.y,
-            contribution: it.contribution, fraction: it.fraction,
-        })),
-        total: hvInfo.totalHv,
-        reference: hvInfo.refPoint,
-        xSign, ySign, xDim, yDim,
-    };
-    window.__bl2d_computeHv = computeHvContributions;
+    if (!lite) {
+        window.__bl2d_hv = {
+            contributions: hvInfo.items.map(it => ({
+                playerID: it.point.playerID, year: it.point.year,
+                x: it.point.x, y: it.point.y,
+                contribution: it.contribution, fraction: it.fraction,
+            })),
+            total: hvInfo.totalHv,
+            reference: hvInfo.refPoint,
+            xSign, ySign, xDim, yDim,
+        };
+        window.__bl2d_computeHv = computeHvContributions;
+    }
 
-    renderFrontierCards(frontier, xDim, yDim, formatStat, filtered.length, mode, hvByPoint);
+    if (!lite) renderFrontierCards(frontier, xDim, yDim, formatStat, filtered.length, mode, hvByPoint);
     // Group-career: hide the auto-spotlight cards — with every group member "on the
     // frontier" they stack and overlap; the on-chart trails + labels are the story.
-    if (filters.groupCareer) {
+    if (filters.groupCareer || lite) {
         const psLayer = document.getElementById("player-spotlight");
-        if (psLayer) { psLayer.innerHTML = ""; psLayer.hidden = true; }
+        if (psLayer && filters.groupCareer) { psLayer.innerHTML = ""; psLayer.hidden = true; }
     } else {
         renderPlayerSpotlight(frontier, hvByPoint, xDim, yDim, formatStat, mode);
     }
@@ -3794,12 +3872,17 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
 
     const cloudOpacity = careerHighlights.size > 0 ? 0.1 : themeCloudOpacity;
     const smoothOpenYear = filters.smooth ? eYear : null;
-    const backgroundPoints = filters.groupCareer
-        ? []                                       // group-career: focus is the group + trails, no cloud
+    // .evt: every point's (x,y) moves each frame (cumulative grows), so the whole cloud
+    // goes on the redrawn-every-frame foreground; the cached background would freeze it.
+    // .bl2p accumulating: completed seasons are static → cache them on the background.
+    const backgroundPoints = (filters.groupCareer || filters.evt)
+        ? []
         : filters.smooth
         ? unique.filter(d => d.year < smoothOpenYear)
         : regular;
-    const foregroundCloudPoints = filters.smooth
+    const foregroundCloudPoints = filters.evt
+        ? regular
+        : filters.smooth
         ? regular.filter(d => d.year >= smoothOpenYear)
         : [];
     const bgKey = [
@@ -4031,7 +4114,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const isoRingColor = d => showWorstFrontier ? "#8b5cf6"
         : (COLOR_PALETTES.league[d.lgID] || COLOR_PALETTES.league.unknown).dark;
     const isolationMap = new Map();
-    for (const fp of frontier) {
+    if (!lite) for (const fp of frontier) {
         const fpx = xScale(fp.x), fpy = yScale(fp.y);
         let minDist = Infinity, nearestPoint = null;
         for (const q of unique) {
@@ -4051,7 +4134,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // When players are career-highlighted, show the combined polygon for what
     // the frontier loses if all their seasons were removed. Skipped in group-career
     // mode — there's no background frontier to measure "loss" against there.
-    if (careerHighlights.size > 0 && !filters.groupCareer) {
+    if (careerHighlights.size > 0 && !filters.groupCareer && !lite) {
         const highlightedPids = new Set(careerHighlights.keys());
         const frSeasons = frontier.filter(p => highlightedPids.has(p.playerID));
         if (frSeasons.length > 0) {
@@ -4214,6 +4297,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             .on("mouseup.cursor",   function() { this.style.cursor = "grab"; });
     }
 
+    // Hover/click hit-testing — skipped on lite (animation) frames; rebuilt on the
+    // idle full render so tooltips and click-to-pin work once the cursor settles.
+    if (!lite) {
     const hitPoints = unique.map(d => ({ ...d, sx: xScale(d.x), sy: yScale(d.y), ref: d }));
     const hitTree = d3.quadtree()
         .x(d => d.sx)
@@ -4272,9 +4358,10 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             }
             showTooltip(event, d);
         });
+    }
 
     // Hide tooltip on any tap outside a point (mobile).
-    document.addEventListener("touchstart", (event) => {
+    if (!lite) document.addEventListener("touchstart", (event) => {
         if (!event.target.closest("#scatter-plot")) hideTooltip();
     }, { passive: true });
     const frameEnd = performance.now();
