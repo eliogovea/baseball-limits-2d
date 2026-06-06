@@ -61,6 +61,43 @@ const ev = Object.fromEntries(STATS.map((s) => [s, new Map()]));   // stat -> na
 const seasons = [];                                                // {year, nDates}
 const doy = [];                                                    // day-of-year per global date
 let gbase = 0;
+
+// ── Pre-PBP seasons (before the Retrosheet corpus, 1871–1919) from Lahman ──────
+// The Retrosheet .bl2p corpus starts in 1920; for earlier seasons emit ONE
+// end-of-season event per (player, season, stat) from the Lahman season totals so
+// the streams span all of history. The animation steps across these years (no
+// intra-season growth) and is smooth within the PBP years — same STEV format,
+// coarser granularity. (Career mode then includes pre-1920 totals, e.g. Ty Cobb.)
+const PBP_START = parseInt(files[0].match(/b(\d+)/)[1]);           // first .bl2p year (1920)
+const SEASON_END_DOY = 273;                                        // ~Sep 30
+{
+    const lines = fs.readFileSync(path.join(__dirname, "..", "data", "batting_limits_1871-2025.csv"), "utf8").split("\n");
+    const col = {}; lines[0].split(",").forEach((h, i) => col[h] = i);
+    const byYear = new Map();                                      // year → pid → {stat: total} (stints summed)
+    for (let li = 1; li < lines.length; li++) {
+        const ln = lines[li]; if (!ln) continue;
+        const f = ln.split(",");
+        const year = parseInt(f[col.yearID]);
+        if (!(year < PBP_START)) continue;
+        const pid = f[col.playerID];
+        let ym = byYear.get(year); if (!ym) { ym = new Map(); byYear.set(year, ym); }
+        let rec = ym.get(pid); if (!rec) { rec = {}; ym.set(pid, rec); }
+        for (const st of STATS) { const v = parseInt(f[col[st]]); if (v) rec[st] = (rec[st] || 0) + v; }
+    }
+    for (const year of [...byYear.keys()].sort((a, b) => a - b)) {
+        const gd = gbase;
+        seasons.push({ year, nDates: 1 });
+        doy.push(SEASON_END_DOY);
+        for (const [pid, rec] of byYear.get(year)) {
+            for (const st of STATS) {
+                const v = rec[st]; if (!v) continue;
+                const m = ev[st]; if (!m.has(pid)) m.set(pid, []); m.get(pid).push([gd, v]);
+            }
+        }
+        gbase += 1;
+    }
+}
+
 for (const f of files) {
     const s = parse(zlib.gunzipSync(fs.readFileSync(path.join(PBP_DIR, f))), want);
     seasons.push({ year: s.year, nDates: s.D });
