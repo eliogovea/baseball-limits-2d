@@ -23,8 +23,22 @@ node scripts/build_stat_streams.js          # rebuilds the committed set (HR SB 
 node scripts/build_stat_streams.js HR SB    # or a subset
 ```
 
-Committed streams (offensive counting axes), ~7.4 MB total: `hr sb h 2b 3b rbi r bb so cs`.
-Rate stats are *derivable* from these later (e.g. AVG = H ÷ AB) rather than stored.
+Committed streams (all batting counting columns), ~13 MB total:
+`hr sb h 2b 3b rbi r bb so cs ab hbp sf sh ibb gidp g`.
+
+**Derived axes** are computed in `script.js` (`EVT_DERIVED`) from cumulative components,
+not stored — both monotonic sums (TB, PA) and **rate stats** (AVG, OBP, SLG, OPS, ISO,
+BABIP, BB%, K%). A rate axis is `.evt`-eligible iff all its components are streamed; the
+min-PA threshold uses summed PA components, and the axis lock ignores sub-1000-PA careers
+so cup-of-coffee 1.000 lines don't blow out the frame. The full-history cursor in the
+main app handles counting **and** derived/rate pairs; only a pair with a non-streamed
+component falls back to `.bl2p`.
+
+Notes: each point's `yearID` is the player's **debut year** (so era colour reflects their
+cohort, since an as-of career point has no single season year). The cursor honours the
+selected **year range** (window clamps the swept dates; values stay all-time cumulative)
+and the `t=YYYYMMDD` deep-link. Career-cumulative is from **1920** (corpus start), so
+pre-1920 players (e.g. Cobb, early Ruth) are truncated.
 
 ## Files
 

@@ -292,11 +292,26 @@ let groupTrailHistory = new Map(); // playerID → [{x,y,cursor}] recent career 
 const GROUP_TRAIL_LEN = 40;     // max retained positions per player in a group-career trail (~ the last few seconds at 15fps)
 let pbpEvt = null;              // resident .evt full-history model (one counting-stat pair) when active, else null
 const evtStreamCache = new Map(); // stat -> Promise<decoded STEV>  (resident once loaded)
-// Counting stats that have committed data/pbp/<stat>.evt.gz streams. Both chart axes
-// being in this set (batting) routes the smooth cursor through the resident .evt path
-// (instant full-history scrub) instead of per-season .bl2p streaming. Extend by
-// generating more streams: `node scripts/build_stat_streams.js <STAT>`.
-const EVT_STATS = new Set(["HR", "SB", "H", "2B", "3B", "RBI", "R", "BB", "SO", "CS"]);
+// Raw counting columns with committed data/pbp/<stat>.evt.gz streams. A chart axis is
+// .evt-eligible if it's one of these OR a derived stat (below) whose components all are.
+// Both axes eligible (batting) routes the smooth cursor through the resident .evt path
+// (instant full-history scrub) vs per-season .bl2p. Extend: `build_stat_streams.js <STAT>`.
+const EVT_STATS = new Set(["HR", "SB", "H", "2B", "3B", "RBI", "R", "BB", "SO", "CS", "AB", "HBP", "SF", "SH", "IBB", "GIDP", "G"]);
+// Derived axes computed per player from cumulative components (rate stats are derivable
+// "later from the cumulative streams", as planned). `rate:true` → a ratio (needs the
+// min-PA threshold + axis lock over qualified players); `rate:false` → a monotonic sum.
+const EVT_DERIVED = {
+    TB:   { deps: ["H", "2B", "3B", "HR"], rate: false, fn: (c) => c.H + c["2B"] + 2 * c["3B"] + 3 * c.HR },
+    PA:   { deps: ["AB", "BB", "HBP", "SH", "SF"], rate: false, fn: (c) => c.AB + c.BB + c.HBP + c.SH + c.SF },
+    AVG:  { deps: ["H", "AB"], rate: true, fn: (c) => c.AB > 0 ? c.H / c.AB : NaN },
+    SLG:  { deps: ["H", "2B", "3B", "HR", "AB"], rate: true, fn: (c) => c.AB > 0 ? (c.H + c["2B"] + 2 * c["3B"] + 3 * c.HR) / c.AB : NaN },
+    ISO:  { deps: ["2B", "3B", "HR", "AB"], rate: true, fn: (c) => c.AB > 0 ? (c["2B"] + 2 * c["3B"] + 3 * c.HR) / c.AB : NaN },
+    OBP:  { deps: ["H", "BB", "HBP", "AB", "SF"], rate: true, fn: (c) => { const d = c.AB + c.BB + c.HBP + c.SF; return d > 0 ? (c.H + c.BB + c.HBP) / d : NaN; } },
+    OPS:  { deps: ["H", "2B", "3B", "HR", "AB", "BB", "HBP", "SF"], rate: true, fn: (c) => { const slg = c.AB > 0 ? (c.H + c["2B"] + 2 * c["3B"] + 3 * c.HR) / c.AB : NaN; const d = c.AB + c.BB + c.HBP + c.SF; const obp = d > 0 ? (c.H + c.BB + c.HBP) / d : NaN; return obp + slg; } },
+    BABIP:{ deps: ["H", "HR", "AB", "SO", "SF"], rate: true, fn: (c) => { const d = c.AB - c.SO - c.HR + c.SF; return d > 0 ? (c.H - c.HR) / d : NaN; } },
+    "BB%":{ deps: ["BB", "AB", "HBP", "SH", "SF"], rate: true, fn: (c) => { const pa = c.AB + c.BB + c.HBP + c.SH + c.SF; return pa > 0 ? c.BB / pa : NaN; } },
+    "K%": { deps: ["SO", "AB", "BB", "HBP", "SH", "SF"], rate: true, fn: (c) => { const pa = c.AB + c.BB + c.HBP + c.SH + c.SF; return pa > 0 ? c.SO / pa : NaN; } },
+};
 const PBP_NOMINAL_DATES = 185;  // assumed game-date count for a not-yet-loaded season (scrubber estimate)
 const PBP_PREFETCH_TAIL = 10;   // prefetch the neighbouring season when within this many dates of an edge
 const PBP_PLAY_FRAME_MS = 66;   // min ms between full chart re-renders while playing (~15fps) — keeps the main thread responsive on wide windows
@@ -876,8 +891,14 @@ function pbpBuildGroupCareer(tl, resolved, xDim, yDim, filt, datasetKey) {
 // two resident .evt files (docs/pbp-evt-format.md) and animate every player's
 // cumulative-as-of-date career across ALL history — no per-season .bl2p streaming,
 // no lazy load / release. Rate stats stay on .bl2p (they're not sparse events).
+// Resolve a chart dimension to {deps, fn, rate}: a raw streamed column, or a derived
+// stat whose components are all streamed. Returns null if not .evt-eligible.
+function evtDimSpec(dim) {
+    if (EVT_DERIVED[dim]) return EVT_DERIVED[dim].deps.every((d) => EVT_STATS.has(d)) ? EVT_DERIVED[dim] : null;
+    return EVT_STATS.has(dim) ? { deps: [dim], rate: false, fn: (c) => c[dim] } : null;
+}
 function evtEligible(xDim, yDim) {
-    return activeDatasetKey === "batting" && EVT_STATS.has(xDim) && EVT_STATS.has(yDim);
+    return activeDatasetKey === "batting" && !!evtDimSpec(xDim) && !!evtDimSpec(yDim);
 }
 function decodeStev(buf) {
     const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -914,23 +935,45 @@ function loadEvtStat(stat) {
     evtStreamCache.set(stat, p);
     return p;
 }
+const EVT_PA_DEPS = ["AB", "BB", "HBP", "SH", "SF"];    // PA = sum, for the rate-axis threshold
 async function buildEvtModel(xDim, yDim) {
-    const [X, Y] = await Promise.all([loadEvtStat(xDim), loadEvtStat(yDim)]);
-    if (!X || !Y) return null;
-    const numDates = X.numDates;
+    const xs = evtDimSpec(xDim), ys = evtDimSpec(yDim);
+    if (!xs || !ys) return null;
+    const usesPA = xs.rate || ys.rate;
+    const deps = new Set([...xs.deps, ...ys.deps]);
+    if (usesPA) EVT_PA_DEPS.forEach((d) => deps.add(d));   // need PA components for min-PA threshold
+    const depList = [...deps];
+    const loaded = await Promise.all(depList.map(loadEvtStat));
+    if (loaded.some((s) => !s)) return null;
+    const streams = {}; depList.forEach((d, i) => streams[d] = loaded[i]);
+    const ref = loaded[0];
+    const numDates = ref.numDates;
     const empty = { dates: new Uint16Array(0), cum: new Uint16Array(0) };
+    const yearOf = new Int16Array(numDates); let g = 0;
+    for (const s of ref.seasons) for (let i = 0; i < s.nDates && g < numDates; i++) yearOf[g++] = s.year;
+
+    // One record per player who appears in any needed stream: their component series,
+    // their debut year (for era colour), and a final-state value (for axis lock).
+    const names = new Set(); for (const d of depList) for (const k of streams[d].byName.keys()) names.add(k);
     const players = [];
     let xMax = 0, yMax = 0;
-    for (const nm of new Set([...X.byName.keys(), ...Y.byName.keys()])) {
-        const xs = X.byName.get(nm) || empty, ys = Y.byName.get(nm) || empty;
-        if (xs.cum.length) xMax = Math.max(xMax, xs.cum[xs.cum.length - 1]);
-        if (ys.cum.length) yMax = Math.max(yMax, ys.cum[ys.cum.length - 1]);
-        players.push({ name: nm, xs, ys });
+    const cEnd = {};
+    for (const nm of names) {
+        const comp = {}; let debut = numDates;
+        for (const d of depList) { const s = streams[d].byName.get(nm) || empty; comp[d] = s; if (s.dates.length) debut = Math.min(debut, s.dates[0]); }
+        const debutYear = debut < numDates ? yearOf[debut] : ref.seasons[0].year;
+        players.push({ name: nm, comp, debutYear });
+        // axis lock: career-end value; for rate axes only count players with enough PA
+        // so a 3-for-3 cup-of-coffee 1.000 AVG doesn't blow out the frame.
+        for (const d of depList) cEnd[d] = (comp[d].cum.length ? comp[d].cum[comp[d].cum.length - 1] : 0);
+        const paEnd = usesPA ? EVT_PA_DEPS.reduce((a, d) => a + (cEnd[d] || 0), 0) : Infinity;
+        const xv = xs.fn(cEnd), yv = ys.fn(cEnd);
+        const qual = paEnd >= 1000;                       // career-qualifier-ish floor for axis framing
+        if (isFinite(xv) && (!xs.rate || qual)) xMax = Math.max(xMax, xv);
+        if (isFinite(yv) && (!ys.rate || qual)) yMax = Math.max(yMax, yv);
     }
-    const yearOf = new Int16Array(numDates); let g = 0;
-    for (const s of X.seasons) for (let i = 0; i < s.nDates && g < numDates; i++) yearOf[g++] = s.year;
-    return { xDim, yDim, numDates, players, doy: X.doy, yearOf, xMax, yMax,
-             minYear: X.seasons[0].year, maxYear: X.seasons[X.seasons.length - 1].year };
+    return { xDim, yDim, xs, ys, usesPA: usesPA, depList, numDates, players, doy: ref.doy, yearOf,
+             xMax, yMax, minYear: ref.seasons[0].year, maxYear: ref.seasons[ref.seasons.length - 1].year };
 }
 function evtAsOf(series, d) {                          // cumulative value as of global date d
     const a = series.dates; let lo = 0, hi = a.length - 1, ans = -1;
@@ -939,12 +982,18 @@ function evtAsOf(series, d) {                          // cumulative value as of
 }
 function evtPointsAsOf(model, d) {                      // season-shaped rows for the frontier pipeline
     d = Math.max(0, Math.min(model.numDates - 1, d));
-    const year = model.yearOf[d];
     const rows = [];
+    const c = {};
     for (const p of model.players) {
-        const x = evtAsOf(p.xs, d), y = evtAsOf(p.ys, d);
-        if (x === 0 && y === 0) continue;
-        rows.push({ playerID: p.name, teamID: "—", lgID: "—", yearID: year, [model.xDim]: x, [model.yDim]: y });
+        for (const dep of model.depList) c[dep] = evtAsOf(p.comp[dep], d);
+        const x = model.xs.fn(c), y = model.ys.fn(c);
+        if (!isFinite(x) || !isFinite(y)) continue;        // rate undefined (no AB yet) → not on chart
+        if (!model.xs.rate && !model.ys.rate && x === 0 && y === 0) continue;
+        // yearID = the player's debut year so the era colour reflects their cohort
+        // (an as-of career point has no single season year). sY/eY span all history,
+        // so this never filters anyone out.
+        const pa = model.usesPA ? EVT_PA_DEPS.reduce((a, dep) => a + (c[dep] || 0), 0) : 1e9;
+        rows.push({ playerID: p.name, teamID: "—", lgID: "—", yearID: p.debutYear, PA: pa, [model.xDim]: x, [model.yDim]: y });
     }
     return rows;
 }
@@ -1355,7 +1404,8 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     function syncScrubber() {
         if (pbpEvt) {
             const d = evtClampedDate(pbpEvt);
-            scrubber.max = String(Math.max(0, pbpEvt.numDates - 1));
+            scrubber.min = String(pbpEvt.winStart ?? 0);
+            scrubber.max = String(pbpEvt.winEnd ?? (pbpEvt.numDates - 1));
             scrubber.value = String(pbpCursorIdx);
             dateLabel.textContent = pbpDayLabel(pbpEvt.yearOf[d], pbpEvt.doy[d]);
             window.__bl2d_pbpCursorYmd = pbpDayToYmd(pbpEvt.yearOf[d], pbpEvt.doy[d]);
@@ -1364,6 +1414,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         if (!pbpTimeline) return;
         const { yearEntry, yearIdx, withinIdx } = pbpResolveGlobal(pbpTimeline, pbpCursorIdx);
         pbpTimeline.openYearIdx = yearIdx;
+        scrubber.min = "0";
         scrubber.max = String(Math.max(0, pbpTimeline.totalEstimate - 1));
         scrubber.value = String(pbpCursorIdx);
         if (yearEntry.status === "covered" && yearEntry.decoded) {
@@ -1393,7 +1444,10 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         stopAnimation();
         const perYearMs = 10000;                   // ~10s per covered season …
         const begin = performance.now();
-        pbpCursorIdx = 0;
+        // .evt sweeps only the selected-year window; .bl2p sweeps its whole timeline.
+        const lo = pbpEvt ? pbpEvt.winStart : 0;
+        const hi = pbpEvt ? pbpEvt.winEnd : null;
+        pbpCursorIdx = lo;
         groupTrailHistory.clear();                 // restart trails from the sweep's origin
         let lastDraw = 0;
         const btn = document.getElementById("anim-play-btn");
@@ -1402,12 +1456,12 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         document.getElementById("anim-icon-stop").hidden = false;
         const tick = (now) => {
             // total & covered-count grow as lazy loads land; recompute each frame.
-            const total = pbpEvt ? pbpEvt.numDates : pbpTimeline.totalEstimate;
-            const coveredYears = pbpEvt ? (pbpEvt.maxYear - pbpEvt.minYear + 1)
+            const end = pbpEvt ? hi : pbpTimeline.totalEstimate - 1;
+            const coveredYears = pbpEvt ? (pbpEvt.yearOf[hi] - pbpEvt.yearOf[lo] + 1)
                 : Math.max(1, pbpTimeline.years.filter((y) => y.status !== "missing").length);
             const durMs = Math.min(PBP_PLAY_MAX_MS, perYearMs * coveredYears);  // … capped overall
             const frac = Math.min(1, (now - begin) / durMs);
-            pbpCursorIdx = Math.min(total - 1, Math.floor(frac * (total - 1)));
+            pbpCursorIdx = Math.min(end, lo + Math.floor(frac * (end - lo)));
             syncScrubber();                         // cheap: scrubber position + date label only
             // Throttle the expensive chart re-render to ~15fps so a wide-window sweep
             // doesn't peg the main thread; always draw the final frame.
@@ -1424,9 +1478,18 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         smoothToggle.classList.add("active"); dateLabel.hidden = false; dateLabel.textContent = "Loading full history…";
         const model = await buildEvtModel(xDim, yDim);
         if (!model) { smoothToggle.classList.remove("active"); dateLabel.textContent = "No event streams for these stats"; return; }
+        // Clamp the played window to the selected year range (values stay all-time
+        // career-cumulative; only the swept dates narrow). Full history if unset.
+        const sYear = parseInt(document.getElementById("s-year-select").value) || model.minYear;
+        const eYear = parseInt(document.getElementById("e-year-select").value) || model.maxYear;
+        let winStart = 0, winEnd = model.numDates - 1;
+        for (let i = 0; i < model.numDates; i++) if (model.yearOf[i] >= sYear) { winStart = i; break; }
+        for (let i = model.numDates - 1; i >= 0; i--) if (model.yearOf[i] <= eYear) { winEnd = i; break; }
+        if (winEnd < winStart) { winStart = 0; winEnd = model.numDates - 1; }
+        model.winStart = winStart; model.winEnd = winEnd;
         pbpEvt = model; pbpTimeline = null; pbpExtentCache = null;
         window.__bl2d_pbpFallback = false;
-        pbpCursorIdx = (startIdx != null) ? Math.max(0, Math.min(model.numDates - 1, startIdx)) : model.numDates - 1;
+        pbpCursorIdx = (startIdx != null) ? Math.max(winStart, Math.min(winEnd, startIdx)) : winEnd;
         showSmoothControls(true);
         syncScrubber();
         refreshChart();
@@ -1575,6 +1638,16 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         eSel.value = String(year);                         // open the window on the link's year
         if (parseInt(sSel.value) > year) sSel.value = String(year);
         enableSmooth().then(() => {                        // builds the timeline + lands the year
+            if (pbpEvt) {                                  // .evt mode: map the date to a global index
+                const day = pbpYmdToDay(ymd);
+                let d = -1;
+                for (let i = 0; i < pbpEvt.numDates; i++) {
+                    if (pbpEvt.yearOf[i] === year) { if (pbpEvt.doy[i] <= day) d = i; else if (d >= 0) break; }
+                    else if (pbpEvt.yearOf[i] > year) break;
+                }
+                if (d >= 0) { pbpCursorIdx = Math.max(pbpEvt.winStart, Math.min(pbpEvt.winEnd, d)); syncScrubber(); refreshChart(); }
+                return;
+            }
             if (!pbpTimeline) return;
             const yi = pbpTimeline.years.findIndex((e) => e.year === year);
             if (yi < 0 || pbpTimeline.years[yi].status !== "covered" || !pbpTimeline.years[yi].decoded) return;
@@ -1957,6 +2030,7 @@ function writeUrlState(state) {
             // The as-of-date cursor (smooth game-by-game mode). Absent unless on.
             // Emits the open year's date resolved from the global multi-year cursor.
             t: (() => {
+                if (pbpEvt) { const d = evtClampedDate(pbpEvt); return pbpDayToYmd(pbpEvt.yearOf[d], pbpEvt.doy[d]); }
                 if (!pbpTimeline) return "";
                 const e = pbpTimeline.years[pbpTimeline.openYearIdx];
                 if (!e || e.status !== "covered" || !e.decoded) return "";   // decoded may be released to bound memory

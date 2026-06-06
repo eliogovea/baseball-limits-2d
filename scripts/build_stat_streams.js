@@ -18,7 +18,7 @@ const path = require("path");
 
 // Default set = the committed offensive counting streams (must match EVT_STATS in
 // script.js). Pass stat names to (re)build a subset.
-const DEFAULT_STATS = ["HR", "SB", "H", "2B", "3B", "RBI", "R", "BB", "SO", "CS"];
+const DEFAULT_STATS = ["HR", "SB", "H", "2B", "3B", "RBI", "R", "BB", "SO", "CS", "AB", "HBP", "SF", "SH", "IBB", "GIDP", "G"];
 const STATS = (process.argv.slice(2).length ? process.argv.slice(2) : DEFAULT_STATS).map((s) => s.toUpperCase());
 const PBP_DIR = path.join(__dirname, "..", "data", "pbp");
 const files = fs.readdirSync(PBP_DIR).filter((f) => /^b\d+\.bl2p\.gz$/.test(f)).sort();
