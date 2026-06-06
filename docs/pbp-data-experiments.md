@@ -176,12 +176,78 @@ packed event record. Try a pre-1988 season too, e.g. `1955eve.zip`.)
 
 ---
 
-## 4. Takeaways / open directions
+## 4. Single-stat event streams — optimizing one chart pair for full-history animation
+
+If you only care about the **two stats currently on the chart** (default HR×SB),
+you don't need the 17-column corpus at all — you need each player's HR timeline and
+SB timeline. Those are **sparse events**: 324,718 HR and 216,545 SB in all of
+history, vs 5 M game-records. Extracted from the `.bl2p` corpus and re-encoded:
+
+| | HR | SB |
+|---|---:|---:|
+| Event cells (player-games with ≥1) | 306,320 | 198,175 |
+| Total stat | 324,718 | 216,545 |
+| Distinct players | 7,608 | 6,905 |
+
+(Both span the same 18,137 global game-dates, 1920–2025.)
+
+### Storage — best encoding ~0.56 MB for both
+
+| Encoding (gzipped) | HR | SB |
+|---|---:|---:|
+| A. Naive 5 B/cell (player + date + count) | 0.63 MB | 0.42 MB |
+| B. Columnar (3 streams) | 0.31 MB | 0.22 MB |
+| **C. Per-player varint date-deltas + name dict** | **0.35 MB** | **0.26 MB** |
+
+**HR + SB together (one shared name dict): ~0.56 MB** — **~20× smaller** than the
+11 MB full corpus, at ~9.5–10.8 bits/event. A fixed-width bit-pack is *worse*
+(~16 bits/event) because career gaps inflate the per-player width; gzip-over-varint
+exploits the small-delta skew better. A true entropy coder could reach ~7 bits
+(~0.4 MB) but it's diminishing returns.
+
+### The two real animation wins
+
+1. **It all fits in RAM — delete the streaming machinery.** Decoded to per-player
+   `{Uint16 globalDate, Uint16 cumulative}`, the **entire 106-year HR+SB history is
+   ~1.9 MB resident.** Load once at startup → scrub instantly to any date in history.
+   No lazy season fetch, no prefetch-ahead, no release-behind, no "Loading…", no OOM
+   — the whole subsystem the 17-column format needed disappears for the 2-stat case.
+2. **The frontier barely moves — precompute it.** Replaying every event, the HR×SB
+   Pareto frontier **changes on only 4,151 of the 18,070 game-dates.** A
+   limits-focused animation can ship just those ~4,151 frontier-update records
+   (~tens of KB) and replay them, instead of rescanning 7,600 players per frame.
+   (At ~2 MB resident a brute-force per-frame scan is microseconds anyway, so this
+   is optional polish.)
+
+### Recommended shape
+
+Two tiny derived files `hr.evt` / `sb.evt` — per player `[name, nEvents,
+(dateΔ varint, count varint)…]`, gzipped, **~0.56 MB combined**; prefix-sum into
+per-player `{Uint16 dates, Uint16 cum}` (~2 MB) at startup; cursor sweeps the 18,137
+global game-dates with a trivial per-player binary search (or the 4,151-entry
+frontier timeline).
+
+**The catch:** this is **per-stat-pair specialized** — it carries only HR and SB, so
+switching axes (e.g. AVG×OBP) needs a different stream, and *rate* stats need their
+numerator+denominator components (larger, less sparse). The general 17-column format
+trades size for "any axis." Each additional **counting** stat is its own ~0.3–0.4 MB
+sparse stream, so "pick 2 counting stats, animate all history instantly" is ~1 MB
+resident per pair.
+
+**Repro:** `node scripts/pbp_stat_stream_experiment.js` (default HR SB; pass two stat
+names to try another pair).
+
+---
+
+## 5. Takeaways / open directions
 
 - The current game-aggregated format is well-tuned for what it stores (11 MB for
   5 M game records), but it is *not* event-level.
 - If memory for a whole-corpus-resident mode ever matters, **columnar + min-int**
   is a clean ~7.8× win with no access-pattern change.
+- For a fixed marquee animation (e.g. HR×SB across all history), **per-stat event
+  streams are ~20× smaller (~0.56 MB) and fully resident (~2 MB)** — they make the
+  streaming/release machinery unnecessary, at the cost of being axis-specific.
 - An **event-level** corpus is surprisingly cheap: a few MB for outcomes (enough to
   drive every chart in this app at play resolution), ~25–45 MB for full fidelity.
   The next concrete step would be a converter emitting a `b<year>.evt` outcome/replay
