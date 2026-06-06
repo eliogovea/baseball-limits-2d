@@ -70,6 +70,35 @@ BATTING_COLUMNS = [
 ]
 
 DATASET_BAT = 0
+DATASET_PIT = 1
+
+# Pitching output columns, same names the site uses (script.js
+# PITCHING_COUNT_COLS). Self-describing by name, so client order is irrelevant.
+# G has no Retrosheet column — constant 1 (the pitcher appeared in the game).
+# NOTE: these are only the columns that map DIRECTLY to a Retrosheet pitching.csv
+# field (header confirmed 2026-06: p_ipouts, p_bfp, p_h, p_hr, p_r, p_er, p_w
+# [=walks], p_iw, p_k, p_hbp, p_wp, p_bk, p_sh, p_sf, p_gs, p_gf, p_cg).
+# The remaining PITCHING_COUNT_COLS — W, L, SV, SHO, GIDP — are NOT direct columns:
+#   W/L/SV are per-game DECISION fields (the `wp`/`lp`/`save` columns hold the
+#     credited pitcher's retroID — W += 1 when row.id == row.wp, etc.),
+#   SHO must be derived (complete game with zero runs: p_cg == 1 and p_r == 0),
+#   GIDP is absent from pitching.csv entirely.
+# Generating a correct pitching corpus therefore needs derivation logic in
+# read_season AND end-to-end verification against the chart's pitching read path
+# (deferred). Until that lands, the pitching dataset is gated off (see convert()).
+PITCHING_COLUMNS = [
+    ("G", None),     ("GS", "p_gs"),  ("CG", "p_cg"),  ("IPouts", "p_ipouts"),
+    ("H", "p_h"),    ("ER", "p_er"),  ("HR", "p_hr"),  ("BB", "p_w"),
+    ("SO", "p_k"),   ("IBB", "p_iw"), ("WP", "p_wp"),  ("HBP", "p_hbp"),
+    ("BK", "p_bk"),  ("BFP", "p_bfp"),("GF", "p_gf"),  ("R", "p_r"),
+    ("SH", "p_sh"),  ("SF", "p_sf"),
+]
+
+DATASETS = {
+    "batting":  {"columns": BATTING_COLUMNS, "dataset": DATASET_BAT, "prefix": "b"},
+    "pitching": {"columns": PITCHING_COLUMNS, "dataset": DATASET_PIT, "prefix": "p"},
+}
+
 csv.field_size_limit(1 << 20)
 
 
@@ -249,12 +278,17 @@ def build_bl2p(by_player, retro_to_display, year, dataset, columns):
     return buf.getvalue(), stats
 
 
-def convert(csv_path, year, out_dir):
-    columns = BATTING_COLUMNS
-    dataset = DATASET_BAT
-    prefix = "b"
+def convert(csv_path, year, out_dir, dataset_name, retro_to_display):
+    cfg = DATASETS[dataset_name]
+    columns, dataset, prefix = cfg["columns"], cfg["dataset"], cfg["prefix"]
+    if dataset_name == "pitching":
+        sys.exit(
+            "pitching conversion is not yet complete: W/L/SV/SHO need derivation "
+            "from the wp/lp/save decision fields and CG+runs (GIDP is absent from "
+            "pitching.csv). See the PITCHING_COLUMNS note above and "
+            "docs/pbp-next-steps.md before generating a pitching corpus."
+        )
 
-    retro_to_display = build_retro_to_display(PEOPLE_PATH)
     by_player, n_rows = read_season(csv_path, year, columns)
     if n_rows == 0:
         print(f"  {year}: no value-rows found (box-score-only or out of coverage) — skipping")
@@ -267,19 +301,24 @@ def convert(csv_path, year, out_dir):
     out_path = out_dir / f"{prefix}{year}.bl2p.gz"
     out_path.write_bytes(compressed)
 
-    print(f"  {year} batting: rows={n_rows:,} games={stats['games']:,} "
+    print(f"  {year} {dataset_name}: rows={n_rows:,} games={stats['games']:,} "
           f"players={stats['players']:,} dates={stats['dates']} "
           f"unmapped={stats['unmapped']}")
     print(f"    bit widths: {stats['bit_widths']}")
-    print(f"    raw {stats['raw_bytes']:,} B -> gzip {len(compressed):,} B "
-          f"({out_path.relative_to(ROOT)})")
+    try:
+        shown = out_path.relative_to(ROOT)
+    except ValueError:
+        shown = out_path                      # custom --out outside the repo
+    print(f"    raw {stats['raw_bytes']:,} B -> gzip {len(compressed):,} B ({shown})")
     return stats
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Build BL2P sub-season files from Retrosheet batting.csv")
-    ap.add_argument("batting_csv", help="Retrosheet batting.csv (per-game)")
+    ap = argparse.ArgumentParser(description="Build BL2P sub-season files from a Retrosheet per-game CSV")
+    ap.add_argument("csv", help="Retrosheet per-game CSV (batting.csv or pitching.csv)")
     ap.add_argument("year", help="season year, or START-END range (e.g. 1998 or 1998-2025)")
+    ap.add_argument("--dataset", choices=["batting", "pitching"], default="batting",
+                    help="dataset type (default: batting); selects columns + 'b'/'p' file prefix")
     ap.add_argument("--out", default=str(OUT_DIR), help="output dir (default data/pbp)")
     args = ap.parse_args()
 
@@ -290,8 +329,10 @@ def main():
     else:
         years = [int(args.year)]
 
+    # Built once (reads the full people CSV); shared across all years/datasets.
+    retro_to_display = build_retro_to_display(PEOPLE_PATH)
     for y in years:
-        convert(args.batting_csv, y, out_dir)
+        convert(args.csv, y, out_dir, args.dataset, retro_to_display)
 
 
 if __name__ == "__main__":

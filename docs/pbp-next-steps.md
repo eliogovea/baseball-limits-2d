@@ -33,32 +33,65 @@ let-s-design-how-to-merry-pearl.md`. Format/scope: `docs/pbp-data-format.md`.
 - Server must serve `.gz` as raw bytes (python http.server does; Content-Type
   `application/gzip`, no Content-Encoding) so `DecompressionStream` works.
 
-## Phase 2 — pitching + multi-year cursor (T3)
-1. **Converter pitching support.** Generalize `convert_retrosheet_pbp.py`:
-   - Add a `PITCHING_COLUMNS` map (out_name -> Retrosheet `p_*` field). Inspect
-     `head -1 pitching.csv` for the real column names (likely `p_ip`/`p_bfp`/
-     `p_h`/`p_er`/`p_bb`/`p_so`/`p_hr`/… and `p_gs`,`p_cg`,`p_sho`,`p_sv`,`p_w`,
-     `p_l`). IPouts: Retrosheet may give outs directly or innings — confirm and
-     convert to IPouts to match the site's `PITCHING_COUNT_COLS`.
-   - Add a `--dataset {batting,pitching}` flag (or auto-detect by header); emit
-     `p<year>.bl2p.gz` with `dataset=1` in the header. The `parseBl2p` reader
-     already ignores the dataset byte, so add a `pbpPointsAsOf` pitching branch
-     (call `parsePitchingRows` instead of `parseBattingRows`, keyed off the
-     active dataset / a field in the decoded struct).
-2. **Generate the corpus.** `python3 scripts/convert_retrosheet_pbp.py <batting.csv> 1920-2025`
-   and the pitching equivalent. Expect ~18 MB of `.bl2p.gz` total. Commit them.
-3. **Multi-year cursor.** Today the cursor is single-season (tied to the end-year
-   input). Generalize: a virtual timeline over the selected year range; when the
-   cursor crosses a season boundary, lazy-load the next year (`decodePbpSeason`),
-   prefetch the next year when the cursor enters the last ~10 dates. The "Smooth"
-   toggle should drive the whole `sy..ey` window, not just `ey`.
-4. **Default-year UX.** Right now clicking "Smooth" with the default end-year
-   (2024) 404s → "No game-by-game data". With the full corpus this disappears,
-   but verify the toggle picks a sensible season.
+## Phase 2 — multi-year cursor + full batting corpus (T3) — **DONE** (this branch)
 
-**Verify:** decode-count per season == regular-season CSV rows; a known pitching
-record (e.g. a 20-win season reaches W=20 at year end, Pedro 2000 ERA sane);
-pitching season-end frontier ≈ Lahman pitching frontier.
+**Multi-year cursor (shipped).** The cursor is now a virtual timeline over the
+selected `sy..ey` window (`buildPbpTimeline` + helpers in `script.js`). The global
+`pbpCursorIdx` indexes a concatenation of every year's game-date table; years are
+decoded lazily as the cursor reaches them, the neighbouring year is prefetched
+within `PBP_PREFETCH_TAIL` of an edge, and 404 years are marked `missing` and
+skipped. `pbpPointsAsOf(decoded, withinIdx, dataset)` is dataset-aware (routes to
+`parseBattingRows`/`parsePitchingRows`).
+
+**The frontier ACCUMULATES across years — it does not reset per season.** The point
+the cursor is "open" on (the current year) is the only one that grows game-by-game
+from its PBP partial; all *completed* seasons stay on the chart at their full
+(Lahman) season totals, pulled straight from `data.points`. So the rendered window
+runs `sYear..openYear` (not `sY=eY=openYear`), and the all-time-best envelope evolves
+outward as the cursor sweeps — you watch records get set and broken across years.
+A nice consequence: only the open season needs its PBP file; prior years render from
+the already-loaded season data, so the animation only ever fetches one season at a
+time. Axes lock to the **full selected window's** final envelope (`pbpComputeExtent`
+over `data.points` in `sYear..eYear`), so they're fixed from frame 1 and the frontier
+grows into a stable frame.
+
+The `t=YYYYMMDD` deep-link sets the window's end year and lands the cursor on that
+date; switching dataset disables smooth; changing s/e re-builds. Verified: single-year
+regression (McGwire 1998→70 HR at year-end), 1953–1955 boundary crossing (one
+transition each, never lands on a missing year), 404-gap skip, zero-coverage
+fallback, deep-link, and two key invariants — (1) 1998 season-final cursor frontier ==
+Lahman season frontier on HR×SB (identical 7-player set); (2) the accumulating final
+frontier of a multi-year window == the static multi-year season frontier (1953–1955 →
+Bruton 1954 / Miñoso 1953 / Mays 1955, identical set), confirming the frontier really
+spans years rather than resetting.
+
+**Full batting corpus (shipped).** `data/pbp/b1920..b2025.bl2p.gz` committed
+(~12 MB). Converter generalized with a `--dataset {batting,pitching}` flag +
+`DATASETS` table; batting output is byte-identical to before (decompressed-bytes
+diff clean on 1998). Re-fetch sources per the env notes; the 681 MB CSV is streamed
+once per year (slow — ~minutes for the full range).
+
+### Phase 2 leftover — **pitching corpus + read path (deferred, T3)**
+The converter's `--dataset pitching` path is scaffolded but **gated off** with a
+`sys.exit` because the pitching source needs derivation work that the simple
+column-map can't express (and can't be verified until the pitching read path
+exists). Confirmed against the real `pitching.csv` header (2026-06):
+- **Direct columns** (already in `PITCHING_COLUMNS`): `p_ipouts`→IPouts, `p_bfp`,
+  `p_h`, `p_hr`, `p_r`, `p_er`, `p_w`(=BB/walks), `p_iw`→IBB, `p_k`→SO, `p_hbp`,
+  `p_wp`, `p_bk`, `p_sh`, `p_sf`, `p_gs`, `p_gf`, `p_cg`.
+- **Need derivation** (not direct columns): `W`/`L`/`SV` are per-game *decision*
+  fields — the `wp`/`lp`/`save` columns hold the credited pitcher's retroID, so
+  `W += 1 when row.id == row.wp`, etc. `SHO` = complete game with zero runs
+  (`p_cg == 1 && p_r == 0`). `GIDP` is **absent** from `pitching.csv` (drop it or
+  leave it 0 — it isn't a pitching chart dimension anyway).
+- To finish: extend `read_season` to compute these derived deltas for pitching,
+  remove the `sys.exit` gate in `convert()`, generate `p1920..p2025.bl2p.gz`
+  (~6 MB), and exercise the JS read path — `pbpPointsAsOf` already routes to
+  `parsePitchingRows`, so the remaining JS work is just letting the dataset toggle
+  re-enable smooth onto a pitching corpus instead of disabling it.
+- **Verify (pitching):** decode-count == regular-season rows; a 20-win season
+  reaches `W=20` at year end; Pedro 2000 ERA sane; pitching season-end frontier
+  ≈ Lahman pitching frontier (rate axes close-but-not-equal, don't assert equality).
 
 ## Phase 3 — career-cumulative smooth sweep (T3)
 - Career synthetic point = `aggregateCareer` (script.js ~L1340) over prior
