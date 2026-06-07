@@ -1,0 +1,25 @@
+#version 450
+// Consume one event per invocation and accumulate it into the persistent
+// per-player counters. This is the designed model: the CPU advances a cursor
+// and dispatches us only over the new [lo, lo+count) slice of date-sorted
+// events each frame; we never scan full history. atomicAdd because several
+// events in the same slice can target the same player.
+layout(local_size_x = 64) in;
+
+// events[] is packed 3 uints per event: player, stat (0=HR, 1=SB), count.
+layout(std430, binding = 0) readonly buffer Events { uint events[]; };
+layout(std430, binding = 1)          buffer Hr     { uint hr[]; };
+layout(std430, binding = 2)          buffer Sb     { uint sb[]; };
+
+layout(push_constant) uniform PC { uint lo; uint count; } pc;
+
+void main() {
+    uint g = gl_GlobalInvocationID.x;
+    if (g >= pc.count) return;
+    uint e      = (pc.lo + g) * 3u;
+    uint player = events[e + 0u];
+    uint stat   = events[e + 1u];
+    uint cnt    = events[e + 2u];
+    if (stat == 0u) atomicAdd(hr[player], cnt);
+    else            atomicAdd(sb[player], cnt);
+}
