@@ -17,7 +17,8 @@ ICD := VK_ICD_FILENAMES=$(BREW)/etc/vulkan/icd.d/MoltenVK_icd.json \
 VAL := VK_LAYER_PATH=$(VKVL)/share/vulkan/explicit_layer.d \
        DYLD_LIBRARY_PATH=$(BREW)/lib BL2D_VALIDATE=1
 
-SHADERS := shaders/accumulate.comp.spv shaders/points.vert.spv shaders/points.frag.spv
+SHADERS := shaders/accumulate.comp.spv shaders/points.vert.spv shaders/points.frag.spv \
+           shaders/line.vert.spv shaders/line.frag.spv
 
 all: poc-vulkan $(SHADERS)
 

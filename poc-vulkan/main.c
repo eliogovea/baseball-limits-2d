@@ -54,6 +54,13 @@ typedef struct { uint32_t date, player, count, stat; } Ev;  // stat: 0=HR, 1=SB
 static Ev      *g_ev;                      // all events, sorted by date
 static uint32_t g_evN;
 
+// Pareto frontier, maintained incrementally. Kept sorted by x ascending (so y
+// is strictly descending — a staircase). Parallel arrays + a count.
+#define MAX_FRONT 2048                     // real frontier is dozens; assert-guarded
+static uint32_t g_frX[MAX_FRONT], g_frY[MAX_FRONT], g_frP[MAX_FRONT];
+static int      g_frN;
+static uint32_t *g_onFront;                // -> mapped GPU buffer, 1 if on frontier
+
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
@@ -172,6 +179,59 @@ static void write_bmp(const char *path, const uint8_t *bgra, uint32_t w, uint32_
         fwrite(pad, 1, row - w * 3, f);
     }
     fclose(f);
+}
+
+// Incremental Pareto update for player p, which just moved to (x,y). Events are
+// monotone (points only go up/right), so: p is the only point that can join the
+// frontier; it can evict a contiguous run of points it now dominates; and
+// nothing else is ever promoted. The frontier stays sorted by x ascending.
+static void frontier_apply_event(uint32_t p, uint32_t x, uint32_t y) {
+    // 1. p already on the frontier? Splice out its stale entry (it's moving up/
+    //    right; its removal can't promote anyone). Then re-evaluate uniformly.
+    if (g_onFront[p]) {
+        for (int i = 0; i < g_frN; i++) if (g_frP[i] == p) {
+            memmove(&g_frX[i], &g_frX[i+1], (g_frN-i-1)*4);
+            memmove(&g_frY[i], &g_frY[i+1], (g_frN-i-1)*4);
+            memmove(&g_frP[i], &g_frP[i+1], (g_frN-i-1)*4);
+            g_frN--; break;
+        }
+        g_onFront[p] = 0;
+    }
+    // 2. Dominated by a current frontier point? The candidate is the first entry
+    //    with x' >= x (largest y among those), since y descends with x.
+    int k = 0; while (k < g_frN && g_frX[k] < x) k++;
+    if (k < g_frN && g_frY[k] >= y) return;          // dominated → not on frontier
+    // 3. p joins: drop the contiguous run it dominates (x' <= x && y' <= y)...
+    int j = 0; while (j < g_frN && !(g_frX[j] <= x && g_frY[j] <= y)) j++;
+    int e = j; while (e < g_frN && g_frX[e] <= x && g_frY[e] <= y) e++;
+    if (e > j) {
+        memmove(&g_frX[j], &g_frX[e], (g_frN-e)*4);
+        memmove(&g_frY[j], &g_frY[e], (g_frN-e)*4);
+        memmove(&g_frP[j], &g_frP[e], (g_frN-e)*4);
+        g_frN -= e - j;
+    }
+    // ...then insert p at its sorted slot (j if a run was removed, else by x).
+    int ins = (e > j) ? j : 0;
+    if (e == j) while (ins < g_frN && g_frX[ins] < x) ins++;
+    assert(g_frN + 1 <= MAX_FRONT);
+    memmove(&g_frX[ins+1], &g_frX[ins], (g_frN-ins)*4);
+    memmove(&g_frY[ins+1], &g_frY[ins], (g_frN-ins)*4);
+    memmove(&g_frP[ins+1], &g_frP[ins], (g_frN-ins)*4);
+    g_frX[ins] = x; g_frY[ins] = y; g_frP[ins] = p; g_frN++;
+    g_onFront[p] = 1;
+}
+
+// Build the frontier staircase as a line strip (in HR/SB units) into out;
+// returns the vertex count. Each step is a horizontal then a vertical segment.
+static uint32_t build_staircase(float *out) {
+    if (g_frN == 0) return 0;
+    uint32_t n = 0;
+    out[n*2] = g_frX[0]; out[n*2+1] = g_frY[0]; n++;
+    for (int i = 1; i < g_frN; i++) {
+        out[n*2] = g_frX[i]; out[n*2+1] = g_frY[i-1]; n++;   // across at prev y
+        out[n*2] = g_frX[i]; out[n*2+1] = g_frY[i];   n++;   // down to new y
+    }
+    return n;
 }
 
 // ============================================================================
@@ -386,45 +446,53 @@ int main(void) {
     }
 
     // ------------------------------------------------------------------
-    // GPU BUFFERS — all host-visible|coherent (Apple unified memory). 4 storage
+    // GPU BUFFERS — all host-visible|coherent (Apple unified memory). 6 storage
     // buffers, one shared descriptor set:
-    //   0 events  (player,stat,count x3)   resident, uploaded once
-    //   1 hr      per-player counter        compute atomicAdd, vertex read
-    //   2 sb      per-player counter        compute atomicAdd, vertex read
-    //   3 debut   per-player debut year     vertex read (era colour)
+    //   0 events    (player,stat,count x3)  resident, uploaded once
+    //   1 hr        per-player counter       compute atomicAdd, vertex read
+    //   2 sb        per-player counter       compute atomicAdd, vertex read
+    //   3 debut     per-player debut year    vertex read (era colour)
+    //   4 onFront   per-player frontier flag CPU writes, vertex read (highlight)
+    //   5 staircase frontier line-strip xy   CPU writes, vertex read (line draw)
     // hr/sb also need TRANSFER_DST so the loop can zero them on wrap.
     // ------------------------------------------------------------------
     VkMemoryPropertyFlags hostMem = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     VkBufferUsageFlags storage  = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     VkBufferUsageFlags storageT = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    VkBuffer buf[4]; VkDeviceMemory bmem[4];
-    VkDeviceSize bsize[4] = {
+    VkBuffer buf[6]; VkDeviceMemory bmem[6];
+    VkDeviceSize bsize[6] = {
         (VkDeviceSize)g_evN * 3 * 4,         // 0 events
         (VkDeviceSize)playerCount * 4,       // 1 hr
         (VkDeviceSize)playerCount * 4,       // 2 sb
-        (VkDeviceSize)playerCount * 4 };     // 3 debut
+        (VkDeviceSize)playerCount * 4,       // 3 debut
+        (VkDeviceSize)playerCount * 4,       // 4 onFront
+        (VkDeviceSize)MAX_FRONT * 2 * 2 * 8 };// 5 staircase (<=1+2*(K-1) vec2)
     create_buffer(device, phys, bsize[0], storage,  hostMem, evPacked, &buf[0], &bmem[0]);
     create_buffer(device, phys, bsize[1], storageT, hostMem, zeros,    &buf[1], &bmem[1]);
     create_buffer(device, phys, bsize[2], storageT, hostMem, zeros,    &buf[2], &bmem[2]);
     create_buffer(device, phys, bsize[3], storage,  hostMem, g_debut,  &buf[3], &bmem[3]);
-    void *hrMap, *sbMap;
+    create_buffer(device, phys, bsize[4], storage,  hostMem, zeros,    &buf[4], &bmem[4]);
+    create_buffer(device, phys, bsize[5], storage,  hostMem, NULL,     &buf[5], &bmem[5]);
+    void *hrMap, *sbMap, *staircaseMap;
     vk_check(vkMapMemory(device, bmem[1], 0, bsize[1], 0, &hrMap));
     vk_check(vkMapMemory(device, bmem[2], 0, bsize[2], 0, &sbMap));
+    vk_check(vkMapMemory(device, bmem[4], 0, bsize[4], 0, (void **)&g_onFront));
+    vk_check(vkMapMemory(device, bmem[5], 0, bsize[5], 0, &staircaseMap));
 
     // ------------------------------------------------------------------
     // DESCRIPTORS — one set layout (4 storage buffers, visible to compute and
     // vertex) shared by both pipelines; one descriptor set bound to both.
     // ------------------------------------------------------------------
-    VkDescriptorSetLayoutBinding binds[4];
-    for (int i = 0; i < 4; i++)
+    VkDescriptorSetLayoutBinding binds[6];
+    for (int i = 0; i < 6; i++)
         binds[i] = (VkDescriptorSetLayoutBinding){ .binding = (uint32_t)i,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT };
     VkDescriptorSetLayoutCreateInfo dslci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 4, .pBindings = binds };
+        .bindingCount = 6, .pBindings = binds };
     VkDescriptorSetLayout dsl; vk_check(vkCreateDescriptorSetLayout(device, &dslci, NULL, &dsl));
 
-    VkDescriptorPoolSize psize = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 };
+    VkDescriptorPoolSize psize = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6 };
     VkDescriptorPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .poolSizeCount = 1, .pPoolSizes = &psize, .maxSets = 1 };
     VkDescriptorPool pool; vk_check(vkCreateDescriptorPool(device, &pci, NULL, &pool));
@@ -432,14 +500,14 @@ int main(void) {
         .descriptorPool = pool, .descriptorSetCount = 1, .pSetLayouts = &dsl };
     VkDescriptorSet dset; vk_check(vkAllocateDescriptorSets(device, &dai, &dset));
 
-    VkDescriptorBufferInfo dbi[4]; VkWriteDescriptorSet writes[4];
-    for (int i = 0; i < 4; i++) {
+    VkDescriptorBufferInfo dbi[6]; VkWriteDescriptorSet writes[6];
+    for (int i = 0; i < 6; i++) {
         dbi[i] = (VkDescriptorBufferInfo){ buf[i], 0, bsize[i] };
         writes[i] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet = dset, .dstBinding = (uint32_t)i, .descriptorCount = 1,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &dbi[i] };
     }
-    vkUpdateDescriptorSets(device, 4, writes, 0, NULL);
+    vkUpdateDescriptorSets(device, 6, writes, 0, NULL);
 
     // ------------------------------------------------------------------
     // PIPELINES — accumulate (push: lo, count) and graphics points (push:
@@ -448,6 +516,8 @@ int main(void) {
     VkShaderModule comp = load_shader(device, "shaders/accumulate.comp.spv");
     VkShaderModule vert = load_shader(device, "shaders/points.vert.spv");
     VkShaderModule frag = load_shader(device, "shaders/points.frag.spv");
+    VkShaderModule lvert = load_shader(device, "shaders/line.vert.spv");
+    VkShaderModule lfrag = load_shader(device, "shaders/line.frag.spv");
 
     VkPushConstantRange cpcRange = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 8 };
     VkPipelineLayoutCreateInfo cplci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -490,6 +560,19 @@ int main(void) {
         .pColorBlendState = &cb, .layout = graphicsLayout, .renderPass = renderPass, .subpass = 0 };
     VkPipeline graphicsPipe; vk_check(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gpci, NULL, &graphicsPipe));
 
+    // Line pipeline for the frontier staircase — same layout/state, but a
+    // line-strip topology and the line shaders (vertex-pull from staircase[]).
+    VkPipelineShaderStageCreateInfo lstages[2] = {
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = lvert, .pName = "main" },
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = lfrag, .pName = "main" } };
+    VkPipelineInputAssemblyStateCreateInfo iaLine = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP };
+    VkGraphicsPipelineCreateInfo lpci = gpci;
+    lpci.pStages = lstages; lpci.pInputAssemblyState = &iaLine;
+    VkPipeline linePipe; vk_check(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &lpci, NULL, &linePipe));
+
     // ------------------------------------------------------------------
     // COMMAND POOL + per-frame command buffers + sync objects.
     // (render-finished semaphore is per swapchain image, not per frame.)
@@ -498,7 +581,10 @@ int main(void) {
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = qfi };
     VkCommandPool cpool; vk_check(vkCreateCommandPool(device, &cpoolci, NULL, &cpool));
 
-    enum { FIF = 2 };
+    // FIF = 1: one frame in flight. The CPU rewrites the onFront/staircase
+    // buffers every frame, so we fully serialize (wait the fence before writing)
+    // rather than double-buffer them — simplest correct choice for a POC.
+    enum { FIF = 1 };
     VkCommandBuffer cmd[FIF];
     VkCommandBufferAllocateInfo cbai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = cpool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = FIF };
@@ -524,9 +610,17 @@ int main(void) {
 
     if (snapshot) {
         // -------------------- HEADLESS SNAPSHOT --------------------
-        // Apply every event once (full careers), then diff GPU vs a CPU replay
-        // and dump a BMP. No swapchain present needed, but the image must be
-        // acquired before we render into / transition it.
+        // Apply every event once (full careers). Build the frontier on the CPU
+        // first so the highlight + staircase are ready to render; then diff the
+        // GPU counters vs the CPU replay and the frontier vs a brute-force check.
+        // No swapchain present needed, but the image must be acquired first.
+        uint32_t *hrc = calloc(playerCount, 4), *sbc = calloc(playerCount, 4);
+        for (uint32_t i = 0; i < g_evN; i++) {
+            uint32_t p = g_ev[i].player;
+            (g_ev[i].stat == 0 ? hrc : sbc)[p] += g_ev[i].count;
+            frontier_apply_event(p, hrc[p], sbc[p]);
+        }
+        uint32_t lineVerts = build_staircase(staircaseMap);
         uint32_t cpc[2] = { 0, g_evN };
 
         VkBuffer rb; VkDeviceMemory rbmem;
@@ -552,6 +646,11 @@ int main(void) {
         vkCmdBindDescriptorSets(cmd[0], VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsLayout, 0, 1, &dset, 0, NULL);
         vkCmdPushConstants(cmd[0], graphicsLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 8, gpc);
         vkCmdDraw(cmd[0], playerCount, 1, 0, 0);
+        if (lineVerts >= 2) {                       // draw the frontier staircase
+            vkCmdBindPipeline(cmd[0], VK_PIPELINE_BIND_POINT_GRAPHICS, linePipe);
+            vkCmdPushConstants(cmd[0], graphicsLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 8, gpc);
+            vkCmdDraw(cmd[0], lineVerts, 1, 0, 0);
+        }
         vkCmdEndRenderPass(cmd[0]);
         VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
             .oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -572,24 +671,40 @@ int main(void) {
         vk_check(vkQueueSubmit(queue, 1, &si, inFlight[0]));
         vkWaitForFences(device, 1, &inFlight[0], VK_TRUE, UINT64_MAX);
 
-        // CPU replay (mirrors the compute shader) -> reference counters.
-        uint32_t *hrc = calloc(playerCount, 4), *sbc = calloc(playerCount, 4);
-        for (uint32_t i = 0; i < g_evN; i++)
-            (g_ev[i].stat == 0 ? hrc : sbc)[g_ev[i].player] += g_ev[i].count;
+        // (1) GPU counters == CPU replay?
         const uint32_t *hg = hrMap, *sg = sbMap;
         uint32_t mism = 0;
         for (uint32_t i = 0; i < playerCount; i++)
             if (hg[i] != hrc[i] || sg[i] != sbc[i]) mism++;
-        printf("snapshot (all %u events): mismatches: %u / %u\n", g_evN, mism, playerCount);
+        printf("snapshot (all %u events): counter mismatches: %u / %u\n", g_evN, mism, playerCount);
+
+        // (2) Incremental frontier == brute-force O(N^2) frontier (as coordinate
+        //     sets). dom[i] = player i's (HR,SB) is strictly dominated by someone.
+        uint8_t *dom = calloc(playerCount, 1);
+        for (uint32_t i = 0; i < playerCount; i++)
+            for (uint32_t j = 0; j < playerCount; j++)
+                if (hrc[j] >= hrc[i] && sbc[j] >= sbc[i] && (hrc[j] > hrc[i] || sbc[j] > sbc[i])) { dom[i] = 1; break; }
+        uint32_t fmis = 0;
+        for (int i = 0; i < g_frN; i++) if (dom[g_frP[i]]) fmis++;      // no invalid members
+        for (uint32_t i = 0; i < playerCount; i++) if (!dom[i]) {        // every non-dom coord present
+            int lo = 0, hi = g_frN;                                     // binary search frX (x distinct)
+            while (lo < hi) { int m = (lo + hi) / 2; if (g_frX[m] < hrc[i]) lo = m + 1; else hi = m; }
+            if (lo >= g_frN || g_frX[lo] != hrc[i] || g_frY[lo] != sbc[i]) fmis++;
+        }
+        printf("frontier: incremental vs brute-force: %u mismatches (frontier size %d)\n", fmis, g_frN);
+
+        // frontier endpoints (min-HR/max-SB end and max-HR end) + record-holders
+        if (g_frN) printf("  SB end: %-18s HR=%u SB=%u\n", g_name[g_frP[0]], g_frX[0], g_frY[0]);
+        if (g_frN) printf("  HR end: %-18s HR=%u SB=%u\n", g_name[g_frP[g_frN-1]], g_frX[g_frN-1], g_frY[g_frN-1]);
         for (uint32_t i = 0; i < playerCount; i++)
             if (!strcmp(g_name[i], "Barry Bonds") || !strcmp(g_name[i], "Rickey Henderson"))
-                printf("  %-18s HR=%u SB=%u\n", g_name[i], hg[i], sg[i]);
+                printf("  %-18s HR=%u SB=%u  %s\n", g_name[i], hg[i], sg[i], g_onFront[i] ? "[frontier]" : "");
 
         void *px; vk_check(vkMapMemory(device, rbmem, 0, rbsize, 0, &px));
         write_bmp("/tmp/poc-vulkan.bmp", px, extent.width, extent.height);
         vkUnmapMemory(device, rbmem);
         printf("wrote /tmp/poc-vulkan.bmp (%ux%u)\n", extent.width, extent.height);
-        return mism == 0 ? 0 : 1;
+        return (mism == 0 && fmis == 0) ? 0 : 1;
     }
 
     // -------------------- LIVE AUTO-PLAY LOOP --------------------
@@ -598,6 +713,8 @@ int main(void) {
     // counters and replay from the start (accumulation is forward-only).
     float cursor = 0.0f, datesPerSec = 600.0f;  // full 1871->2025 sweep ~30 s
     uint32_t applied = 0;
+    uint32_t *hrCpu = calloc(playerCount, 4), *sbCpu = calloc(playerCount, 4);  // shadow
+    uint32_t lineVerts = 0;
     double prev = glfwGetTime();
     int fif = 0;
     while (!glfwWindowShouldClose(window)) {
@@ -617,6 +734,22 @@ int main(void) {
 
         vkWaitForFences(device, 1, &inFlight[fif], VK_TRUE, UINT64_MAX);
         vkResetFences(device, 1, &inFlight[fif]);
+
+        // CPU frontier maintenance, in lockstep with the GPU accumulate window.
+        // Done after the fence wait, since it rewrites the GPU-read onFront /
+        // staircase buffers (and FIF=1 means the prior frame is now done).
+        if (wrapped) {
+            g_frN = 0;
+            memset(g_onFront, 0, (size_t)playerCount * 4);
+            memset(hrCpu, 0, (size_t)playerCount * 4);
+            memset(sbCpu, 0, (size_t)playerCount * 4);
+        }
+        for (uint32_t e = lo; e < target; e++) {
+            uint32_t p = g_ev[e].player;
+            (g_ev[e].stat == 0 ? hrCpu : sbCpu)[p] += g_ev[e].count;
+            frontier_apply_event(p, hrCpu[p], sbCpu[p]);
+        }
+        lineVerts = build_staircase(staircaseMap);
 
         uint32_t img;
         vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imgAvail[fif], VK_NULL_HANDLE, &img);
@@ -649,6 +782,11 @@ int main(void) {
         vkCmdBindDescriptorSets(cmd[fif], VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsLayout, 0, 1, &dset, 0, NULL);
         vkCmdPushConstants(cmd[fif], graphicsLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 8, gpc);
         vkCmdDraw(cmd[fif], playerCount, 1, 0, 0);
+        if (lineVerts >= 2) {                       // draw the frontier staircase
+            vkCmdBindPipeline(cmd[fif], VK_PIPELINE_BIND_POINT_GRAPHICS, linePipe);
+            vkCmdPushConstants(cmd[fif], graphicsLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 8, gpc);
+            vkCmdDraw(cmd[fif], lineVerts, 1, 0, 0);
+        }
         vkCmdEndRenderPass(cmd[fif]);
         vkEndCommandBuffer(cmd[fif]);
         applied = target;

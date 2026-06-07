@@ -2,9 +2,11 @@
 // Vertex-pull: no vertex buffers. gl_VertexIndex is the player index; we read
 // that player's accumulated (HR, SB) counters straight from the buffers the
 // compute shader maintains, map to clip space, and colour by debut era.
-layout(std430, binding = 1) readonly buffer Hr    { uint hr[]; };
-layout(std430, binding = 2) readonly buffer Sb    { uint sb[]; };
-layout(std430, binding = 3) readonly buffer Debut { uint debut[]; };
+// Frontier players (onFront) are drawn brighter and larger; the rest dimmed.
+layout(std430, binding = 1) readonly buffer Hr      { uint hr[]; };
+layout(std430, binding = 2) readonly buffer Sb      { uint sb[]; };
+layout(std430, binding = 3) readonly buffer Debut   { uint debut[]; };
+layout(std430, binding = 4) readonly buffer OnFront { uint onFront[]; };
 
 layout(push_constant) uniform PC { float maxX; float maxY; } pc;
 
@@ -22,11 +24,18 @@ vec3 eraColor(float yr) {
 void main() {
     uint idx = uint(gl_VertexIndex);
 
-    // [0, max] -> [-1, 1]; flip Y so more steals/HR go up the screen.
-    float x = (float(hr[idx]) / max(pc.maxX, 1.0)) * 2.0 - 1.0;
-    float y = (float(sb[idx]) / max(pc.maxY, 1.0)) * 2.0 - 1.0;
-    gl_Position  = vec4(x, -y, 0.0, 1.0);
-    gl_PointSize = 3.0;
+    // [0, max] -> [-0.95, 0.95] (small margin so the record-holders at the axis
+    // maxima aren't clipped at the screen edge); flip Y so more goes up.
+    float x = (float(hr[idx]) / max(pc.maxX, 1.0)) * 1.9 - 0.95;
+    float y = (float(sb[idx]) / max(pc.maxY, 1.0)) * 1.9 - 0.95;
+    gl_Position = vec4(x, -y, 0.0, 1.0);
 
-    vColor = eraColor(float(debut[idx]));
+    vec3 era = eraColor(float(debut[idx]));
+    if (onFront[idx] != 0u) {            // frontier point: pop it out
+        gl_PointSize = 7.0;
+        vColor = mix(era, vec3(1.0), 0.55);
+    } else {                             // background cloud: dimmed
+        gl_PointSize = 3.0;
+        vColor = era * 0.55;
+    }
 }

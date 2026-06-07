@@ -38,14 +38,42 @@ data/pbp/sb.evt.gz ┘  {player, stat, count} resident on the GPU
 - **Auto-play.** The cursor sweeps the full date range (~30 s) and loops. Accumulation is
   forward-only, so on wrap the counters are zeroed (`vkCmdFillBuffer`) and replayed. Bonds
   climbs the HR axis, Henderson runs out the SB axis, the cloud lights up by era.
+- **Live Pareto frontier.** The non-dominated "limits" envelope (upper-right: maximise both
+  HR and SB) is tracked and drawn — frontier players are highlighted (brighter + larger) and
+  the **staircase** connecting them is drawn over the cloud, both evolving each frame.
+
+## Tracking the frontier (incremental, exploiting monotone events)
+
+Every event only *increases* one coordinate, so points move up/right, never down/left. That
+makes the frontier cheap to maintain **incrementally on the CPU**, in lockstep with the event
+cursor it already drives (it keeps a shadow `hr/sb` — one `+=` per event — so it knows each new
+position with **no GPU readback**). For one event on player `p`:
+
+- `p` is the only point that can **join** the frontier (≤ 1 insertion);
+- `p`'s new position can **evict** a *contiguous run* of points it now dominates (the frontier
+  is kept sorted by x-ascending / y-descending — a staircase);
+- nothing else is ever **promoted** (no other point moved, and `p`'s new spot dominates its old
+  one), so no global rescan is needed; and a domination test for `p` only needs the current
+  frontier (domination is transitive).
+
+So each event is `O(log K + evicted)` with `K` (frontier size) tiny — `frontier_apply_event` in
+`main.c`. The CPU writes a per-player `onFront[]` flag buffer (highlight) and the staircase
+line-strip vertices into host-visible buffers the GPU reads; the GPU still owns the cloud's
+accumulate + render. (`make snapshot` cross-checks the incremental frontier against a
+brute-force O(N²) computation — see below.)
+
+> Aside: at *full career* the all-time HR×SB frontier is just **two** points — Henderson (1406
+> SB) and Bonds (762 HR) — since nobody else has both >296 HR and >514 SB. It's far richer
+> mid-history, which the live animation shows.
 
 ## Layout
 
 ```
 main.c                  decode + the whole Vulkan app + the headless snapshot harness
 shaders/accumulate.comp consume an event slice → atomicAdd into hr[]/sb[]
-shaders/points.vert     vertex-pull from hr[]/sb[] + debut[], era colour
+shaders/points.vert     vertex-pull from hr[]/sb[] + debut[], era colour + frontier highlight
 shaders/points.frag     round point sprite
+shaders/line.vert/frag  the frontier staircase (vertex-pull from the line-strip buffer)
 Makefile                glslc the shaders, build/link, run/snapshot/validate targets
 ```
 
@@ -74,19 +102,22 @@ make clean
 
 This sandbox has no Screen Recording permission, so the live window can't be
 screenshotted. `make snapshot` is the proof instead: it applies every event once
-(full careers), replays the same accumulation on the CPU, and diffs that against the
-GPU's `hr[]`/`sb[]` counters:
+(full careers) and checks **two** invariants — GPU counters vs a CPU replay, and the
+incremental frontier vs a brute-force O(N²) frontier:
 
 ```
 decoded 11131 players  maxHR=762 maxSB=1406  events=520200  dates=18186
-snapshot (all 520200 events): mismatches: 0 / 11131
-  Barry Bonds        HR=762 SB=514
-  Rickey Henderson   HR=296 SB=1406
+snapshot (all 520200 events): counter mismatches: 0 / 11131
+frontier: incremental vs brute-force: 0 mismatches (frontier size 2)
+  SB end: Rickey Henderson   HR=296 SB=1406
+  HR end: Barry Bonds        HR=762 SB=514
 wrote /tmp/poc-vulkan.bmp (2000x1600)   # retina: window is 1000x800
 ```
 
-`mismatches: 0` means the GPU accumulation matches the reference CPU replay for every
-player; the BMP is the rendered cloud.
+`counter mismatches: 0` means the GPU accumulation matches the reference CPU replay;
+`frontier ... 0 mismatches` means the incrementally-maintained frontier equals the
+ground-truth O(N²) Pareto set (as a coordinate set). The BMP shows the dimmed cloud with
+the highlighted frontier points and the staircase envelope.
 
 ## macOS / MoltenVK notes (all handled in the code + Makefile)
 
