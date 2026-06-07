@@ -247,6 +247,12 @@
                     <!-- Smooth (game-by-game) cursor: animates game by game from play-by-play.
                          Scrubber + date + the speed row below appear when on. -->
                     <div class="ctl-field ctl-field--inline ctl-smooth-row">
+                        <span class="ctl-icon" title="How the cursor moves through time" aria-hidden="true">
+                            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="8" cy="8" r="6"/>
+                                <path d="M8 4.6V8l2.6 1.6"/>
+                            </svg>
+                        </span>
                         <div class="seg-group" id="pbp-gran-seg" role="group" aria-label="Animation granularity" title="How the cursor moves through time">
                             <button type="button" class="seg-btn active" data-gran="pbp" title="Animate game by game (full date)">Play-by-play</button>
                             <button type="button" class="seg-btn" data-gran="season" title="Step season by season (year only)">Season</button>
