@@ -205,6 +205,7 @@ static void frontier_apply_event(uint32_t p, uint32_t x, uint32_t y) {
     int j = 0; while (j < g_frN && !(g_frX[j] <= x && g_frY[j] <= y)) j++;
     int e = j; while (e < g_frN && g_frX[e] <= x && g_frY[e] <= y) e++;
     if (e > j) {
+        for (int t = j; t < e; t++) g_onFront[g_frP[t]] = 0;   // evicted: clear highlight
         memmove(&g_frX[j], &g_frX[e], (g_frN-e)*4);
         memmove(&g_frY[j], &g_frY[e], (g_frN-e)*4);
         memmove(&g_frP[j], &g_frP[e], (g_frN-e)*4);
@@ -222,16 +223,18 @@ static void frontier_apply_event(uint32_t p, uint32_t x, uint32_t y) {
 }
 
 // Build the frontier staircase as a line strip (in HR/SB units) into out;
-// returns the vertex count. Each step is a horizontal then a vertical segment.
+// returns the vertex count. Matches the web app's staircaseScreen: a cap to the
+// y-axis at the top point, vertical-first steps (drop at the current x to the
+// next, lower y), and a final drop to the x-axis. fr is sorted x-asc / y-desc.
 static uint32_t build_staircase(float *out) {
     if (g_frN == 0) return 0;
     uint32_t n = 0;
-    out[n*2] = g_frX[0]; out[n*2+1] = g_frY[0]; n++;
-    for (int i = 1; i < g_frN; i++) {
-        out[n*2] = g_frX[i]; out[n*2+1] = g_frY[i-1]; n++;   // across at prev y
-        out[n*2] = g_frX[i]; out[n*2+1] = g_frY[i];   n++;   // down to new y
+    out[n*2] = 0;        out[n*2+1] = g_frY[0]; n++;          // left cap on the y-axis
+    for (int i = 0; i < g_frN; i++) {
+        out[n*2] = g_frX[i]; out[n*2+1] = g_frY[i];                   n++;  // the point
+        out[n*2] = g_frX[i]; out[n*2+1] = (i < g_frN-1) ? g_frY[i+1] : 0; n++;  // drop at this x
     }
-    return n;
+    return n;                                                  // last drop reaches the x-axis
 }
 
 // ============================================================================

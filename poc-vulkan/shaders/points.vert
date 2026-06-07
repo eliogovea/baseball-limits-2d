@@ -30,12 +30,11 @@ void main() {
     float y = (float(sb[idx]) / max(pc.maxY, 1.0)) * 1.9 - 0.95;
     gl_Position = vec4(x, -y, 0.0, 1.0);
 
-    vec3 era = eraColor(float(debut[idx]));
-    if (onFront[idx] != 0u) {            // frontier point: pop it out
-        gl_PointSize = 7.0;
-        vColor = mix(era, vec3(1.0), 0.55);
-    } else {                             // background cloud: dimmed
+    if (onFront[idx] != 0u) {            // frontier point: MLB red (as in the web app)
+        gl_PointSize = 5.0;
+        vColor = vec3(0.78, 0.06, 0.18);
+    } else {                             // background cloud: dimmed era colour
         gl_PointSize = 3.0;
-        vColor = era * 0.55;
+        vColor = eraColor(float(debut[idx])) * 0.55;
     }
 }
