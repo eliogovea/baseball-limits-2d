@@ -215,6 +215,17 @@
                         <select id="x-axis-select" class="field" aria-label="X axis statistic" title="X axis statistic"></select>
                         <select id="y-axis-select" class="field" aria-label="Y axis statistic" title="Y axis statistic"></select>
                     </div>
+                    <!-- Comparison-era range (era-vs-era overlay), aligned ABOVE the
+                         primary range. The center overlap-icon button enables/disables it;
+                         the year inputs stay dimmed + disabled until it's on. -->
+                    <div class="ctl-field ctl-field--inline ctl-year-row" id="era-b-row">
+                        <input type="number" id="sb-year-select" class="field" inputmode="numeric" aria-label="Comparison start year" title="Comparison era start" value="1900" disabled>
+                        <button type="button" id="era-compare-toggle" class="anim-play-btn era-compare-btn" aria-pressed="false" aria-label="Compare a second era" title="Compare a second era">
+                            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="6.2" cy="8" r="3.8"/><circle cx="9.8" cy="8" r="3.8"/></svg>
+                        </button>
+                        <input type="number" id="eb-year-select" class="field" inputmode="numeric" aria-label="Comparison end year" title="Comparison era end" value="1919" disabled>
+                    </div>
+                    <!-- Primary year range. The center ▶ plays the frontier/smooth animation. -->
                     <div class="ctl-field ctl-field--inline ctl-year-row">
                         <input type="number" id="s-year-select" class="field" inputmode="numeric" aria-label="Start year" title="Start year">
                         <button type="button" id="anim-play-btn" class="anim-play-btn" title="Animate frontier evolution" aria-label="Play frontier animation">
@@ -223,31 +234,31 @@
                         </button>
                         <input type="number" id="e-year-select" class="field" inputmode="numeric" aria-label="End year" title="End year">
                     </div>
-                    <!-- Smooth (game-by-game) cursor: animates the end-year season day by
-                         day from Retrosheet play-by-play. Scrubber + date appear when on. -->
+                    <!-- Smooth (game-by-game) cursor: animates game by game from play-by-play.
+                         Scrubber + date + the speed row below appear when on. -->
                     <div class="ctl-field ctl-field--inline ctl-smooth-row">
                         <button type="button" id="smooth-toggle" class="seg-btn" aria-pressed="false" title="Animate the selected year range game by game (Retrosheet play-by-play)">Smooth</button>
                         <button type="button" id="group-career-toggle" class="seg-btn" aria-pressed="false" title="Race the selected players' cumulative careers through stat-space" hidden>Group careers</button>
                         <input type="range" id="pbp-scrubber" class="pbp-scrubber" min="0" max="0" value="0" aria-label="Season date cursor" title="Drag through the season" hidden>
                         <span id="pbp-date" class="pbp-date" hidden></span>
-                        <select id="pbp-speed" class="pbp-speed" aria-label="Playback speed" title="Playback speed" hidden>
-                            <option value="0.25">0.25×</option>
-                            <option value="0.5">0.5×</option>
-                            <option value="1" selected>1×</option>
-                            <option value="2">2×</option>
-                            <option value="4">4×</option>
-                            <option value="8">8×</option>
-                        </select>
                     </div>
-                    <!-- Comparison-era range, aligned under the primary range. The center
-                         overlap-icon button enables/disables it (mirrors the ▶ position);
-                         the year inputs stay dimmed + disabled until it's on. -->
-                    <div class="ctl-field ctl-field--inline ctl-year-row" id="era-b-row">
-                        <input type="number" id="sb-year-select" class="field" inputmode="numeric" aria-label="Comparison start year" title="Comparison era start" value="1900" disabled>
-                        <button type="button" id="era-compare-toggle" class="anim-play-btn era-compare-btn" aria-pressed="false" aria-label="Compare a second era" title="Compare a second era">
-                            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="6.2" cy="8" r="3.8"/><circle cx="9.8" cy="8" r="3.8"/></svg>
-                        </button>
-                        <input type="number" id="eb-year-select" class="field" inputmode="numeric" aria-label="Comparison end year" title="Comparison era end" value="1919" disabled>
+                    <!-- Playback speed — segmented, like the layers control. Shown with smooth. -->
+                    <div class="ctl-field ctl-field--inline ctl-speed-row" id="pbp-speed-row" hidden>
+                        <span class="ctl-icon" title="Playback speed" aria-hidden="true">
+                            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M3 11.6 A 5.4 5.4 0 1 1 13 11.6"/>
+                                <path d="M8 11.2 11.4 6.4"/>
+                                <circle cx="8" cy="11.4" r="1" fill="currentColor" stroke="none"/>
+                            </svg>
+                        </span>
+                        <div class="seg-group" role="group" id="pbp-speed-seg" aria-label="Playback speed" title="Playback speed">
+                            <button type="button" class="seg-btn" data-speed="0.25">0.25×</button>
+                            <button type="button" class="seg-btn" data-speed="0.5">0.5×</button>
+                            <button type="button" class="seg-btn active" data-speed="1">1×</button>
+                            <button type="button" class="seg-btn" data-speed="2">2×</button>
+                            <button type="button" class="seg-btn" data-speed="4">4×</button>
+                            <button type="button" class="seg-btn" data-speed="8">8×</button>
+                        </div>
                     </div>
                     <div class="ctl-field ctl-field--inline ctl-colorby-row">
                         <span class="ctl-icon" title="Color dots by" aria-hidden="true">

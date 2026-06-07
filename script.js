@@ -1488,8 +1488,8 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     const smoothToggle = document.getElementById("smooth-toggle");
     const scrubber = document.getElementById("pbp-scrubber");
     const dateLabel = document.getElementById("pbp-date");
-    const speedSel = document.getElementById("pbp-speed");
-    speedSel?.addEventListener("change", () => { playbackSpeed = parseFloat(speedSel.value) || 1; });
+    const speedRow = document.getElementById("pbp-speed-row");
+    setupSegGroup("pbp-speed-seg", () => { playbackSpeed = parseFloat(getSegValue("pbp-speed-seg", "speed")) || 1; });
 
     function syncScrubber() {
         if (pbpEvt) {
@@ -1521,7 +1521,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         smoothToggle.setAttribute("aria-pressed", String(on));
         scrubber.hidden = !on;
         dateLabel.hidden = !on;
-        if (speedSel) speedSel.hidden = !on;
+        if (speedRow) speedRow.hidden = !on;
     }
     function stopPbpPlay() {
         const wasPlaying = !!pbpRaf;
