@@ -230,6 +230,14 @@
                         <button type="button" id="group-career-toggle" class="seg-btn" aria-pressed="false" title="Race the selected players' cumulative careers through stat-space" hidden>Group careers</button>
                         <input type="range" id="pbp-scrubber" class="pbp-scrubber" min="0" max="0" value="0" aria-label="Season date cursor" title="Drag through the season" hidden>
                         <span id="pbp-date" class="pbp-date" hidden></span>
+                        <select id="pbp-speed" class="pbp-speed" aria-label="Playback speed" title="Playback speed" hidden>
+                            <option value="0.25">0.25×</option>
+                            <option value="0.5">0.5×</option>
+                            <option value="1" selected>1×</option>
+                            <option value="2">2×</option>
+                            <option value="4">4×</option>
+                            <option value="8">8×</option>
+                        </select>
                     </div>
                     <!-- Comparison-era range, aligned under the primary range. The center
                          overlap-icon button enables/disables it (mirrors the ▶ position);

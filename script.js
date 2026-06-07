@@ -293,6 +293,7 @@ const GROUP_TRAIL_LEN = 40;     // max retained positions per player in a group-
 let pbpEvt = null;              // resident .evt full-history model (one counting-stat pair) when active, else null
 let smoothLite = false;        // while playing/scrubbing: skip interaction-only work (HV, cards, rings, quadtree) for demo-smooth frames; a full render fires when idle
 let smoothLiteTimer = null;    // debounce → full (interactive) render after the user stops scrubbing
+let playbackSpeed = 1;         // ▶ playback speed multiplier (1× = the default sweep pace); live-adjustable
 const evtStreamCache = new Map(); // `${dataset}:${stat}` -> Promise<decoded STEV>  (resident once loaded)
 // Per-dataset .evt registry. `stats` = raw streamed counting columns (committed as
 // data/pbp/<prefix><stat>.evt.gz); `derived` = axes computed per player from cumulative
@@ -1487,6 +1488,8 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     const smoothToggle = document.getElementById("smooth-toggle");
     const scrubber = document.getElementById("pbp-scrubber");
     const dateLabel = document.getElementById("pbp-date");
+    const speedSel = document.getElementById("pbp-speed");
+    speedSel?.addEventListener("change", () => { playbackSpeed = parseFloat(speedSel.value) || 1; });
 
     function syncScrubber() {
         if (pbpEvt) {
@@ -1518,6 +1521,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         smoothToggle.setAttribute("aria-pressed", String(on));
         scrubber.hidden = !on;
         dateLabel.hidden = !on;
+        if (speedSel) speedSel.hidden = !on;
     }
     function stopPbpPlay() {
         const wasPlaying = !!pbpRaf;
@@ -1533,14 +1537,15 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         stopAnimation();
         smoothLite = true;                         // lighten frames during playback
         clearTimeout(smoothLiteTimer);
-        const perYearMs = 10000;                   // ~10s per covered season …
-        const begin = performance.now();
+        const perYearMs = 10000;                   // ~10s per covered season at 1× …
         // .evt sweeps only the selected-year window; .bl2p sweeps its whole timeline.
         const lo = pbpEvt ? pbpEvt.winStart : 0;
         const hi = pbpEvt ? pbpEvt.winEnd : null;
+        // Advance the cursor incrementally by elapsed time × speed, so changing the
+        // speed mid-play smoothly changes the pace without jumping the cursor.
+        let pos = lo, lastNow = performance.now(), lastDraw = 0;
         pbpCursorIdx = lo;
         groupTrailHistory.clear();                 // restart trails from the sweep's origin
-        let lastDraw = 0;
         const btn = document.getElementById("anim-play-btn");
         btn.classList.add("playing");
         document.getElementById("anim-icon-play").hidden = true;
@@ -1550,14 +1555,16 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             const end = pbpEvt ? hi : pbpTimeline.totalEstimate - 1;
             const coveredYears = pbpEvt ? (pbpEvt.yearOf[hi] - pbpEvt.yearOf[lo] + 1)
                 : Math.max(1, pbpTimeline.years.filter((y) => y.status !== "missing").length);
-            const durMs = Math.min(PBP_PLAY_MAX_MS, perYearMs * coveredYears);  // … capped overall
-            const frac = Math.min(1, (now - begin) / durMs);
-            pbpCursorIdx = Math.min(end, lo + Math.floor(frac * (end - lo)));
+            const durMs = Math.min(PBP_PLAY_MAX_MS, perYearMs * coveredYears) / playbackSpeed;  // capped, then scaled by speed
+            const dt = now - lastNow; lastNow = now;
+            pos = Math.min(end, pos + (end - lo) * dt / Math.max(1, durMs));
+            pbpCursorIdx = Math.min(end, Math.floor(pos));
             syncScrubber();                         // cheap: scrubber position + date label only
             // Throttle the expensive chart re-render to ~15fps so a wide-window sweep
             // doesn't peg the main thread; always draw the final frame.
-            if (frac >= 1 || now - lastDraw >= PBP_PLAY_FRAME_MS) { refreshChart(); lastDraw = now; }
-            if (frac < 1) pbpRaf = requestAnimationFrame(tick);
+            const done = pos >= end;
+            if (done || now - lastDraw >= PBP_PLAY_FRAME_MS) { refreshChart(); lastDraw = now; }
+            if (!done) pbpRaf = requestAnimationFrame(tick);
             else stopPbpPlay();
         };
         pbpRaf = requestAnimationFrame(tick);

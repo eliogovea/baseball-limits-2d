@@ -2352,7 +2352,13 @@ input[type="number"].field::-webkit-outer-spin-button {
 /* With the group-career toggle added, the row can hold two buttons + scrubber +
    date; wrap so the scrubber drops to its own full-width line when crowded. */
 .ctl-smooth-row #group-career-toggle { white-space: nowrap; }
-.ctl-smooth-row .pbp-scrubber { flex: 1 1 100%; min-width: 0; accent-color: var(--mlb-red); }
+.ctl-smooth-row .pbp-scrubber { flex: 1 1 60%; min-width: 0; accent-color: var(--mlb-red); }
+.ctl-smooth-row .pbp-speed {
+    flex: 0 0 auto; font-size: 11px; padding: 2px 4px;
+    border: 1px solid var(--border, #d4d9e2); border-radius: 5px;
+    background: var(--panel, #fff); color: var(--text, #1a2230);
+    font-variant-numeric: tabular-nums; cursor: pointer;
+}
 .ctl-smooth-row .pbp-date {
     font-size: 11px;
     color: var(--text-muted, #667);
