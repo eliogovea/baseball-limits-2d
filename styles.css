@@ -2358,25 +2358,25 @@ input[type="number"].field::-webkit-outer-spin-button {
 .ctl-speed-row .seg-btn { font-variant-numeric: tabular-nums; padding-left: 2px; padding-right: 2px; }
 
 /* ── Play-by-play overlay (on the chart) ──────────────────────────────────────
-   The animation's progress bar + a big, fixed-position date readout live over the
-   chart so they're prominent and never reflow the sidebar as the date width changes. */
-.pbp-overlay {
-    position: absolute; left: 0; right: 0; top: 0; z-index: 4;
-    display: flex; flex-direction: column; gap: 6px;
-    padding: 8px 14px 0;
-    pointer-events: none;            /* only the scrubber is interactive */
-}
+   Progress bar pinned to the BOTTOM (media-player style); the date is a big, faint
+   watermark in the chart's EMPTY corner (the frontier's "ideal" corner — flips with
+   the chosen stats and best/worst, set per-frame via data-corner). */
+.pbp-overlay { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
 .pbp-overlay[hidden] { display: none; }
-.pbp-overlay .pbp-scrubber { pointer-events: auto; width: 100%; accent-color: var(--mlb-red); }
-.pbp-overlay .pbp-date {
-    align-self: flex-start;
-    display: inline-flex; align-items: baseline; gap: 8px;
-    padding: 2px 10px; border-radius: 8px;
-    background: color-mix(in srgb, var(--panel) 70%, transparent);
-    font-variant-numeric: tabular-nums; line-height: 1.1;
+.pbp-overlay .pbp-scrubber {
+    position: absolute; left: 0; right: 0; bottom: 0; width: 100%; margin: 0;
+    pointer-events: auto; accent-color: var(--mlb-red);
 }
-.pbp-overlay .pbp-dt-y { font-size: 26px; font-weight: 750; color: var(--text, #1a2230); }
-.pbp-overlay .pbp-dt-md { font-size: 13px; color: var(--text-muted, #667); min-width: 5.5ch; }
+.pbp-overlay .pbp-date {
+    position: absolute; display: flex; flex-direction: column; line-height: 1;
+    font-variant-numeric: tabular-nums; color: var(--text, #1a2230);
+}
+.pbp-overlay .pbp-date[data-corner$="r"] { right: 16px; align-items: flex-end; text-align: right; }
+.pbp-overlay .pbp-date[data-corner$="l"] { left: 16px; align-items: flex-start; }
+.pbp-overlay .pbp-date[data-corner^="t"] { top: 12px; }
+.pbp-overlay .pbp-date[data-corner^="b"] { bottom: 26px; }   /* clear the bottom scrubber */
+.pbp-overlay .pbp-dt-y { font-size: 52px; font-weight: 800; opacity: 0.5; letter-spacing: -1px; }
+.pbp-overlay .pbp-dt-md { font-size: 16px; font-weight: 600; opacity: 0.5; }
 .pbp-overlay .pbp-dt-d { display: inline-block; min-width: 1.4ch; text-align: right; }
 .pbp-overlay .pbp-dt-m { display: inline-block; min-width: 2.6ch; }
 

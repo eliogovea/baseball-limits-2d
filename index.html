@@ -156,11 +156,11 @@
                  + the progress bar, pinned over the chart so the sidebar controls don't
                  reflow as the date width changes during the animation. -->
             <div class="pbp-overlay" id="pbp-overlay" hidden>
-                <input type="range" id="pbp-scrubber" class="pbp-scrubber" min="0" max="0" value="0" aria-label="Time cursor" title="Drag through time">
-                <div class="pbp-date" id="pbp-date" aria-live="off">
+                <div class="pbp-date" id="pbp-date" data-corner="tr" aria-live="off">
                     <span class="pbp-dt-y"></span>
                     <span class="pbp-dt-md"><span class="pbp-dt-d"></span> <span class="pbp-dt-m"></span></span>
                 </div>
+                <input type="range" id="pbp-scrubber" class="pbp-scrubber" min="0" max="0" value="0" aria-label="Time cursor" title="Drag through time">
             </div>
             <div class="loading-indicator" id="loading-indicator" role="status" aria-live="polite">
                 <span class="spinner" aria-hidden="true"></span>

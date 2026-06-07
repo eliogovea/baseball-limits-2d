@@ -3374,6 +3374,11 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     let xSign = datasetDef.lowerIsBetter?.has(xDim) ? -1 : 1;
     let ySign = datasetDef.lowerIsBetter?.has(yDim) ? -1 : 1;
     if (showWorstFrontier) { xSign *= -1; ySign *= -1; }
+    // Park the date watermark in the frontier's "ideal" (empty) corner — where both
+    // axes are best, beyond the staircase. Flips with the stats' direction (lower-is-
+    // better) and best/worst. ySign>0 → higher is better → top; xSign>0 → right.
+    const pbpDateEl = document.getElementById("pbp-date");
+    if (pbpDateEl) pbpDateEl.dataset.corner = (ySign > 0 ? "t" : "b") + (xSign > 0 ? "r" : "l");
 
     const sortFrontierRows = (a, b) => {
         const ax = a.x * xSign, bx = b.x * xSign;
