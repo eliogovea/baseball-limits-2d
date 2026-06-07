@@ -1324,7 +1324,6 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
 
         updateYearHint(sYear, eYear);
         syncPlayerHint();
-        syncMobileAxisBar();
 
 
         // The "Loading data…" indicator is for the initial load and heavy filter
@@ -1438,15 +1437,6 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     };
     ["x-axis-select", "y-axis-select"].forEach((id) => {
         document.getElementById(id).addEventListener("change", axisOrViewChanged);
-    });
-    // Mobile axis bar: forward its changes to the real selects (which fire the
-    // handler above). The bar stays in sync via syncMobileAxisBar() in refreshChart.
-    ["x", "y"].forEach((ax) => {
-        document.getElementById(`${ax}-axis-mobile`)?.addEventListener("change", (e) => {
-            const main = document.getElementById(`${ax}-axis-select`);
-            main.value = e.target.value;
-            main.dispatchEvent(new Event("change"));
-        });
     });
     ["s-year-select", "e-year-select"].forEach((id) => {
         document.getElementById(id).addEventListener("change", () => {
@@ -2005,7 +1995,6 @@ function populateSelectorsForActive() {
     });
     xSelect.value = def.defaultX;
     ySelect.value = def.defaultY;
-    syncMobileAxisBar();
 
     document.getElementById("threshold-label").textContent = def.thresholdLabel;
 
@@ -2028,16 +2017,6 @@ function populateSelectorsForActive() {
 // Mirror the in-drawer axis selects into the mobile axis bar (options + value).
 // The bar's selects are display clones; their change handler drives the real
 // selects, and this keeps them in sync after dataset swaps / on-chart picks.
-function syncMobileAxisBar() {
-    ["x", "y"].forEach((ax) => {
-        const main = document.getElementById(`${ax}-axis-select`);
-        const mob = document.getElementById(`${ax}-axis-mobile`);
-        if (!main || !mob) return;
-        if (mob.innerHTML !== main.innerHTML) mob.innerHTML = main.innerHTML;
-        mob.value = main.value;
-    });
-}
-
 function parseUrlHash() {
     const raw = (window.location.hash || "").replace(/^#/, "");
     if (!raw) return {};

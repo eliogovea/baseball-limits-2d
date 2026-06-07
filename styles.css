@@ -1087,33 +1087,6 @@ html[data-theme="dark"] select.field {
     overflow: hidden;
 }
 
-/* Mobile axis bar — a persistent compact X-vs-Y selector above the drawer so
-   the chart's primary control isn't buried in the collapsed panel. Desktop
-   hides it (the sidebar always shows the full axis row). */
-.mobile-axis-bar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 16px;
-    border-top: 1px solid var(--border);
-    background: var(--panel);
-}
-.mobile-axis-bar select.field {
-    flex: 1 1 0;
-    min-width: 0;
-    font-weight: 600;
-    border-color: color-mix(in srgb, var(--mlb-blue) 35%, var(--border-strong));
-    background-color: color-mix(in srgb, var(--mlb-blue) 4%, var(--panel));
-}
-.mobile-axis-vs {
-    flex: 0 0 auto;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-muted);
-}
-
 .controls-toggle {
     display: flex;
     align-items: center;
@@ -2181,10 +2154,6 @@ input[type="number"].field::-webkit-outer-spin-button {
         overflow: hidden;          /* panel handles vertical layout below */
     }
     .controls-toggle {
-        display: none;
-    }
-    /* Desktop sidebar always shows the full axis row — the mobile bar is redundant. */
-    .mobile-axis-bar {
         display: none;
     }
     .controls-panel {
