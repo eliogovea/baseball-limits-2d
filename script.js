@@ -1543,15 +1543,15 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             window.__bl2d_pbpCursorYmd = "";
         }
     }
+    const pbpOverlay = document.getElementById("pbp-overlay");
     function showSmoothControls(on) {
-        // The progress bar + date stay visible always; when the cursor is off (a
-        // non-eligible axis pair → static scatter) the granularity buttons + scrubber
-        // are disabled and the date shows "—".
+        // The progress bar + date readout live on the chart (pbp-overlay), shown whenever
+        // the cursor is active. When off (a non-eligible axis pair → static scatter) the
+        // overlay is hidden and the sidebar granularity buttons are disabled.
         granSeg?.classList.toggle("disabled", !on);
         granSeg?.querySelectorAll(".seg-btn").forEach((b) => { b.disabled = !on; });
-        scrubber.disabled = !on;
+        if (pbpOverlay) pbpOverlay.hidden = !on;
         if (speedRow) speedRow.hidden = !on;
-        if (!on) setPbpMsg("—");
     }
     // [Play-by-play | Season] granularity. Both keep the .evt cursor on — switching just
     // changes the cursor step (game-by-game vs year-by-year) and the date readout.

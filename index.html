@@ -152,6 +152,16 @@
 
     <main class="app-main">
         <section class="chart-region" aria-label="Scatter plot">
+            <!-- Play-by-play overlay: a prominent fixed-position date readout (big year)
+                 + the progress bar, pinned over the chart so the sidebar controls don't
+                 reflow as the date width changes during the animation. -->
+            <div class="pbp-overlay" id="pbp-overlay" hidden>
+                <input type="range" id="pbp-scrubber" class="pbp-scrubber" min="0" max="0" value="0" aria-label="Time cursor" title="Drag through time">
+                <div class="pbp-date" id="pbp-date" aria-live="off">
+                    <span class="pbp-dt-y"></span>
+                    <span class="pbp-dt-md"><span class="pbp-dt-d"></span> <span class="pbp-dt-m"></span></span>
+                </div>
+            </div>
             <div class="loading-indicator" id="loading-indicator" role="status" aria-live="polite">
                 <span class="spinner" aria-hidden="true"></span>
                 <span>Loading data…</span>
@@ -242,8 +252,6 @@
                             <button type="button" class="seg-btn" data-gran="season" title="Step season by season (year only)">Season</button>
                         </div>
                         <button type="button" id="group-career-toggle" class="seg-btn" aria-pressed="false" title="Race the selected players' cumulative careers through stat-space" hidden>Group careers</button>
-                        <span id="pbp-date" class="pbp-date" aria-live="off"><span class="pbp-dt-d"></span><span class="pbp-dt-m"></span><span class="pbp-dt-y"></span></span>
-                        <input type="range" id="pbp-scrubber" class="pbp-scrubber" min="0" max="0" value="0" aria-label="Time cursor" title="Drag through time">
                     </div>
                     <!-- Playback speed — segmented, like the layers control. Shown with smooth. -->
                     <div class="ctl-field ctl-field--inline ctl-speed-row" id="pbp-speed-row" hidden>

@@ -2349,28 +2349,36 @@ input[type="number"].field::-webkit-outer-spin-button {
 
 /* Smooth (game-by-game) cursor row: a Retrosheet sub-season scrubber. */
 .ctl-smooth-row { gap: 8px; align-items: center; flex-wrap: wrap; }
-/* With the group-career toggle added, the row can hold two buttons + scrubber +
-   date; wrap so the scrubber drops to its own full-width line when crowded. */
 .ctl-smooth-row #group-career-toggle { white-space: nowrap; }
-.ctl-smooth-row .pbp-scrubber { flex: 1 1 100%; min-width: 0; accent-color: var(--mlb-red); }
-.ctl-smooth-row .pbp-scrubber:disabled { opacity: 0.4; cursor: default; }
 /* Granularity seg-group disabled when the cursor is off (non-eligible axes → static). */
 #pbp-gran-seg.disabled { opacity: 0.5; }
 #pbp-gran-seg .seg-btn:disabled { cursor: default; }
 /* Playback-speed segmented control: tabular numerals + tighter padding so 6 options
    (0.25×…8×) fit one row, matching the depth/layers seg-group. */
 .ctl-speed-row .seg-btn { font-variant-numeric: tabular-nums; padding-left: 2px; padding-right: 2px; }
-/* Play-by-play date readout: fixed-width day/month/year segments so the label never
-   reflows as the cursor sweeps (was flickering). Year is emphasised as the headline. */
-.ctl-smooth-row .pbp-date {
-    margin-left: auto;                 /* right-align on the toggle line */
-    font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums;
-    display: inline-flex; gap: 4px; align-items: baseline;
-    color: var(--text-muted, #667);
+
+/* ── Play-by-play overlay (on the chart) ──────────────────────────────────────
+   The animation's progress bar + a big, fixed-position date readout live over the
+   chart so they're prominent and never reflow the sidebar as the date width changes. */
+.pbp-overlay {
+    position: absolute; left: 0; right: 0; top: 0; z-index: 4;
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 8px 14px 0;
+    pointer-events: none;            /* only the scrubber is interactive */
 }
-.pbp-dt-d { display: inline-block; min-width: 1.6ch; text-align: right; }
-.pbp-dt-m { display: inline-block; min-width: 2.6ch; }
-.pbp-dt-y { font-weight: 650; color: var(--text, #1a2230); }
+.pbp-overlay[hidden] { display: none; }
+.pbp-overlay .pbp-scrubber { pointer-events: auto; width: 100%; accent-color: var(--mlb-red); }
+.pbp-overlay .pbp-date {
+    align-self: flex-start;
+    display: inline-flex; align-items: baseline; gap: 8px;
+    padding: 2px 10px; border-radius: 8px;
+    background: color-mix(in srgb, var(--panel) 70%, transparent);
+    font-variant-numeric: tabular-nums; line-height: 1.1;
+}
+.pbp-overlay .pbp-dt-y { font-size: 26px; font-weight: 750; color: var(--text, #1a2230); }
+.pbp-overlay .pbp-dt-md { font-size: 13px; color: var(--text-muted, #667); min-width: 5.5ch; }
+.pbp-overlay .pbp-dt-d { display: inline-block; min-width: 1.4ch; text-align: right; }
+.pbp-overlay .pbp-dt-m { display: inline-block; min-width: 2.6ch; }
 
 @media (min-width: 1200px) {
     :root { --sidebar-w: 320px; }
