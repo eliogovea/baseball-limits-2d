@@ -2354,6 +2354,9 @@ input[type="number"].field::-webkit-outer-spin-button {
 .ctl-smooth-row #group-career-toggle { white-space: nowrap; }
 .ctl-smooth-row .pbp-scrubber { flex: 1 1 100%; min-width: 0; accent-color: var(--mlb-red); }
 .ctl-smooth-row .pbp-scrubber:disabled { opacity: 0.4; cursor: default; }
+/* Granularity seg-group disabled when the cursor is off (non-eligible axes → static). */
+#pbp-gran-seg.disabled { opacity: 0.5; }
+#pbp-gran-seg .seg-btn:disabled { cursor: default; }
 /* Playback-speed segmented control: tabular numerals + tighter padding so 6 options
    (0.25×…8×) fit one row, matching the depth/layers seg-group. */
 .ctl-speed-row .seg-btn { font-variant-numeric: tabular-nums; padding-left: 2px; padding-right: 2px; }

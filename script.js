@@ -294,6 +294,7 @@ let pbpEvt = null;              // resident .evt full-history model (one countin
 let smoothLite = false;        // while playing/scrubbing: skip interaction-only work (HV, cards, rings, quadtree) for demo-smooth frames; a full render fires when idle
 let smoothLiteTimer = null;    // debounce → full (interactive) render after the user stops scrubbing
 let playbackSpeed = 1;         // ▶ playback speed multiplier (1× = the default sweep pace); live-adjustable
+let pbpGranularity = "pbp";    // cursor granularity: "pbp" (game-by-game, full date) | "season" (year-by-year, year only)
 const evtStreamCache = new Map(); // `${dataset}:${stat}` -> Promise<decoded STEV>  (resident once loaded)
 // Per-dataset .evt registry. `stats` = raw streamed counting columns (committed as
 // data/pbp/<prefix><stat>.evt.gz); `derived` = axes computed per player from cumulative
@@ -986,6 +987,9 @@ async function buildEvtModel(xDim, yDim) {
     const yearOf = new Int16Array(numDates); let g = 0;
     const seasonStartByYear = new Map();              // year → first global date index (for season-mode differencing)
     for (const s of ref.seasons) { if (!seasonStartByYear.has(s.year)) seasonStartByYear.set(s.year, g); for (let i = 0; i < s.nDates && g < numDates; i++) yearOf[g++] = s.year; }
+    const seasonEndByYear = new Map();                // year → last global date index (for season-granularity snapping)
+    { const yrs = [...seasonStartByYear.keys()].sort((a, b) => a - b);
+      for (let i = 0; i < yrs.length; i++) seasonEndByYear.set(yrs[i], (i + 1 < yrs.length ? seasonStartByYear.get(yrs[i + 1]) : numDates) - 1); }
 
     // One record per player who appears in any needed stream: their component series,
     // their debut/last year (debut → era colour; both → season-mode active-window skip),
@@ -1010,8 +1014,14 @@ async function buildEvtModel(xDim, yDim) {
         if (isFinite(yv) && (!ys.rate || qual)) yMax = Math.max(yMax, yv);
     }
     return { xDim, yDim, xs, ys, usesQual, qual: reg.qual, thresholdField: reg.thresholdField, depList,
-             numDates, players, doy: ref.doy, yearOf, seasonStartByYear,
+             numDates, players, doy: ref.doy, yearOf, seasonStartByYear, seasonEndByYear,
              xMax, yMax, minYear: ref.seasons[0].year, maxYear: ref.seasons[ref.seasons.length - 1].year };
+}
+// Season granularity: snap a global date index to its season's LAST date (so the cursor
+// steps year-by-year and shows the full-season state).
+function evtSeasonSnap(model, gi) {
+    const d = Math.max(0, Math.min(model.numDates - 1, Math.floor(gi)));
+    return Math.min(model.winEnd ?? (model.numDates - 1), model.seasonEndByYear.get(model.yearOf[d]) ?? d);
 }
 // Season mode: one point per player for the OPEN season `O`, accumulated game-by-game to
 // date `d` (within-season = cumulative at d minus cumulative at the season's start). The
@@ -1484,8 +1494,8 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         if (animTimer) stopAnimation(); else startAnimation();
     });
 
-    // ── Smooth (game-by-game) cursor controls ──────────────────────────────
-    const smoothToggle = document.getElementById("smooth-toggle");
+    // ── Play-by-play cursor controls ───────────────────────────────────────
+    const granSeg = document.getElementById("pbp-gran-seg");
     const scrubber = document.getElementById("pbp-scrubber");
     const dateLabel = document.getElementById("pbp-date");
     const speedRow = document.getElementById("pbp-speed-row");
@@ -1504,6 +1514,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         dtY.textContent = String(year);
     };
     const setPbpMsg = (txt) => { if (dtD) { dtD.textContent = ""; dtM.textContent = txt; dtY.textContent = ""; } };
+    const setPbpYear = (year) => { if (dtD) { dtD.textContent = ""; dtM.textContent = ""; dtY.textContent = String(year); } };
 
     function syncScrubber() {
         if (pbpEvt) {
@@ -1511,7 +1522,9 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             scrubber.min = String(pbpEvt.winStart ?? 0);
             scrubber.max = String(pbpEvt.winEnd ?? (pbpEvt.numDates - 1));
             scrubber.value = String(pbpCursorIdx);
-            setPbpDate(pbpEvt.yearOf[d], pbpEvt.doy[d]);
+            // Season granularity shows just the year; play-by-play shows the full date.
+            if (pbpGranularity === "season") setPbpYear(pbpEvt.yearOf[d]);
+            else setPbpDate(pbpEvt.yearOf[d], pbpEvt.doy[d]);
             window.__bl2d_pbpCursorYmd = pbpDayToYmd(pbpEvt.yearOf[d], pbpEvt.doy[d]);
             return;
         }
@@ -1531,14 +1544,27 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         }
     }
     function showSmoothControls(on) {
-        smoothToggle.classList.toggle("active", on);
-        smoothToggle.setAttribute("aria-pressed", String(on));
-        // The progress bar + date stay visible always; the scrubber is just disabled
-        // (and the date shows "—") when play-by-play is off.
+        // The progress bar + date stay visible always; when the cursor is off (a
+        // non-eligible axis pair → static scatter) the granularity buttons + scrubber
+        // are disabled and the date shows "—".
+        granSeg?.classList.toggle("disabled", !on);
+        granSeg?.querySelectorAll(".seg-btn").forEach((b) => { b.disabled = !on; });
         scrubber.disabled = !on;
         if (speedRow) speedRow.hidden = !on;
         if (!on) setPbpMsg("—");
     }
+    // [Play-by-play | Season] granularity. Both keep the .evt cursor on — switching just
+    // changes the cursor step (game-by-game vs year-by-year) and the date readout.
+    setupSegGroup("pbp-gran-seg", () => {
+        pbpGranularity = getSegValue("pbp-gran-seg", "gran") || "pbp";
+        if (!pbpEvt && !pbpTimeline) {                 // currently static → turn the cursor on
+            const xd = document.getElementById("x-axis-select").value, yd = document.getElementById("y-axis-select").value;
+            if (evtEligible(xd, yd)) { enableSmooth(); return; }
+        }
+        if (pbpEvt && pbpGranularity === "season") pbpCursorIdx = evtSeasonSnap(pbpEvt, pbpCursorIdx);
+        syncScrubber();
+        refreshChart();
+    });
     function stopPbpPlay() {
         const wasPlaying = !!pbpRaf;
         if (pbpRaf) { cancelAnimationFrame(pbpRaf); pbpRaf = null; }
@@ -1574,7 +1600,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             const durMs = Math.min(PBP_PLAY_MAX_MS, perYearMs * coveredYears) / playbackSpeed;  // capped, then scaled by speed
             const dt = now - lastNow; lastNow = now;
             pos = Math.min(end, pos + (end - lo) * dt / Math.max(1, durMs));
-            pbpCursorIdx = Math.min(end, Math.floor(pos));
+            pbpCursorIdx = (pbpEvt && pbpGranularity === "season") ? evtSeasonSnap(pbpEvt, pos) : Math.min(end, Math.floor(pos));
             syncScrubber();                         // cheap: scrubber position + date label only
             // Throttle the expensive chart re-render to ~15fps so a wide-window sweep
             // doesn't peg the main thread; always draw the final frame.
@@ -1589,14 +1615,14 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     async function enableEvt(startIdx) {
         const xDim = document.getElementById("x-axis-select").value;
         const yDim = document.getElementById("y-axis-select").value;
-        smoothToggle.classList.add("active"); setPbpMsg("Loading…");
+        setPbpMsg("Loading…");
         const model = await buildEvtModel(xDim, yDim);
         // Guard a rapid axis/dataset change: if the selectors moved while we awaited,
         // a newer enableEvt is in flight — discard this stale model.
         if (document.getElementById("x-axis-select").value !== xDim ||
             document.getElementById("y-axis-select").value !== yDim ||
             !evtEligible(xDim, yDim)) return;
-        if (!model) { smoothToggle.classList.remove("active"); setPbpMsg("No streams for these stats"); return; }
+        if (!model) { showSmoothControls(false); setPbpMsg("No streams for these stats"); return; }
         // Clamp the played window to the selected year range (values stay all-time
         // career-cumulative; only the swept dates narrow). Full history if unset.
         const sYear = parseInt(document.getElementById("s-year-select").value) || model.minYear;
@@ -1610,6 +1636,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         pbpEvt = model; pbpTimeline = null; pbpExtentCache = null;
         window.__bl2d_pbpFallback = false;
         pbpCursorIdx = (startIdx != null) ? Math.max(winStart, Math.min(winEnd, startIdx)) : winEnd;
+        if (pbpGranularity === "season") pbpCursorIdx = evtSeasonSnap(model, pbpCursorIdx);
         showSmoothControls(true);
         syncScrubber();
         refreshChart();
@@ -1669,9 +1696,6 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         showSmoothControls(false);
         refreshChart();
     }
-    smoothToggle?.addEventListener("click", () => {
-        if (pbpTimeline || pbpEvt) disableSmooth(); else enableSmooth();
-    });
 
     // ── Group-career mode ───────────────────────────────────────────────────
     // Reuses the entire smooth engine; sets the year window to the group's combined
@@ -1718,7 +1742,8 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     scrubber?.addEventListener("input", () => {
         if (!pbpTimeline && !pbpEvt) return;
         if (pbpRaf) stopPbpPlay();
-        pbpCursorIdx = parseInt(scrubber.value) || 0;
+        const raw = parseInt(scrubber.value) || 0;
+        pbpCursorIdx = (pbpEvt && pbpGranularity === "season") ? evtSeasonSnap(pbpEvt, raw) : raw;
         // Keep trails causal on a backward scrub: drop positions recorded ahead of
         // the new cursor so the comet-tail never points "into the future".
         if (groupCareerMode) {
