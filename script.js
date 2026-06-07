@@ -1515,6 +1515,11 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     };
     const setPbpMsg = (txt) => { if (dtD) { dtD.textContent = ""; dtM.textContent = txt; dtY.textContent = ""; } };
     const setPbpYear = (year) => { if (dtD) { dtD.textContent = ""; dtM.textContent = ""; dtY.textContent = String(year); } };
+    // Paint the "played" portion of the progress bar (the ::track gradient reads --pct).
+    const updateScrubFill = () => {
+        const lo = +scrubber.min, hi = +scrubber.max, v = +scrubber.value;
+        scrubber.style.setProperty("--pct", (hi > lo ? ((v - lo) / (hi - lo)) * 100 : 0) + "%");
+    };
 
     function syncScrubber() {
         if (pbpEvt) {
@@ -1522,6 +1527,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             scrubber.min = String(pbpEvt.winStart ?? 0);
             scrubber.max = String(pbpEvt.winEnd ?? (pbpEvt.numDates - 1));
             scrubber.value = String(pbpCursorIdx);
+            updateScrubFill();
             // Season granularity shows just the year; play-by-play shows the full date.
             if (pbpGranularity === "season") setPbpYear(pbpEvt.yearOf[d]);
             else setPbpDate(pbpEvt.yearOf[d], pbpEvt.doy[d]);
@@ -1534,6 +1540,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         scrubber.min = "0";
         scrubber.max = String(Math.max(0, pbpTimeline.totalEstimate - 1));
         scrubber.value = String(pbpCursorIdx);
+        updateScrubFill();
         if (yearEntry.status === "covered" && yearEntry.decoded) {
             const doy = yearEntry.decoded.dates[withinIdx];
             setPbpDate(yearEntry.year, doy);

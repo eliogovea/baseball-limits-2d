@@ -2363,9 +2363,26 @@ input[type="number"].field::-webkit-outer-spin-button {
    the chosen stats and best/worst, set per-frame via data-corner). */
 .pbp-overlay { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
 .pbp-overlay[hidden] { display: none; }
+/* Media-player progress bar: a slim inset track with a red "played" fill (driven by
+   the --pct var from JS) and a small round thumb — replaces the clunky native slider. */
 .pbp-overlay .pbp-scrubber {
-    position: absolute; left: 0; right: 0; bottom: 0; width: 100%; margin: 0;
-    pointer-events: auto; accent-color: var(--mlb-red);
+    position: absolute; left: 12px; right: 12px; bottom: 7px; width: auto; height: 16px; margin: 0;
+    -webkit-appearance: none; appearance: none; background: transparent; pointer-events: auto; cursor: pointer;
+}
+.pbp-overlay .pbp-scrubber::-webkit-slider-runnable-track {
+    height: 5px; border-radius: 3px;
+    background: linear-gradient(to right, var(--mlb-red) var(--pct, 0%), rgba(130,140,160,0.3) var(--pct, 0%));
+}
+.pbp-overlay .pbp-scrubber::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; margin-top: -4.5px;
+    width: 13px; height: 13px; border-radius: 50%;
+    background: #fff; border: 2px solid var(--mlb-red); box-shadow: 0 1px 3px rgba(0,0,0,.3);
+}
+.pbp-overlay .pbp-scrubber::-moz-range-track { height: 5px; border-radius: 3px; background: rgba(130,140,160,0.3); }
+.pbp-overlay .pbp-scrubber::-moz-range-progress { height: 5px; border-radius: 3px; background: var(--mlb-red); }
+.pbp-overlay .pbp-scrubber::-moz-range-thumb {
+    width: 13px; height: 13px; border-radius: 50%;
+    background: #fff; border: 2px solid var(--mlb-red); box-shadow: 0 1px 3px rgba(0,0,0,.3);
 }
 .pbp-overlay .pbp-date {
     position: absolute; display: flex; flex-direction: column; line-height: 1;
