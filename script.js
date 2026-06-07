@@ -3626,7 +3626,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         return;
     }
 
-    const margin = { top: 24, right: 24, bottom: 44, left: 56 };
+    // Reserve a strip at the bottom for the play-by-play progress bar when the overlay
+    // is on, so the bar sits below the x-axis title instead of over it.
+    const margin = { top: 24, right: 24, bottom: filters.smooth ? 66 : 44, left: 56 };
     const plotW = Math.max(40, width - margin.left - margin.right);
     const plotH = Math.max(40, height - margin.top - margin.bottom);
 
