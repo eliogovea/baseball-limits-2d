@@ -237,10 +237,10 @@
                     <!-- Smooth (game-by-game) cursor: animates game by game from play-by-play.
                          Scrubber + date + the speed row below appear when on. -->
                     <div class="ctl-field ctl-field--inline ctl-smooth-row">
-                        <button type="button" id="smooth-toggle" class="seg-btn" aria-pressed="false" title="Animate the selected year range game by game (Retrosheet play-by-play)">Smooth</button>
+                        <button type="button" id="smooth-toggle" class="seg-btn" aria-pressed="false" title="Animate game-by-game across history (play-by-play). Off = the static season/career scatter.">Play-by-play</button>
                         <button type="button" id="group-career-toggle" class="seg-btn" aria-pressed="false" title="Race the selected players' cumulative careers through stat-space" hidden>Group careers</button>
-                        <input type="range" id="pbp-scrubber" class="pbp-scrubber" min="0" max="0" value="0" aria-label="Season date cursor" title="Drag through the season" hidden>
-                        <span id="pbp-date" class="pbp-date" hidden></span>
+                        <span id="pbp-date" class="pbp-date" aria-live="off"><span class="pbp-dt-d"></span><span class="pbp-dt-m"></span><span class="pbp-dt-y"></span></span>
+                        <input type="range" id="pbp-scrubber" class="pbp-scrubber" min="0" max="0" value="0" aria-label="Play-by-play date cursor" title="Drag through time">
                     </div>
                     <!-- Playback speed — segmented, like the layers control. Shown with smooth. -->
                     <div class="ctl-field ctl-field--inline ctl-speed-row" id="pbp-speed-row" hidden>

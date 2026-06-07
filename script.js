@@ -1490,6 +1490,20 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     const dateLabel = document.getElementById("pbp-date");
     const speedRow = document.getElementById("pbp-speed-row");
     setupSegGroup("pbp-speed-seg", () => { playbackSpeed = parseFloat(getSegValue("pbp-speed-seg", "speed")) || 1; });
+    // Fixed-width date readout: separate day / month / year spans so the label never
+    // reflows as the cursor sweeps. setPbpDate(year, doy) for a real date; setPbpMsg(txt)
+    // for status text ("—", "Loading…") without destroying the span structure.
+    const dtD = dateLabel?.querySelector(".pbp-dt-d");
+    const dtM = dateLabel?.querySelector(".pbp-dt-m");
+    const dtY = dateLabel?.querySelector(".pbp-dt-y");
+    const setPbpDate = (year, doy) => {
+        if (!dtD) return;
+        const dt = new Date(Date.UTC(year, 0, doy));
+        dtD.textContent = String(dt.getUTCDate());
+        dtM.textContent = dt.toLocaleDateString("en-US", { month: "short", timeZone: "UTC" });
+        dtY.textContent = String(year);
+    };
+    const setPbpMsg = (txt) => { if (dtD) { dtD.textContent = ""; dtM.textContent = txt; dtY.textContent = ""; } };
 
     function syncScrubber() {
         if (pbpEvt) {
@@ -1497,7 +1511,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             scrubber.min = String(pbpEvt.winStart ?? 0);
             scrubber.max = String(pbpEvt.winEnd ?? (pbpEvt.numDates - 1));
             scrubber.value = String(pbpCursorIdx);
-            dateLabel.textContent = pbpDayLabel(pbpEvt.yearOf[d], pbpEvt.doy[d]);
+            setPbpDate(pbpEvt.yearOf[d], pbpEvt.doy[d]);
             window.__bl2d_pbpCursorYmd = pbpDayToYmd(pbpEvt.yearOf[d], pbpEvt.doy[d]);
             return;
         }
@@ -1509,19 +1523,21 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         scrubber.value = String(pbpCursorIdx);
         if (yearEntry.status === "covered" && yearEntry.decoded) {
             const doy = yearEntry.decoded.dates[withinIdx];
-            dateLabel.textContent = pbpDayLabel(yearEntry.year, doy);
+            setPbpDate(yearEntry.year, doy);
             window.__bl2d_pbpCursorYmd = pbpDayToYmd(yearEntry.year, doy);
         } else {
-            dateLabel.textContent = `Loading ${yearEntry.year}…`;
+            setPbpMsg(`Loading ${yearEntry.year}…`);
             window.__bl2d_pbpCursorYmd = "";
         }
     }
     function showSmoothControls(on) {
         smoothToggle.classList.toggle("active", on);
         smoothToggle.setAttribute("aria-pressed", String(on));
-        scrubber.hidden = !on;
-        dateLabel.hidden = !on;
+        // The progress bar + date stay visible always; the scrubber is just disabled
+        // (and the date shows "—") when play-by-play is off.
+        scrubber.disabled = !on;
         if (speedRow) speedRow.hidden = !on;
+        if (!on) setPbpMsg("—");
     }
     function stopPbpPlay() {
         const wasPlaying = !!pbpRaf;
@@ -1573,14 +1589,14 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     async function enableEvt(startIdx) {
         const xDim = document.getElementById("x-axis-select").value;
         const yDim = document.getElementById("y-axis-select").value;
-        smoothToggle.classList.add("active"); dateLabel.hidden = false; dateLabel.textContent = "Loading full history…";
+        smoothToggle.classList.add("active"); setPbpMsg("Loading…");
         const model = await buildEvtModel(xDim, yDim);
         // Guard a rapid axis/dataset change: if the selectors moved while we awaited,
         // a newer enableEvt is in flight — discard this stale model.
         if (document.getElementById("x-axis-select").value !== xDim ||
             document.getElementById("y-axis-select").value !== yDim ||
             !evtEligible(xDim, yDim)) return;
-        if (!model) { smoothToggle.classList.remove("active"); dateLabel.textContent = "No event streams for these stats"; return; }
+        if (!model) { smoothToggle.classList.remove("active"); setPbpMsg("No streams for these stats"); return; }
         // Clamp the played window to the selected year range (values stay all-time
         // career-cumulative; only the swept dates narrow). Full history if unset.
         const sYear = parseInt(document.getElementById("s-year-select").value) || model.minYear;
@@ -1623,8 +1639,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             window.__bl2d_pbpGames = 0;
             pbpTimeline = null;
             showSmoothControls(false);
-            dateLabel.hidden = false;
-            dateLabel.textContent = `No game-by-game data for ${sYear}–${eYear}`;
+            setPbpMsg(`No data for ${sYear}–${eYear}`);
             return;
         }
         window.__bl2d_pbpFallback = false;

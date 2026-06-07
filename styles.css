@@ -2353,15 +2353,21 @@ input[type="number"].field::-webkit-outer-spin-button {
    date; wrap so the scrubber drops to its own full-width line when crowded. */
 .ctl-smooth-row #group-career-toggle { white-space: nowrap; }
 .ctl-smooth-row .pbp-scrubber { flex: 1 1 100%; min-width: 0; accent-color: var(--mlb-red); }
+.ctl-smooth-row .pbp-scrubber:disabled { opacity: 0.4; cursor: default; }
 /* Playback-speed segmented control: tabular numerals + tighter padding so 6 options
    (0.25×…8×) fit one row, matching the depth/layers seg-group. */
 .ctl-speed-row .seg-btn { font-variant-numeric: tabular-nums; padding-left: 2px; padding-right: 2px; }
+/* Play-by-play date readout: fixed-width day/month/year segments so the label never
+   reflows as the cursor sweeps (was flickering). Year is emphasised as the headline. */
 .ctl-smooth-row .pbp-date {
-    font-size: 11px;
+    margin-left: auto;                 /* right-align on the toggle line */
+    font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums;
+    display: inline-flex; gap: 4px; align-items: baseline;
     color: var(--text-muted, #667);
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
 }
+.pbp-dt-d { display: inline-block; min-width: 1.6ch; text-align: right; }
+.pbp-dt-m { display: inline-block; min-width: 2.6ch; }
+.pbp-dt-y { font-weight: 650; color: var(--text, #1a2230); }
 
 @media (min-width: 1200px) {
     :root { --sidebar-w: 320px; }
