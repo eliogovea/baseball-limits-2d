@@ -154,6 +154,36 @@ a:focus-visible,
     flex: 0 0 auto;
 }
 
+/* Experimental WebGPU backend toggle — a compact text pill in the header. Muted
+   until enabled, accented when GPU rendering is live; disabled when WebGPU is
+   unavailable. */
+.renderer-toggle {
+    flex: 0 0 auto;
+    height: 28px;
+    padding: 0 10px;
+    border-radius: 14px;
+    border: 1px solid var(--border-strong);
+    background: var(--panel);
+    color: var(--text-muted);
+    font: 700 11px/1 var(--font-sans, sans-serif);
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    transition: all var(--transition);
+}
+.renderer-toggle:hover:not(:disabled) {
+    color: var(--mlb-blue);
+    border-color: var(--mlb-blue);
+}
+.renderer-toggle.active {
+    background: var(--mlb-blue);
+    border-color: var(--mlb-blue);
+    color: #fff;
+}
+.renderer-toggle:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
 /* Color-theme switcher — compact swatches (each previews its theme's panel +
    accent) so it fits the dense header without wide text labels. */
 .theme-switch {

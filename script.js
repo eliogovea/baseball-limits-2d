@@ -1101,6 +1101,55 @@ function buildEvtEventStream(model) {
     return model.evStream;
 }
 
+// Can this .evt model's axis pair be GPU compute-accumulated? YES when each axis value
+// is a LINEAR, MONOTONE-NONDECREASING combination of the streamed counting components —
+// which is exactly the class the per-player atomic running-sum represents. That covers:
+//   • single-component counting stats (HR, SB, R, RBI, …) — coefficient 1; and
+//   • composite counting stats that never decrease (TB = 1·H+2·2B+3·3B+4·HR, PA, …).
+// It excludes rate stats (AVG/OBP/SLG: xs.rate true — they can DECREASE, so a running
+// sum is meaningless) and any combination with a negative coefficient (e.g. a net stat
+// like SB−CS), which would break monotonicity and the incremental frontier.
+//
+// We discover each component's coefficient WITHOUT parsing the stat formula: a linear
+// fn satisfies coeff_d = fn(unit_d) − fn(0). Probing one unit of each component gives the
+// whole coefficient vector. Caches { ok, cx[], cy[] } (per-component X/Y coefficients,
+// aligned to model.depList) on the model. Requires integer, ≥ 0 coefficients and a zero
+// intercept (true for counting stats — keeps the GPU's u32 atomic exact).
+function evtGpuMonotone(model) {
+    if (model._gpuMono !== undefined) return model._gpuMono;
+    let ok = !model.xs.rate && !model.ys.rate && model.xDim !== model.yDim;
+    const cx = [], cy = [];
+    if (ok) {
+        const dl = model.depList, zero = {};
+        for (const d of dl) zero[d] = 0;
+        const x0 = model.xs.fn(zero), y0 = model.ys.fn(zero);
+        if (x0 !== 0 || y0 !== 0) ok = false;          // counting stats have no constant term
+        for (let i = 0; i < dl.length && ok; i++) {
+            const u = { ...zero, [dl[i]]: 1 };
+            const dx = model.xs.fn(u) - x0, dy = model.ys.fn(u) - y0;
+            // integer, non-negative ⇒ a valid monotone counting coefficient.
+            if (!Number.isInteger(dx) || !Number.isInteger(dy) || dx < 0 || dy < 0) ok = false;
+            cx.push(dx); cy.push(dy);
+        }
+    }
+    model._gpuMono = ok ? { ok, cx, cy } : { ok: false };
+    return model._gpuMono;
+}
+
+// Express the D3 LINEAR scales as slope+intercept so the cloud vertex shader can map a
+// player's counter straight to the SAME CSS pixel the CPU path uses (px = margin.left +
+// xScale(value)). For any linear scale xScale(v) = xScale(0) + slope·v, hence:
+//   interceptX = margin.left + xScale(0);  slopeX = xScale(1) − xScale(0).
+// vpX/vpY are the CSS chart dimensions (the same width/height passed to resize() and
+// used by uViewport), so the shader's px→NDC step matches the instanced pPoints shader.
+function gpuScaleUniform(xScale, yScale, margin, width, height, radius, alpha) {
+    return {
+        slopeX: xScale(1) - xScale(0), interceptX: margin.left + xScale(0),
+        slopeY: yScale(1) - yScale(0), interceptY: margin.top + yScale(0),
+        vpX: width, vpY: height, radius, alpha,
+    };
+}
+
 // Incremental Pareto frontier — JS port of poc-webgpu/core.c `frontier_apply_event`
 // (commit a1e0ad0). Works in CANONICAL coords X=x*xSign, Y=y*ySign so it is always
 // "higher is better" (matching the +x/+y POC); the frontier stays sorted X-ascending /
@@ -1204,6 +1253,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     setupExportButton();
     setupShareButton();
     setupGlossary();
+    setupRendererToggle();
     applyModeConfig("season");
     setupModeToggle("mode-toggle", () => {
         const mode = getCurrentMode();
@@ -2918,6 +2968,146 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
   return c;
 }`;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GPU compute-accumulate path (the ?renderer=webgpu .evt-career scaling track).
+//
+// Background — what problem this solves. In the play-by-play CAREER animation the
+// CPU otherwise rebuilds EVERY player's point object each frame (evtPointsAsOf:
+// one binary-search-per-stat per player, ~11 k players) and then re-flattens all
+// of them into a GPU instance buffer (_uploadPoints). That O(players) per-frame
+// churn is the cost the README's "scaling path toward pitch-by-pitch volumes"
+// item targets. The POC (poc-webgpu/) proved a better shape: upload the flat,
+// date-sorted EVENT STREAM to the GPU ONCE, and each frame dispatch a compute
+// shader only over the NEW events since the last cursor — accumulating per-player
+// running totals into two storage buffers — then render the cloud by reading those
+// totals straight out of the buffers in the vertex shader (no CPU readback, no
+// per-frame point rebuild). This is the in-app adaptation of that approach.
+//
+// TWO GPU buffer "roles" appear below and it's worth fixing the distinction now,
+// because every WebGPU pipeline is built around it:
+//   • UNIFORM buffer  — small, read-only, the SAME value for every shader
+//     invocation this frame (e.g. the event window {lo,count}, or the axis scale).
+//     Think "per-frame constants". Bound with buffer:{type:"uniform"}.
+//   • STORAGE buffer  — large, indexable like an array, one element per player /
+//     per event; can be read-write in compute (atomic counters) or read-only in
+//     the vertex shader (vertex-pull). Bound with type "storage" / "read-only-
+//     storage". Think "the data arrays".
+// ─────────────────────────────────────────────────────────────────────────────
+
+// WGSL (compute): accumulate one event per invocation into per-player running
+// AXIS totals. The CPU advances a cursor over the date-sorted event stream and
+// dispatches us ONLY over the new [lo, lo+count) slice each frame — we never
+// rescan history. xcount[] holds the running X-AXIS VALUE per player, ycount[] the
+// Y-axis value. atomicAdd (not a plain `+=`) because the 64 threads in a workgroup
+// run concurrently and several events in one slice can target the SAME player (e.g.
+// a multi-hit game) — without the atomic those adds would race and lose updates.
+//
+// Generalisation beyond the POC's fixed HR/SB: each axis stat is a LINEAR, monotone-
+// nondecreasing combination of streamed counting components (HR and SB are the trivial
+// 1-component case; TB = 1·H + 2·2B + 3·3B + 4·HR is a 4-component case — it still only
+// ever grows). The CPU pre-multiplies each event's raw component delta by that axis's
+// coefficient for the component, so each event already carries the X-axis delta and the
+// Y-axis delta directly: {player, xAdd, yAdd}. The shader just adds them. This is why
+// the same atomicAdd works for HR, SB, TB, PA, … — but NOT for rate stats (AVG/OBP/SLG),
+// which can DECREASE frame-to-frame and so can't be maintained by a monotone running
+// sum (those stay on the CPU cloud; see evtGpuMonotone).
+const WEBGPU_ACCUM_WGSL = `
+struct Win { lo: u32, count: u32 };
+@group(0) @binding(0) var<uniform> W: Win;
+@group(0) @binding(1) var<storage, read>       events: array<u32>;   // {player,xAdd,yAdd} ×3 per event
+@group(0) @binding(2) var<storage, read_write> xcount: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read_write> ycount: array<atomic<u32>>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let g = gid.x;
+  if (g >= W.count) { return; }          // the last workgroup is usually partial — guard it
+  let e = (W.lo + g) * 3u;               // 3 u32 stride into the flat event array
+  let player = events[e + 0u];
+  let xAdd   = events[e + 1u];           // this date's X-axis delta for that player (≥ 0)
+  let yAdd   = events[e + 2u];           // this date's Y-axis delta (≥ 0; usually one of the two is 0)
+  if (xAdd != 0u) { atomicAdd(&xcount[player], xAdd); }
+  if (yAdd != 0u) { atomicAdd(&ycount[player], yAdd); }
+}`;
+
+// WGSL (render): the vertex-PULL point cloud. There is no vertex/instance buffer of
+// positions — instead instance_index IS the player index, and the vertex shader
+// reads that player's accumulated (xcount, ycount) directly from the storage buffers
+// the compute pass just wrote. That "vertex-pull, no readback" is the whole point:
+// the data never round-trips back to the CPU between accumulate and draw.
+//
+// Coordinate mapping (the load-bearing bit — it MUST match the CPU/SVG axes pixel
+// for pixel, or the GPU cloud drifts off the D3 axes). The CPU path computes a dot's
+// screen position as `px = margin.left + xScale(value)` where xScale is a D3 LINEAR
+// scale. Any linear scale is `xScale(v) = xScale(0) + slope*v`, so we can reproduce
+// it on the GPU with just two numbers per axis: slope and intercept, passed in the
+// uScale uniform (interceptX = margin.left + xScale(0); slopeX = xScale(1)-xScale(0)).
+// Because this path is gated to single-dep "passthrough" counting axes, the stat
+// VALUE equals the accumulated COUNTER, so `px = interceptX + slopeX*xcount` is the
+// exact same pixel the CPU produces. The yScale's slope is negative (its range runs
+// [plotHeight, 0]), so high Y maps to a small py — no separate Y flip is needed
+// beyond the standard pixel→NDC flip below.
+//
+// CSS-px vs NDC vs DPR: positions are in CSS pixels (vpX,vpY = the CSS chart size,
+// same as the Canvas-2D path and the instanced pPoints shader). The offscreen
+// texture may be larger (devicePixelRatio), but NDC always spans the whole texture,
+// so mapping in CSS px and letting the rasteriser scale to texels keeps DPR handling
+// identical to pPoints. The +Y-up flip `1 - py/vp*2` converts pixel-down to NDC-up.
+//
+// Colour: we DON'T recompute the era ramp here — the CPU packs each player's era
+// colour (which is per-theme) into the col[] buffer once, and we just unpack it.
+// Frontier emphasis is NOT done in this shader: the app draws frontier dots as a
+// separate, larger, white-ringed era-coloured layer on top (drawFrontierDots), so
+// the cloud is a uniform era cloud for ALL players — exactly what the CPU cloud is.
+// (0,0) points — players with no events yet at this cursor — are dropped to match
+// evtPointsAsOf, by emitting an off-screen degenerate quad.
+const WEBGPU_EVTCLOUD_WGSL = `
+struct S { slopeX: f32, interceptX: f32, slopeY: f32, interceptY: f32, vpX: f32, vpY: f32, radius: f32, alpha: f32 };
+@group(0) @binding(0) var<uniform> u: S;
+@group(0) @binding(1) var<storage, read> xc:  array<u32>;
+@group(0) @binding(2) var<storage, read> yc:  array<u32>;
+@group(0) @binding(3) var<storage, read> col: array<u32>;   // packed RGBA8 era colour per player
+struct VSOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) off: vec2<f32>,
+  @location(1) @interpolate(flat) fill: vec4<f32>,
+  @location(2) @interpolate(flat) radius: f32,
+};
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(-1.0,1.0),
+  vec2<f32>(-1.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>( 1.0,1.0));
+fn unpack(c: u32) -> vec4<f32> {
+  return vec4<f32>(f32(c & 0xffu), f32((c >> 8u) & 0xffu), f32((c >> 16u) & 0xffu), f32((c >> 24u) & 0xffu)) / 255.0;
+}
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  var o: VSOut;
+  let vx = f32(xc[ii]);
+  let vy = f32(yc[ii]);
+  if (vx == 0.0 && vy == 0.0) {          // no events yet → drop (matches evtPointsAsOf)
+    o.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);   // outside the clip cube → discarded by the rasteriser
+    o.off = vec2<f32>(0.0); o.fill = vec4<f32>(0.0); o.radius = 0.0;
+    return o;
+  }
+  let px = u.interceptX + u.slopeX * vx;     // counter → data value → CSS px (== D3 xScale)
+  let py = u.interceptY + u.slopeY * vy;
+  let r = u.radius;
+  let corner = C[vi];
+  let cx = px / u.vpX * 2.0 - 1.0;            // CSS px → NDC, +Y-up flip
+  let cy = 1.0 - py / u.vpY * 2.0;
+  o.pos = vec4<f32>(cx + corner.x * r / u.vpX * 2.0, cy + corner.y * r / u.vpY * 2.0, 0.0, 1.0);
+  o.off = corner * r;                         // px offset from centre, for the disc test
+  o.radius = r;
+  o.fill = vec4<f32>(unpack(col[ii]).rgb, u.alpha);
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let dist = length(i.off);                   // distance from the dot centre, in px
+  let aa = 1.0 - smoothstep(i.radius - 0.75, i.radius + 0.75, dist);   // ~1px soft edge (matches pPoints)
+  if (aa <= 0.0) { discard; }
+  return vec4<f32>(i.fill.rgb, i.fill.a * aa);
+}`;
+
 // WebGPURenderer — the experimental ?renderer=webgpu backend (a learning/headroom
 // track; never the default, gated so it can never regress production). Implements the
 // same PointRenderer surface as Canvas2DRenderer but accumulates each draw* call into a
@@ -2939,6 +3129,10 @@ class WebGPURenderer {
         this.buf = { bg: null, fg: null, frontier: null, trail: null };
         this.count = { bg: 0, fg: 0, frontier: 0, trail: 0 };
         this._scratch = new ArrayBuffer(0);
+        // GPU compute-accumulate state (the .evt-career scaling path). null until the
+        // first eligible frame uploads the event stream via uploadEvtStream(); see the
+        // WEBGPU_ACCUM_WGSL / WEBGPU_EVTCLOUD_WGSL block above for the why.
+        this.evt = null;
     }
     get dpr() { return this.layers?.dpr || 1; }
     get bgCanvas() { return this.canvas; }   // truthy → drawScatterPlot's fg-gated blocks run
@@ -2953,6 +3147,11 @@ class WebGPURenderer {
         ] });
         this.bgl = bgl;
         const layout = dev.createPipelineLayout({ bindGroupLayouts: [bgl] });
+        // Alpha blending so overlapping dots accumulate like the Canvas-2D cloud. The
+        // colour channels use straight src-over (src·a + dst·(1−a)); the ALPHA channel
+        // uses one·(1−a) so the result is correctly PREMULTIPLIED — which is what the
+        // canvas context expects (alphaMode "premultiplied" in resize()). Shared by every
+        // render pipeline below (points, lines, the evt cloud) so they composite uniformly.
         const blend = {
             color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
             alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
@@ -2967,6 +3166,44 @@ class WebGPURenderer {
             vertex: { module: lnMod, entryPoint: "vs" },
             fragment: { module: lnMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
             primitive: { topology: "triangle-list" } });
+
+        // GPU compute-accumulate pipelines (the .evt-career path). Two more pipelines,
+        // each with its OWN bind-group layout because they bind different buffers:
+        //
+        //  • pAccum (COMPUTE): {uWin uniform, events ro-storage, xcount rw-storage,
+        //    ycount rw-storage}. read_write storage in WGSL ⇒ buffer type "storage";
+        //    read-only ⇒ "read-only-storage". This is the only place we declare a
+        //    compute stage, so it needs its own layout (the point/line pipelines are
+        //    vertex+fragment only).
+        const accumBgl = dev.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+            { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+            { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        ] });
+        this.accumBgl = accumBgl;
+        const accumMod = dev.createShaderModule({ code: WEBGPU_ACCUM_WGSL });
+        this.pAccum = dev.createComputePipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [accumBgl] }),
+            compute: { module: accumMod, entryPoint: "main" } });
+
+        //  • pCloud (VERTEX-pull render): {uScale uniform, xcount ro-storage, ycount
+        //    ro-storage, col ro-storage}. The compute pass writes xcount/ycount; here we
+        //    READ them (read-only-storage) — the same physical buffers, different access.
+        const cloudBgl = dev.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+            { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+            { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+            { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        ] });
+        this.cloudBgl = cloudBgl;
+        const cloudMod = dev.createShaderModule({ code: WEBGPU_EVTCLOUD_WGSL });
+        this.pCloud = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [cloudBgl] }),
+            vertex: { module: cloudMod, entryPoint: "vs" },
+            fragment: { module: cloudMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+
         // clear colour = the chart background (transparent so the page/SVG shows through;
         // dots blend over it). Premultiplied alpha mode → clear to 0.
         this.clearValue = { r: 0, g: 0, b: 0, a: 0 };
@@ -3097,20 +3334,190 @@ class WebGPURenderer {
         ] });
     }
 
-    // One render pass: clear → completed cloud → trails → open cloud + heads → frontier
-    // dots (the Canvas-2D layer order), into the offscreen texture, then blit to canvas.
+    // ── GPU compute-accumulate (the .evt-career cloud) ──────────────────────────
+    // Upload the flat, date-sorted event stream + the per-player era colours ONCE per
+    // model, and allocate the per-player running-total buffers. Idempotent: re-uploads
+    // only when the model identity (axes / player count / stream length) changes, so the
+    // first eligible frame pays the cost and every later frame is just a uniform write +
+    // a compute dispatch. Returns false (→ caller falls back to the CPU cloud) if the
+    // stream isn't the single-counter-per-axis shape this GPU path requires.
+    uploadEvtStream(model) {
+        const dev = this.device;
+        const stream = model.evStream || buildEvtEventStream(model);
+        const players = model.players.length;
+        // Discover the per-component axis coefficients (handles single-component HR/SB and
+        // monotone composites like TB). false ⇒ not GPU-accumulable (rate stat / negative
+        // coefficient) → caller falls back to the CPU cloud.
+        const mono = evtGpuMonotone(model);
+        if (!mono.ok) return false;
+        const cx = mono.cx, cy = mono.cy;
+        const token = `${model.xDim}|${model.yDim}|${players}|${stream.n}`;
+        if (this.evt && this.evt.token === token) { this._refreshEvtColors(model); return true; }
+        try {
+            this._destroyEvt();
+            const BU = GPUBufferUsage;
+            // events: {player, xAdd, yAdd} ×3 u32 per stream row. The CPU bakes the axis
+            // coefficient in here (xAdd = cx[dep]·delta), so each event already carries its
+            // X- and Y-axis deltas — usually one is 0 (the component belongs to one axis).
+            // Deltas are ≥ 0 for counting components, so the u32 cast is lossless.
+            const ev = new Uint32Array(stream.n * 3);
+            const { player, dep, delta } = stream;
+            for (let i = 0; i < stream.n; i++) {
+                const d = dep[i], dl = delta[i];
+                ev[i * 3] = player[i];
+                ev[i * 3 + 1] = (cx[d] * dl) >>> 0;
+                ev[i * 3 + 2] = (cy[d] * dl) >>> 0;
+            }
+            const bEvents = dev.createBuffer({ size: Math.max(16, ev.byteLength), usage: BU.STORAGE | BU.COPY_DST });
+            dev.queue.writeBuffer(bEvents, 0, ev);
+            // per-player running totals. COPY_SRC so __bl2d_gpuCounters can read them back
+            // for the counterMis invariant check.
+            const pbytes = Math.max(16, players * 4);
+            const mkCounter = () => dev.createBuffer({ size: pbytes, usage: BU.STORAGE | BU.COPY_DST | BU.COPY_SRC });
+            const bX = mkCounter(), bY = mkCounter();
+            const bColor = dev.createBuffer({ size: pbytes, usage: BU.STORAGE | BU.COPY_DST });
+            // small per-frame uniforms: the event window, and the axis scale + viewport.
+            const uWin = dev.createBuffer({ size: 16, usage: BU.UNIFORM | BU.COPY_DST });
+            const uScale = dev.createBuffer({ size: 32, usage: BU.UNIFORM | BU.COPY_DST });
+            const bgAccum = dev.createBindGroup({ layout: this.accumBgl, entries: [
+                { binding: 0, resource: { buffer: uWin } }, { binding: 1, resource: { buffer: bEvents } },
+                { binding: 2, resource: { buffer: bX } }, { binding: 3, resource: { buffer: bY } } ] });
+            const bgCloud = dev.createBindGroup({ layout: this.cloudBgl, entries: [
+                { binding: 0, resource: { buffer: uScale } }, { binding: 1, resource: { buffer: bX } },
+                { binding: 2, resource: { buffer: bY } }, { binding: 3, resource: { buffer: bColor } } ] });
+            // debut year per player → packed era colour (rebuilt on a theme change).
+            const debut = new Uint32Array(players);
+            for (let i = 0; i < players; i++) debut[i] = model.players[i].debutYear | 0;
+            this.evt = { token, players, streamN: stream.n,
+                bEvents, bX, bY, bColor, uWin, uScale, bgAccum, bgCloud,
+                debut, colorTheme: null, zeros: new Uint32Array(players),
+                gpuApplied: null,   // how many stream events the counters reflect (null = none yet)
+                pending: null, failed: false };
+            this._refreshEvtColors(model);
+            return true;
+        } catch (e) {
+            console.warn("[webgpu] evt stream upload failed → CPU cloud:", e.message);
+            this._destroyEvt();
+            return false;
+        }
+    }
+
+    // Pack each player's era colour into the col[] buffer. Era colours are per-theme
+    // (eraFor reads the live ramp), so re-pack whenever the document theme changes —
+    // cheap, and far simpler/more exact than re-deriving the banded ramp in WGSL.
+    _refreshEvtColors(model) {
+        const e = this.evt; if (!e) return;
+        const theme = document.documentElement.dataset.theme || "";
+        if (e.colorTheme === theme) return;
+        const col = new Uint32Array(e.players);
+        for (let i = 0; i < e.players; i++) col[i] = packColorRGBA((eraFor(e.debut[i]) || { color: "#4a6fa5" }).color, 1);
+        this.device.queue.writeBuffer(e.bColor, 0, col);
+        e.colorTheme = theme;
+    }
+
+    // Queue this frame's GPU cloud: figure out the catch-up window, write the uniforms,
+    // and stash the dispatch params for present() to run inside the single per-frame
+    // command encoder.
+    //
+    // Why the GPU tracks its OWN cursor (gpuApplied) rather than using the engine's
+    // per-frame {lo,count}: the JS incremental frontier consumes event windows on EVERY
+    // refresh (lite or not), but the GPU only accumulates on the lite playback frames the
+    // gate allows. So the GPU can fall "behind" the engine's `applied` count. Each GPU
+    // frame therefore replays exactly the events the engine has consumed but the GPU
+    // hasn't: [gpuApplied, applied). `win` = { applied, zero } from the engine — `applied`
+    // is its total consumed-event count, `zero` means it restarted from 0 this frame (new
+    // model / backward seek), in which case the GPU zeroes its counters and replays
+    // [0, applied) too. This keeps GPU counters == the JS shadow regardless of how many
+    // non-lite frames slipped between GPU frames.
+    accumulateCloud({ win, instanceCount, scales }) {
+        const e = this.evt;
+        if (!e || e.failed) return;
+        const dev = this.device;
+        const target = win.applied >>> 0;
+        let lo, count;
+        if (win.zero || e.gpuApplied == null || e.gpuApplied > target) {
+            dev.queue.writeBuffer(e.bX, 0, e.zeros);   // restart the running sums at 0
+            dev.queue.writeBuffer(e.bY, 0, e.zeros);
+            lo = 0; count = target;
+        } else {
+            lo = e.gpuApplied; count = target - e.gpuApplied;
+        }
+        e.gpuApplied = target;
+        dev.queue.writeBuffer(e.uWin, 0, new Uint32Array([lo, count, 0, 0]));
+        dev.queue.writeBuffer(e.uScale, 0, new Float32Array([
+            scales.slopeX, scales.interceptX, scales.slopeY, scales.interceptY,
+            scales.vpX, scales.vpY, scales.radius, scales.alpha ]));
+        e.pending = { count, instanceCount };
+    }
+
+    // Read the per-player counters back to the CPU (buffer→buffer copy → MAP_READ). Used
+    // by the __bl2d_gpuCounters invariant probe. NOTE: buffer-to-buffer copies have NO
+    // row-alignment rule — unlike the texture readback in exportDataURLs(), which must
+    // round bytesPerRow up to 256. Returns { x, y } as Uint32Arrays of length players.
+    async readbackCounters() {
+        const e = this.evt; if (!e) return null;
+        const bytes = e.players * 4;
+        const stage = (n) => this.device.createBuffer({ size: Math.max(16, n), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        const sx = stage(bytes), sy = stage(bytes);
+        const enc = this.device.createCommandEncoder();
+        enc.copyBufferToBuffer(e.bX, 0, sx, 0, bytes);
+        enc.copyBufferToBuffer(e.bY, 0, sy, 0, bytes);
+        this.device.queue.submit([enc.finish()]);
+        await Promise.all([sx.mapAsync(GPUMapMode.READ), sy.mapAsync(GPUMapMode.READ)]);
+        const x = new Uint32Array(sx.getMappedRange().slice(0, bytes));
+        const y = new Uint32Array(sy.getMappedRange().slice(0, bytes));
+        sx.unmap(); sy.unmap(); sx.destroy(); sy.destroy();
+        return { x, y, players: e.players };
+    }
+
+    _destroyEvt() {
+        const e = this.evt; if (!e) return;
+        for (const k of ["bEvents", "bX", "bY", "bColor", "uWin", "uScale"]) e[k]?.destroy();
+        this.evt = null;
+    }
+
+    // One render pass: clear → completed cloud → [GPU-accumulated cloud] → trails →
+    // open cloud + heads → frontier dots (the Canvas-2D layer order), into the offscreen
+    // texture, then blit to canvas. When a GPU cloud is pending, its compute pass runs
+    // first (in the SAME encoder) so the counters are current before the cloud draw.
     present() {
         if (!this.offTex) return;
         const enc = this.device.createCommandEncoder();
+        const evt = this.evt;
+        const gpuCloud = evt && evt.pending && !evt.failed;
+        // Compute pass FIRST (a separate pass before the render pass): accumulate this
+        // frame's new events into the per-player counters. ceil(count/64) workgroups,
+        // 64 threads each (one per event). Skipped when count is 0 (a paused/idle frame
+        // that still re-presents the existing counters).
+        if (gpuCloud && evt.pending.count > 0) {
+            try {
+                const cp = enc.beginComputePass();
+                cp.setPipeline(this.pAccum);
+                cp.setBindGroup(0, evt.bgAccum);
+                cp.dispatchWorkgroups(Math.ceil(evt.pending.count / 64));
+                cp.end();
+            } catch (e2) { evt.failed = true; console.warn("[webgpu] accumulate pass failed → CPU cloud:", e2.message); }
+        }
         const rp = enc.beginRenderPass({ colorAttachments: [{
             view: this.offTex.createView(), clearValue: this.clearValue, loadOp: "clear", storeOp: "store" }] });
         const drawPts = (name) => { if (this.count[name] > 0) { rp.setBindGroup(0, this._bindGroup(this.buf[name])); rp.draw(6, this.count[name]); } };
         rp.setPipeline(this.pPoints); drawPts("bg");
+        // GPU-accumulated cloud sits at the background cloud's layer (behind trails,
+        // heads, and frontier dots). It uses its own pipeline + bind group (it vertex-
+        // pulls from the counters), so we switch pipelines around it. instanceCount =
+        // one quad per player; the vertex shader drops (0,0) players itself.
+        if (gpuCloud && !evt.failed && evt.pending.instanceCount > 0) {
+            rp.setPipeline(this.pCloud);
+            rp.setBindGroup(0, evt.bgCloud);
+            rp.draw(6, evt.pending.instanceCount);
+            rp.setPipeline(this.pPoints);
+        }
         if (this.count.trail > 0) { rp.setPipeline(this.pLine); rp.setBindGroup(0, this._bindGroup(this.buf.trail)); rp.draw(6, this.count.trail); rp.setPipeline(this.pPoints); }
         drawPts("fg");
         drawPts("frontier");
         rp.end();
         this.device.queue.submit([enc.finish()]);
+        if (evt) evt.pending = null;   // consume the request; the next GPU frame re-stashes it
         if (this.canvasOk && this.ctx) {
             try {
                 const e2 = this.device.createCommandEncoder();
@@ -3124,6 +3531,10 @@ class WebGPURenderer {
     // single composited PNG (the design accepts visual — not byte — equivalence here).
     async exportDataURLs() {
         if (!this.offTex) return [];
+        // bytesPerRow MUST be a multiple of 256 for copyTextureToBuffer (a hard WebGPU
+        // alignment rule for TEXTURE→buffer copies — note the buffer→buffer counter
+        // readback in readbackCounters() has no such rule). So each row is padded up to
+        // the next 256 and we skip the padding when un-premultiplying below.
         const bpr = Math.ceil(this.offW * 4 / 256) * 256;
         const staging = this.device.createBuffer({ size: bpr * this.offH, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
         const enc = this.device.createCommandEncoder();
@@ -3151,6 +3562,7 @@ class WebGPURenderer {
         this.canvas?.remove(); this.canvas = null; this.ctx = null;
         this.offTex?.destroy(); this.offTex = null; this.offW = this.offH = 0;
         for (const k of Object.keys(this.buf)) { this.buf[k]?.destroy(); this.buf[k] = null; this.count[k] = 0; }
+        this._destroyEvt();
         this.layers = null; this.bgCacheKey = null;
     }
 }
@@ -3170,6 +3582,7 @@ function swapRenderer(next) {
     next.bgCacheKey = null;
     if (prev && prev !== next) prev.destroy();
     window.__bl2d_renderer = next instanceof WebGPURenderer ? "webgpu" : "canvas2d";
+    syncRendererToggle();
     if (typeof refreshChart === "function") refreshChart();
 }
 function swapToCanvas2D(reason) {
@@ -3177,16 +3590,17 @@ function swapToCanvas2D(reason) {
     console.warn("[renderer] → Canvas 2D fallback:", reason);
     swapRenderer(new Canvas2DRenderer());
 }
-async function chooseRenderer() {
-    const params = new URLSearchParams(location.search);
-    if (params.get("renderer") !== "webgpu") return;        // default path untouched
-    const headless = /HeadlessChrome/i.test(navigator.userAgent) || navigator.webdriver;
-    if (headless && !params.has("webgpuHeadless")) { console.log("[renderer] headless → staying Canvas 2D"); return; }
-    if (!navigator.gpu) { console.warn("[renderer] navigator.gpu missing → Canvas 2D"); return; }
+// Build + swap in the WebGPU backend on demand (the URL flag at startup AND the header
+// toggle both call this). Resolves true on success, false on any failed rung — leaving
+// the working Canvas-2D render in place. The canvas-configure headless guard lives in
+// WebGPURenderer.resize(), so this is safe to call from an explicit user action.
+async function enableWebGPU() {
+    if (pointRenderer instanceof WebGPURenderer) return true;
+    if (!navigator.gpu) { console.warn("[renderer] navigator.gpu missing → Canvas 2D"); return false; }
     try {
         let adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
         if (!adapter) adapter = await navigator.gpu.requestAdapter({ forceFallbackAdapter: true });
-        if (!adapter) { console.warn("[renderer] no WebGPU adapter → Canvas 2D"); return; }
+        if (!adapter) { console.warn("[renderer] no WebGPU adapter → Canvas 2D"); return false; }
         const device = await adapter.requestDevice();
         const webgpu = new WebGPURenderer(device, adapter);
         await webgpu.init();
@@ -3194,12 +3608,89 @@ async function chooseRenderer() {
         device.addEventListener?.("uncapturederror", (e) => { window.__bl2d_gpuError = e.error?.message; });
         swapRenderer(webgpu);
         console.log("[renderer] WebGPU active");
+        return true;
     } catch (e) {
         console.warn("[renderer] WebGPU init failed → Canvas 2D:", e?.message || e);
+        return false;
     }
+}
+// Startup ladder: only auto-enables WebGPU under ?renderer=webgpu, and never under
+// headless (so the default app's snap.js checks stay on Canvas 2D). The header toggle is
+// the interactive entry point for everyone else.
+async function chooseRenderer() {
+    const params = new URLSearchParams(location.search);
+    if (params.get("renderer") !== "webgpu") return;        // default path untouched
+    const headless = /HeadlessChrome/i.test(navigator.userAgent) || navigator.webdriver;
+    if (headless && !params.has("webgpuHeadless")) { console.log("[renderer] headless → staying Canvas 2D"); return; }
+    await enableWebGPU();
+}
+
+// Persist the choice in the ?renderer query param (preserving the hash) so it survives a
+// reload and is shareable — the same flag chooseRenderer reads at startup.
+function writeRendererParam(on) {
+    const url = new URL(location.href);
+    if (on) url.searchParams.set("renderer", "webgpu"); else url.searchParams.delete("renderer");
+    history.replaceState(null, "", url.pathname + url.search + location.hash);
+}
+
+// Reflect the live backend on the header toggle (also called after an automatic
+// device-loss fallback, so the button can't lie about what's active).
+function syncRendererToggle() {
+    const btn = document.getElementById("renderer-toggle");
+    if (!btn) return;
+    const on = pointRenderer instanceof WebGPURenderer;
+    const available = !!navigator.gpu;
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-pressed", String(on));
+    btn.disabled = !available && !on;
+    btn.title = !available
+        ? "WebGPU not available in this browser"
+        : on ? "GPU rendering on — click for Canvas 2D" : "Render the point cloud on the GPU (experimental)";
+}
+
+function setupRendererToggle() {
+    const btn = document.getElementById("renderer-toggle");
+    if (!btn) return;
+    btn.addEventListener("click", async () => {
+        if (pointRenderer instanceof WebGPURenderer) {
+            swapToCanvas2D("user toggle");
+            writeRendererParam(false);
+        } else {
+            btn.disabled = true;                            // brief guard while the device spins up
+            const ok = await enableWebGPU();
+            writeRendererParam(ok);
+            if (!ok) { btn.title = "WebGPU unavailable — staying on Canvas 2D"; setTimeout(syncRendererToggle, 2000); }
+        }
+        syncRendererToggle();
+    });
+    syncRendererToggle();
 }
 window.__bl2d_chooseRenderer = chooseRenderer;
 window.__bl2d_exportDataURLs = () => pointRenderer.exportDataURLs();   // headless WebGPU readback probe
+
+// GPU compute-accumulate invariant probe: read the per-player counters back and compare
+// to the JS incremental-frontier shadow (comp[]) — they MUST match exactly when the GPU
+// cloud is active (counterMis 0), mirroring the POC's `counterMis` check. Returns null
+// when WebGPU/the evt path isn't active.
+window.__bl2d_gpuCounters = async (names = []) => {
+    if (!(pointRenderer instanceof WebGPURenderer)) return null;
+    const c = await pointRenderer.readbackCounters();
+    if (!c || !evtIncFrontier || !pbpEvt) return null;
+    // GPU counters hold the AXIS VALUE per player; recompute the same value from the JS
+    // shadow's per-component totals via the model's coefficients (cx/cy) and compare.
+    const mono = evtGpuMonotone(pbpEvt);
+    const comp = evtIncFrontier.comp, dl = pbpEvt.depList;
+    const expect = (coef, p) => { let v = 0; for (let d = 0; d < dl.length; d++) v += coef[d] * comp[d][p]; return v; };
+    let counterMis = 0;
+    for (let i = 0; i < c.players; i++) { if (c.x[i] !== expect(mono.cx, i)) counterMis++; if (c.y[i] !== expect(mono.cy, i)) counterMis++; }
+    // A few named players' GPU axis values straight from the readback (record check).
+    const records = {};
+    for (const nm of names) { const i = pbpEvt.players.findIndex((p) => p.name === nm); if (i >= 0) records[nm] = { x: c.x[i], y: c.y[i] }; }
+    return { counterMis, players: c.players, applied: evtIncFrontier.applied, lastCursor: evtIncFrontier.lastCursor, records };
+};
+// Player-name → resident-model index (so a headless probe can read a specific player's
+// GPU counter, e.g. Bonds / Henderson record spot-checks).
+window.__bl2d_evtPlayerIndex = (name) => pbpEvt ? pbpEvt.players.findIndex((p) => p.name === name) : -1;
 
 function recordPbpFrameTiming(totalMs, modelMs, renderMs, enabled) {
     if (!enabled) return;
@@ -4054,11 +4545,16 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         const stream = buildEvtEventStream(model);
         const cur = Math.max(model.winStart, Math.min(model.winEnd, pbpCursorIdx)); // matches refreshChart's evt-career clamp
         let st = evtIncFrontier;
+        // Did this call restart the replay from 0 (fresh engine OR backward seek)? The
+        // GPU counters must be zeroed in lockstep with the JS shadow when it does, so the
+        // GPU stash below reports it as `zero`.
+        let didReset = false;
         // A new model / sign flip / filter change invalidates the replay → fresh engine
         // (the eligibility mask changes which players are admitted, so the state can't be
         // patched incrementally — reset and replay forward from 0).
         if (!st || st.stream !== stream || st.xSign !== xSign || st.ySign !== ySign ||
             st.bats !== bats || st.country !== country) {
+            didReset = true;
             const players = model.players, elig = new Uint8Array(players.length);
             const all = bats === "all" && country === "all";
             for (let i = 0; i < players.length; i++) {
@@ -4071,7 +4567,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                 comp: model.depList.map(() => new Float64Array(players.length)),
                 applied: 0, lastCursor: -1 };
         }
-        if (cur < st.lastCursor) { st.engine.reset(); for (const c of st.comp) c.fill(0); st.applied = 0; }
+        if (cur < st.lastCursor) { st.engine.reset(); for (const c of st.comp) c.fill(0); st.applied = 0; didReset = true; }
         const { date, player, dep, delta, n } = stream;
         const depList = model.depList, comp = st.comp, elig = st.elig, cobj = {};
         let a = st.applied;
@@ -4090,7 +4586,13 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         // frontier point's (x,y) is a deduped cloud point), preserving canonical-X order.
         const frontier = [];
         for (const [x, y] of st.engine.frontierXY()) { const pt = pointByXY.get(x + "|" + y); if (pt) frontier.push(pt); }
-        return { filtered: flt, unique: uniq, frontier };
+        // GPU compute-accumulate stash. We expose the engine's TOTAL consumed-event count
+        // (`applied` = a) and whether it restarted this frame (`zero`), NOT a per-frame
+        // window — the GPU computes its own catch-up window from these (see
+        // accumulateCloud), so it stays correct even across non-lite frames it skipped. No
+        // frontier logic moves to the GPU; we only hand off bookkeeping it already did.
+        const gpu = { applied: a, zero: didReset };
+        return { filtered: flt, unique: uniq, frontier, gpu };
     }
 
     // Left-to-right best-in-class envelope over an already-sorted, deduped array.
@@ -4123,8 +4625,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         return layers;
     }
 
-    const { filtered, unique, frontier } =
+    const frontierResult =
         buildSmoothActiveFrontier() || buildEvtIncrementalFrontier() || buildFrontier(seasonMatches);
+    const { filtered, unique, frontier } = frontierResult;
     const frontierSet = new Set(frontier);
     // Headless-verification hook: the current frontier's player keys + (x,y).
     window.__bl2d_frontierPids = frontier.map(d => d.playerID);
@@ -4571,6 +5074,44 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
 
     const cloudOpacity = careerHighlights.size > 0 ? 0.1 : themeCloudOpacity;
     const smoothOpenYear = filters.smooth ? eYear : null;
+
+    // ── Optional GPU compute-accumulate cloud gate ──────────────────────────────
+    // When ALL of these hold, the high-cardinality .evt-career cloud is accumulated +
+    // drawn on the GPU (see the WEBGPU_ACCUM_WGSL block) instead of rebuilt on the CPU
+    // each frame. Any miss falls back to the existing CPU instanced cloud with NO visual
+    // change — the gate is a strict subset of the conditions under which the JS
+    // incremental frontier ran, so frontierResult.gpu is guaranteed present when true:
+    //   1. the active backend is WebGPU;
+    //   2. this is the .evt play-by-play CAREER cloud (filters.evt is set only for the
+    //      evt-career path — evt-season omits it; note drawMode is "season" for both,
+    //      so we key off filters.evt, NOT the mode argument);
+    //   3. the resident model matches the active axes;
+    //   4. both axes are counting (non-rate) …
+    //   5. … AND a monotone-nondecreasing linear combination of streamed components, so a
+    //      per-player running sum is exact — single (HR, SB) OR composite (TB, PA), but
+    //      never a stat that can decrease (evtGpuMonotone);
+    //   6. the era colour encoding (the GPU cloud only paints era — others fall back);
+    //   7. no sign inversion (worst-frontier flips the [0,max] mapping);
+    //   8. no bats/country filter (an eligibility mask would desync GPU counters from
+    //      the JS shadow, breaking the counterMis invariant — fall back instead);
+    //   9. a "lite" (playback/scrub) frame only — paused/idle frames keep the CPU cloud
+    //      so hover hit-testing + the quadtree still work on real point objects;
+    //  10. the event stream uploaded OK for this model (idempotent; first frame pays it).
+    const gpuCloud = !!(
+        pointRenderer instanceof WebGPURenderer &&
+        filters.evt &&
+        pbpEvt && pbpEvt.xDim === xDim && pbpEvt.yDim === yDim &&
+        !pbpEvt.xs.rate && !pbpEvt.ys.rate &&
+        evtGpuMonotone(pbpEvt).ok &&
+        colorBy === "era" &&
+        xSign === 1 && ySign === 1 && !showWorstFrontier &&
+        bats === "all" && country === "all" &&
+        filters.lite &&
+        frontierResult.gpu &&
+        pointRenderer.uploadEvtStream(pbpEvt)
+    );
+    window.__bl2d_evtGpuCloud = gpuCloud;
+
     // .evt: every point's (x,y) moves each frame (cumulative grows), so the whole cloud
     // goes on the redrawn-every-frame foreground; the cached background would freeze it.
     // .bl2p accumulating: completed seasons are static → cache them on the background.
@@ -4579,7 +5120,11 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         : filters.smooth
         ? unique.filter(d => d.year < smoothOpenYear)
         : regular;
-    const foregroundCloudPoints = filters.evt
+    // When the GPU cloud is active it draws the regular .evt cloud itself, so keep the
+    // CPU foreground cloud empty (highlight heads still flow through it below).
+    const foregroundCloudPoints = gpuCloud
+        ? []
+        : filters.evt
         ? regular
         : filters.smooth
         ? regular.filter(d => d.year >= smoothOpenYear)
@@ -4684,6 +5229,16 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             margin, xScale, yScale, radiusFor,
             fillFor: d => careerHighlights.get(d.playerID) || frontierColor || colorOf(d, colorBy, getMeta),
             strokeColor: "#ffffff", strokeWidth: 1.5,
+        });
+    }
+    // GPU compute-accumulate cloud: hand the renderer this frame's event window (from the
+    // JS incremental frontier) + the D3-linear axis mapping, so present() runs the compute
+    // dispatch and draws the cloud vertex-pulled from the per-player counters.
+    if (gpuCloud) {
+        pointRenderer.accumulateCloud({
+            win: frontierResult.gpu,
+            instanceCount: pbpEvt.players.length,
+            scales: gpuScaleUniform(xScale, yScale, margin, width, height, pointRadius, cloudOpacity),
         });
     }
     // Composite the accumulated layers (no-op for Canvas 2D, which painted as it went;
