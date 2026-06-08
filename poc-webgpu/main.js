@@ -133,13 +133,20 @@ async function setupGpu() {
     ]);
 
     const ST = GPUShaderStage, BU = GPUBufferUsage;
-    const storage = BU.STORAGE | BU.COPY_DST;
+    const storage = BU.STORAGE | BU.COPY_DST;   // a storage buffer we also upload into
+    // Every GPU buffer must declare its USAGE up front (WebGPU validates against it):
+    // STORAGE = shader-readable array; COPY_DST = queue.writeBuffer can fill it;
+    // COPY_SRC = it can be the source of a copy (needed to read counters back);
+    // UNIFORM = small per-draw constants. Size is rounded up to a multiple of 4.
     const mkBuf = (bytes, usage) => device.createBuffer({ size: Math.max(16, (bytes + 3) & ~3), usage });
 
     // ── buffers ───────────────────────────────────────────────────────────────
-    bEvents = mkBuf(Module._events_count() * 3 * 4, storage);
-    writeFromWasm(bEvents, Module._events_ptr(), Module._events_count() * 3 * 4);
-    bHr = mkBuf(playerCount * 4, storage | BU.COPY_SRC);
+    // The event history (resident, uploaded once) + the per-player counter/colour/flag
+    // arrays the shaders index. hr/sb add COPY_SRC so the invariant check can read them
+    // back. Everything is sized to the model the WASM core decoded.
+    bEvents = mkBuf(Module._events_count() * 3 * 4, storage);   // 3 u32 per event
+    writeFromWasm(bEvents, Module._events_ptr(), Module._events_count() * 3 * 4);   // zero-copy from the WASM heap
+    bHr = mkBuf(playerCount * 4, storage | BU.COPY_SRC);        // COPY_SRC → counter readback
     bSb = mkBuf(playerCount * 4, storage | BU.COPY_SRC);
     bDebut = mkBuf(playerCount * 4, storage);
     writeFromWasm(bDebut, Module._debut_ptr(), playerCount * 4);
@@ -156,14 +163,22 @@ async function setupGpu() {
     zerosU32 = new Uint32Array(playerCount);
 
     // ── bind group layouts ──────────────────────────────────────────────────────
+    // A bind-group LAYOUT is the contract ("slot 0 is a compute-visible uniform, slot 2 is
+    // a writable storage buffer…"); a bind GROUP (below) is the actual binding of buffers
+    // to those slots. Pipelines are built against layouts, so one layout can be reused with
+    // several bind groups (see bgPointsCareer/Open/Completed — same layout, different
+    // buffers). `visibility` must include every stage that reads the binding, and the
+    // storage `type` (read-only vs writable) must match the shader's access (the compute
+    // shader writes hr/sb → ro:false; everyone else reads → ro:true). These MUST line up
+    // with the @group/@binding/var<...> declarations in the WGSL or pipeline creation fails.
     const sbuf = (binding, vis, ro = true) => ({ binding, visibility: vis, buffer: { type: ro ? "read-only-storage" : "storage" } });
     const ubuf = (binding, vis) => ({ binding, visibility: vis, buffer: { type: "uniform" } });
 
     bglAccum = device.createBindGroupLayout({ entries: [
-        ubuf(0, ST.COMPUTE),
-        sbuf(1, ST.COMPUTE),
-        sbuf(2, ST.COMPUTE, false),
-        sbuf(3, ST.COMPUTE, false),
+        ubuf(0, ST.COMPUTE),         // Win {lo,count}
+        sbuf(1, ST.COMPUTE),         // events (read)
+        sbuf(2, ST.COMPUTE, false),  // hr (read+write)
+        sbuf(3, ST.COMPUTE, false),  // sb (read+write)
     ] });
     bglPoints = device.createBindGroupLayout({ entries: [
         ubuf(0, ST.VERTEX),
@@ -194,6 +209,12 @@ async function setupGpu() {
     });
 
     // ── bind groups ──────────────────────────────────────────────────────────────
+    // Concrete buffer→slot bindings. Note the three point bind groups share ONE layout
+    // (bglPoints) but feed different buffers: career reads the live hr/sb counters;
+    // season's OPEN cloud reads the same counters but with the open-year colour/flag
+    // buffers; season's COMPLETED cloud reads the static per-(player,year) buffers. The
+    // shader doesn't know which — it just reads "slots 1..4" — so the host swaps meaning
+    // by swapping bind groups between draws. That's the payoff of the layout/group split.
     const bg = (layout, bufs) => device.createBindGroup({ layout, entries: bufs.map((b, i) => ({ binding: i, resource: { buffer: b } })) });
     bgAccum = bg(bglAccum, [bWin, bEvents, bHr, bSb]);
     bgPointsCareer = bg(bglPoints, [bParams, bHr, bSb, bDebut, bOnFront]);
@@ -211,8 +232,13 @@ function setParams() {
     device.queue.writeBuffer(bParams, 0, new Float32Array([maxX, maxY, 0.010, aspect]));
 }
 
-// Record the compute accumulate + the point/line render into `view`.
+// Record one frame's GPU work into a command encoder: first the COMPUTE pass (grow the
+// counters by this frame's event slice), then the RENDER pass (draw the cloud + staircase
+// from those counters). Both go in the same encoder so they submit together and the
+// render is guaranteed to see the compute's writes (passes in an encoder run in order).
 function recordScene(enc, view) {
+    // Compute pass — skipped when no new events this frame (a still cursor). One thread
+    // per event: ceil(count/64) workgroups of 64. This is the O(new events) accumulate.
     if (OUT.cnt > 0) {
         const cp = enc.beginComputePass();
         cp.setPipeline(pAccum);
@@ -220,16 +246,22 @@ function recordScene(enc, view) {
         cp.dispatchWorkgroups(Math.ceil(OUT.cnt / 64));
         cp.end();
     }
+    // Render pass — clear to the dark chart bg, then draw. `draw(6, N)` = 6 vertices (the
+    // quad) × N instances (players); the vertex shader pulls each instance's counter.
     const rp = enc.beginRenderPass({
         colorAttachments: [{ view, clearValue: { r: 0.04, g: 0.05, b: 0.09, a: 1 }, loadOp: "clear", storeOp: "store" }],
     });
     rp.setPipeline(pPoints);
     if (mode === "season") {
+        // Two clouds: the static completed-season points, then the growing open season.
+        // Swapping the bind group re-points the same shader at different buffers (see above).
         rp.setBindGroup(0, bgPointsCompleted); rp.draw(6, OUT.completedCount);
         rp.setBindGroup(0, bgPointsOpen); rp.draw(6, OUT.openCount);
     } else {
-        rp.setBindGroup(0, bgPointsCareer); rp.draw(6, playerCount);
+        rp.setBindGroup(0, bgPointsCareer); rp.draw(6, playerCount);   // one cloud: every player
     }
+    // Frontier staircase on top (needs ≥ 2 vertices to form a line). Switch pipeline →
+    // line-strip topology, reuse the same axis-maxima uniform so it aligns with the cloud.
     if (OUT.lineVerts >= 2) { rp.setPipeline(pLine); rp.setBindGroup(0, bgLine); rp.draw(OUT.lineVerts); }
     rp.end();
 }

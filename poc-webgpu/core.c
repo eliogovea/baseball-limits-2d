@@ -117,13 +117,16 @@ static int ev_by_date(const void *a, const void *b) {
     return da < db ? -1 : da > db ? 1 : 0;
 }
 
-// Incremental Pareto update for player p, now at (x,y). Events are monotone, so
-// p is the only point that can join; it can evict a contiguous dominated run;
-// nothing else is promoted. Frontier stays sorted by x ascending. (main.c verbatim.)
+// Incremental Pareto update for player p, now at (x,y). Events are monotone (counts only
+// grow), so p is the only point that can join; it can evict a CONTIGUOUS dominated run;
+// nothing else is promoted. Frontier stays sorted by x ascending. This is the exact C
+// original of script.js createIncrementalFrontier.applyEvent — the JS twin has the
+// fully-annotated walkthrough; here C uses `memmove` where JS uses Array.splice (shift the
+// tail to open/close a gap in the parallel g_frX/g_frY/g_frP arrays). (main.c verbatim.)
 static void frontier_apply_event(uint32_t p, uint32_t x, uint32_t y) {
-    if (g_onFront[p]) {
+    if (g_onFront[p]) {                               // already on frontier → remove stale slot, re-insert below
         for (int i = 0; i < g_frN; i++) if (g_frP[i] == p) {
-            memmove(&g_frX[i], &g_frX[i+1], (g_frN-i-1)*4);
+            memmove(&g_frX[i], &g_frX[i+1], (g_frN-i-1)*4);   // close the gap (splice-out)
             memmove(&g_frY[i], &g_frY[i+1], (g_frN-i-1)*4);
             memmove(&g_frP[i], &g_frP[i+1], (g_frN-i-1)*4);
             g_frN--; break;
@@ -131,35 +134,38 @@ static void frontier_apply_event(uint32_t p, uint32_t x, uint32_t y) {
         g_onFront[p] = 0;
     }
     int k = 0; while (k < g_frN && g_frX[k] < x) k++;
-    if (k < g_frN && g_frY[k] >= y) return;          // dominated → not on frontier
-    int j = 0; while (j < g_frN && !(g_frX[j] <= x && g_frY[j] <= y)) j++;
-    int e = j; while (e < g_frN && g_frX[e] <= x && g_frY[e] <= y) e++;
-    if (e > j) {
+    if (k < g_frN && g_frY[k] >= y) return;          // first slot with x'≥x also has y'≥y → p dominated, skip
+    int j = 0; while (j < g_frN && !(g_frX[j] <= x && g_frY[j] <= y)) j++;   // start of the run p dominates
+    int e = j; while (e < g_frN && g_frX[e] <= x && g_frY[e] <= y) e++;      // end of that contiguous run
+    if (e > j) {                                     // evict [j,e): they're no longer extreme
         for (int t = j; t < e; t++) g_onFront[g_frP[t]] = 0;
         memmove(&g_frX[j], &g_frX[e], (g_frN-e)*4);
         memmove(&g_frY[j], &g_frY[e], (g_frN-e)*4);
         memmove(&g_frP[j], &g_frP[e], (g_frN-e)*4);
         g_frN -= e - j;
     }
-    int ins = (e > j) ? j : 0;
-    if (e == j) while (ins < g_frN && g_frX[ins] < x) ins++;
-    if (g_frN + 1 > MAX_FRONT) return;               // bound guard
-    memmove(&g_frX[ins+1], &g_frX[ins], (g_frN-ins)*4);
+    int ins = (e > j) ? j : 0;                       // insertion point: where the run was, else…
+    if (e == j) while (ins < g_frN && g_frX[ins] < x) ins++;   // …walk to the first x'≥x
+    if (g_frN + 1 > MAX_FRONT) return;               // bound guard (fixed-size arrays)
+    memmove(&g_frX[ins+1], &g_frX[ins], (g_frN-ins)*4);        // open a gap (splice-in)
     memmove(&g_frY[ins+1], &g_frY[ins], (g_frN-ins)*4);
     memmove(&g_frP[ins+1], &g_frP[ins], (g_frN-ins)*4);
     g_frX[ins] = x; g_frY[ins] = y; g_frP[ins] = p; g_frN++;
     g_onFront[p] = 1;
 }
 
-// Staircase line strip from a sorted (x-asc/y-desc) frontier into out; returns
-// the vertex count. (main.c build_staircase, generalised over the arrays.)
+// Turn the sorted frontier into a STAIRCASE line strip (vec2 vertices in HR/SB units) for
+// line.wgsl. A Pareto frontier is a step function, not a diagonal: between two adjacent
+// members the limit holds the higher Y until the higher X is reached. So each frontier
+// point emits TWO vertices — (x_i, y_i) then (x_i, y_{i+1}) — giving the vertical drop to
+// the next step; a left cap on the Y-axis starts the strip, and the last step drops to 0.
 static uint32_t build_staircase_from(const uint32_t *frx, const uint32_t *fry, int frn, float *out) {
     if (frn == 0) return 0;
     uint32_t n = 0;
-    out[n*2] = 0;          out[n*2+1] = (float)fry[0]; n++;        // left cap on the y-axis
+    out[n*2] = 0;          out[n*2+1] = (float)fry[0]; n++;        // left cap: (0, top Y) on the y-axis
     for (int i = 0; i < frn; i++) {
-        out[n*2] = (float)frx[i]; out[n*2+1] = (float)fry[i];                       n++;
-        out[n*2] = (float)frx[i]; out[n*2+1] = (i < frn-1) ? (float)fry[i+1] : 0.f; n++;
+        out[n*2] = (float)frx[i]; out[n*2+1] = (float)fry[i];                       n++;  // step corner
+        out[n*2] = (float)frx[i]; out[n*2+1] = (i < frn-1) ? (float)fry[i+1] : 0.f; n++;  // vertical drop to next (or 0)
     }
     return n;
 }
