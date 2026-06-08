@@ -1486,6 +1486,10 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     syncPlayerHint();
     refreshChart();
 
+    // First paint is Canvas 2D (default + fallback); under ?renderer=webgpu this
+    // async ladder may swap in the WebGPU backend and redraw. Never blocks first paint.
+    chooseRenderer();
+
     // Lets nested call sites (like the chart's click handler) trigger a
     // refresh without holding a reference to the closure.
     document.addEventListener("bl2d:refresh", refreshChart);
@@ -2581,7 +2585,7 @@ function openAxisStatMenu(anchorEl, selectId, placement) {
     };
 }
 
-function buildExportSvgString() {
+function buildExportSvgString(dataUrls) {
     const svg = document.getElementById("scatter-plot");
     if (!svg) return null;
 
@@ -2630,16 +2634,19 @@ function buildExportSvgString() {
 
     // Canvas carries the high-cardinality point layers. Embed transparent PNGs
     // behind the SVG overlay so SVG download and share-preview rasterisation keep
-    // the complete chart instead of labels/axes only.
+    // the complete chart instead of labels/axes only. `dataUrls` comes from the
+    // active renderer's exportDataURLs() (Canvas 2D: [bg,fg]; WebGPU: one readback
+    // composite) — kept here as a param so this stays synchronous.
+    const urls = dataUrls || (pointRenderer.bgCanvas ? [pointRenderer.bgCanvas, pointRenderer.fgCanvas].filter(Boolean).map((c) => c.toDataURL("image/png")) : []);
     const firstChild = clone.firstChild;
-    for (const canvas of [pointRenderer.bgCanvas, pointRenderer.fgCanvas]) {
-        if (!canvas) continue;
+    for (const href of urls) {
+        if (!href) continue;
         const img = document.createElementNS("http://www.w3.org/2000/svg", "image");
         img.setAttribute("x", "0");
         img.setAttribute("y", "0");
         img.setAttribute("width", Math.round(width));
         img.setAttribute("height", Math.round(height));
-        img.setAttribute("href", canvas.toDataURL("image/png"));
+        img.setAttribute("href", href);
         clone.insertBefore(img, firstChild);
     }
 
@@ -2800,6 +2807,14 @@ class Canvas2DRenderer {
         }
     }
 
+    // Canvas 2D paints immediately in each draw* call, so compositing is already done.
+    present() { /* no-op — the WebGPU backend submits its single render pass here */ }
+
+    // Export source: the two layer PNGs, bg first (same z-order exportChartSVG embeds).
+    exportDataURLs() {
+        return [this.bgCanvas, this.fgCanvas].filter(Boolean).map((c) => c.toDataURL("image/png"));
+    }
+
     destroy() {
         if (!this.layers) return;
         for (const canvas of [this.layers.bg, this.layers.fg]) canvas.remove();
@@ -2807,7 +2822,384 @@ class Canvas2DRenderer {
         this.bgCacheKey = null;
     }
 }
+
+// Pack a CSS colour (era/league/handedness palette, tiny → memoized) + an extra alpha
+// multiplier into a little-endian RGBA8 u32 the WGSL shaders unpack byte-by-byte.
+const _rgbaPackCache = new Map();
+function packColorRGBA(css, alpha = 1) {
+    const key = css + "|" + alpha;
+    let v = _rgbaPackCache.get(key);
+    if (v !== undefined) return v;
+    let r = 0, g = 0, b = 0, a = 255;
+    const c = d3.color(css);
+    if (c) { const rc = c.rgb(); r = rc.r & 255; g = rc.g & 255; b = rc.b & 255;
+        a = Math.max(0, Math.min(255, Math.round(255 * (rc.opacity ?? 1) * alpha))); }
+    v = ((r | (g << 8) | (b << 16) | (a << 24)) >>> 0);
+    _rgbaPackCache.set(key, v);
+    return v;
+}
+
+// WGSL: instanced-quad point cloud. Per-instance (px,py,radius,ring,fill,stroke) is
+// vertex-pulled from a storage buffer; positions are CSS px → NDC (+Y up, so a Y flip);
+// the fragment does the round-disc test + an optional white ring, with a ~1px AA edge.
+const WEBGPU_POINTS_WGSL = `
+struct U { vp: vec2<f32> };
+@group(0) @binding(0) var<uniform> u: U;
+struct Inst { px: f32, py: f32, radius: f32, ring: f32, fill: u32, stroke: u32 };
+@group(0) @binding(1) var<storage, read> inst: array<Inst>;
+struct VSOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) off: vec2<f32>,
+  @location(1) @interpolate(flat) fill: u32,
+  @location(2) @interpolate(flat) stroke: u32,
+  @location(3) @interpolate(flat) radius: f32,
+  @location(4) @interpolate(flat) ring: f32,
+};
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(-1.0,1.0),
+  vec2<f32>(-1.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>( 1.0,1.0));
+fn unpack(c: u32) -> vec4<f32> {
+  return vec4<f32>(f32(c & 0xffu), f32((c >> 8u) & 0xffu), f32((c >> 16u) & 0xffu), f32((c >> 24u) & 0xffu)) / 255.0;
+}
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  let d = inst[ii];
+  let corner = C[vi];
+  let ext = d.radius + d.ring;                 // grow the quad so the rim isn't clipped
+  let cx = d.px / u.vp.x * 2.0 - 1.0;
+  let cy = 1.0 - d.py / u.vp.y * 2.0;          // pixel-down → NDC-up
+  var o: VSOut;
+  o.pos = vec4<f32>(cx + corner.x * ext / u.vp.x * 2.0, cy + corner.y * ext / u.vp.y * 2.0, 0.0, 1.0);
+  o.off = corner * ext;                        // px offset from centre (interpolated)
+  o.fill = d.fill; o.stroke = d.stroke; o.radius = d.radius; o.ring = d.ring;
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let dist = length(i.off);
+  let outer = i.radius + i.ring * 0.5;
+  let aa = 1.0 - smoothstep(outer - 0.75, outer + 0.75, dist);
+  if (aa <= 0.0) { discard; }
+  var col: vec4<f32>;
+  if (i.ring > 0.0 && dist > i.radius - i.ring * 0.5) { col = unpack(i.stroke); }
+  else { col = unpack(i.fill); }
+  return vec4<f32>(col.rgb, col.a * aa);
+}`;
+
+// WGSL: group-career trail segments as instanced thin quads (line-strip can't vary
+// width/alpha per segment). Per-instance (x0,y0,x1,y1,width,color); alpha is baked into
+// the colour (the oldest→newest ramp), so the comet-tail matches the Canvas-2D path.
+const WEBGPU_LINE_WGSL = `
+struct U { vp: vec2<f32> };
+@group(0) @binding(0) var<uniform> u: U;
+struct Seg { x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: u32 };
+@group(0) @binding(1) var<storage, read> seg: array<Seg>;
+struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) @interpolate(flat) color: u32 };
+const TS = array<vec2<f32>, 6>(
+  vec2<f32>(0.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(0.0,1.0),
+  vec2<f32>(0.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>(1.0,1.0));
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  let s = seg[ii];
+  let ts = TS[vi];
+  let p0 = vec2<f32>(s.x0, s.y0);
+  let p1 = vec2<f32>(s.x1, s.y1);
+  let dir = normalize(p1 - p0 + vec2<f32>(1e-5, 0.0));
+  let nrm = vec2<f32>(-dir.y, dir.x);
+  let px = mix(p0, p1, ts.x) + nrm * (ts.y * s.width * 0.5);
+  var o: VSOut;
+  o.pos = vec4<f32>(px.x / u.vp.x * 2.0 - 1.0, 1.0 - px.y / u.vp.y * 2.0, 0.0, 1.0);
+  o.color = s.color;
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let c = vec4<f32>(f32(i.color & 0xffu), f32((i.color >> 8u) & 0xffu), f32((i.color >> 16u) & 0xffu), f32((i.color >> 24u) & 0xffu)) / 255.0;
+  return c;
+}`;
+
+// WebGPURenderer — the experimental ?renderer=webgpu backend (a learning/headroom
+// track; never the default, gated so it can never regress production). Implements the
+// same PointRenderer surface as Canvas2DRenderer but accumulates each draw* call into a
+// resident GPU instance buffer and submits ONE render pass in present(). One <canvas> +
+// one offscreen texture; the frontier staircase, axes, labels all stay SVG. See
+// docs/webgpu-main-app-integration-design.md §"Phase 3".
+class WebGPURenderer {
+    constructor(device, adapter) {
+        this.device = device;
+        this.adapter = adapter;            // retained: headless Dawn GCs the instance otherwise
+        this.canvas = null;
+        this.ctx = null;
+        this.canvasOk = true;
+        this.layers = null;                // { width, height, dpr } — mirrors the 2D shape for the bgKey
+        this.bgCacheKey = null;
+        this.offTex = null; this.offW = 0; this.offH = 0;
+        this.format = navigator.gpu.getPreferredCanvasFormat();
+        // resident instance buffers + counts (grown on demand)
+        this.buf = { bg: null, fg: null, frontier: null, trail: null };
+        this.count = { bg: 0, fg: 0, frontier: 0, trail: 0 };
+        this._scratch = new ArrayBuffer(0);
+    }
+    get dpr() { return this.layers?.dpr || 1; }
+    get bgCanvas() { return this.canvas; }   // truthy → drawScatterPlot's fg-gated blocks run
+    get fgCanvas() { return this.canvas; }
+
+    async init() {
+        const dev = this.device;
+        this.uViewport = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const bgl = dev.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+            { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        ] });
+        this.bgl = bgl;
+        const layout = dev.createPipelineLayout({ bindGroupLayouts: [bgl] });
+        const blend = {
+            color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+            alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+        };
+        const ptMod = dev.createShaderModule({ code: WEBGPU_POINTS_WGSL });
+        const lnMod = dev.createShaderModule({ code: WEBGPU_LINE_WGSL });
+        this.pPoints = dev.createRenderPipeline({ layout,
+            vertex: { module: ptMod, entryPoint: "vs" },
+            fragment: { module: ptMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+        this.pLine = dev.createRenderPipeline({ layout,
+            vertex: { module: lnMod, entryPoint: "vs" },
+            fragment: { module: lnMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+        // clear colour = the chart background (transparent so the page/SVG shows through;
+        // dots blend over it). Premultiplied alpha mode → clear to 0.
+        this.clearValue = { r: 0, g: 0, b: 0, a: 0 };
+    }
+
+    // Lazily create + size the single canvas (same .plot-canvas slot as the 2D layers)
+    // and the offscreen render target. Never configures the canvas under headless.
+    resize(width, height) {
+        const region = document.querySelector(".chart-region");
+        const svg = document.getElementById("scatter-plot");
+        if (!region || !svg) return null;
+        if (!this.canvas) {
+            const c = document.createElement("canvas");
+            c.className = "plot-canvas plot-canvas--webgpu";
+            c.setAttribute("aria-hidden", "true");
+            region.insertBefore(c, svg);
+            this.canvas = c;
+            this.canvasOk = !navigator.webdriver && !/HeadlessChrome/i.test(navigator.userAgent);
+            if (this.canvasOk) {
+                try {
+                    this.ctx = c.getContext("webgpu");
+                    this.ctx.configure({ device: this.device, format: this.format, alphaMode: "premultiplied",
+                        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST });
+                } catch (e) { this.canvasOk = false; console.warn("[webgpu] canvas configure failed (offscreen-only):", e.message); }
+            }
+        }
+        const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 3));
+        const bw = Math.max(1, Math.round(width * dpr)), bh = Math.max(1, Math.round(height * dpr));
+        if (this.canvas.width !== bw || this.canvas.height !== bh) { this.canvas.width = bw; this.canvas.height = bh; }
+        this.canvas.style.width = `${width}px`; this.canvas.style.height = `${height}px`;
+        if (bw !== this.offW || bh !== this.offH) {
+            this.offTex?.destroy();
+            this.offTex = this.device.createTexture({ size: [bw, bh], format: this.format,
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+            this.offW = bw; this.offH = bh;
+        }
+        // NDC mapping uses CSS px (dpr only sets texture resolution).
+        this.device.queue.writeBuffer(this.uViewport, 0, new Float32Array([width, height, 0, 0]));
+        this.layers = { width, height, dpr };
+        return this.layers;
+    }
+
+    // Flatten point objects + the opts callbacks into the named instance buffer (24-byte
+    // records) and upload. radiusForName picks radius vs radiusFor; ringFor yields the
+    // white-ring width. Returns nothing; present() reads this.count.
+    _uploadPoints(name, points, opts) {
+        const { margin, xScale, yScale } = opts;
+        const radius = opts.radius, radiusFor = opts.radiusFor;
+        const fillFor = opts.fillFor, alphaFor = opts.alphaFor, alpha = opts.alpha ?? 1;
+        const strokeFor = opts.strokeFor, strokeWidth = opts.strokeWidth || 0;
+        const n = points ? points.length : 0;
+        const need = Math.max(1, n) * 24;
+        if (this._scratch.byteLength < need) this._scratch = new ArrayBuffer(need);
+        const dv = new DataView(this._scratch);
+        let w = 0;
+        for (let k = 0; k < n; k++) {
+            const d = points[k];
+            const px = margin.left + xScale(d.x), py = margin.top + yScale(d.y);
+            if (!isFinite(px) || !isFinite(py)) continue;
+            const r = radiusFor ? radiusFor(d) : (typeof radius === "function" ? radius(d) : radius);
+            const stroke = strokeFor ? strokeFor(d) : null;
+            const ring = stroke ? strokeWidth : 0;
+            const a = alphaFor ? alphaFor(d) : alpha;
+            dv.setFloat32(w, px, true); dv.setFloat32(w + 4, py, true);
+            dv.setFloat32(w + 8, r, true); dv.setFloat32(w + 12, ring, true);
+            dv.setUint32(w + 16, packColorRGBA(fillFor(d), a), true);
+            dv.setUint32(w + 20, packColorRGBA(stroke || "#ffffff", 1), true);
+            w += 24;
+        }
+        this.count[name] = w / 24;
+        this.buf[name] = this._ensureBuffer(this.buf[name], w);
+        if (w > 0) this.device.queue.writeBuffer(this.buf[name], 0, this._scratch, 0, w);
+    }
+
+    _ensureBuffer(buf, bytes) {
+        const size = Math.max(256, (bytes + 255) & ~255);
+        if (buf && buf.size >= size) return buf;
+        buf?.destroy();
+        return this.device.createBuffer({ size, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    }
+
+    drawBackground(points, opts) { this._uploadPoints("bg", points, opts); }
+    drawForeground(points, opts) { this._uploadPoints("fg", points, opts); }
+    drawFrontierDots(points, opts) {
+        // strokeFor/strokeWidth come through as strokeColor/strokeWidth here; normalise.
+        this._uploadPoints("frontier", points, { ...opts, strokeFor: () => opts.strokeColor || "#ffffff", strokeWidth: opts.strokeWidth ?? 1.5 });
+    }
+
+    drawTrails(trails, opts) {
+        const { margin, xScale, yScale, width = 2 } = opts;
+        // count segments
+        let segs = 0;
+        for (const t of trails) { const p = t.points; if (p && p.length >= 2) segs += p.length - 1; }
+        const need = Math.max(1, segs) * 24;
+        if (this._scratch.byteLength < need) this._scratch = new ArrayBuffer(need);
+        const dv = new DataView(this._scratch);
+        let w = 0;
+        for (const { color, points } of trails) {
+            if (!points || points.length < 2) continue;
+            const m = points.length;
+            for (let i = 1; i < m; i++) {
+                const a = points[i - 1], b = points[i];
+                const ax = margin.left + xScale(a.x), ay = margin.top + yScale(a.y);
+                const bx = margin.left + xScale(b.x), by = margin.top + yScale(b.y);
+                if (![ax, ay, bx, by].every(isFinite)) continue;
+                dv.setFloat32(w, ax, true); dv.setFloat32(w + 4, ay, true);
+                dv.setFloat32(w + 8, bx, true); dv.setFloat32(w + 12, by, true);
+                dv.setFloat32(w + 16, width, true);
+                dv.setUint32(w + 20, packColorRGBA(color, (i / (m - 1)) * 0.85), true);
+                w += 24;
+            }
+        }
+        this.count.trail = w / 24;
+        this.buf.trail = this._ensureBuffer(this.buf.trail, w);
+        if (w > 0) this.device.queue.writeBuffer(this.buf.trail, 0, this._scratch, 0, w);
+    }
+
+    clear() {
+        this.count.bg = this.count.fg = this.count.frontier = this.count.trail = 0;
+        this.bgCacheKey = null;
+        this.present();
+    }
+
+    _bindGroup(buffer) {
+        return this.device.createBindGroup({ layout: this.bgl, entries: [
+            { binding: 0, resource: { buffer: this.uViewport } },
+            { binding: 1, resource: { buffer: buffer || this.uViewport } },
+        ] });
+    }
+
+    // One render pass: clear → completed cloud → trails → open cloud + heads → frontier
+    // dots (the Canvas-2D layer order), into the offscreen texture, then blit to canvas.
+    present() {
+        if (!this.offTex) return;
+        const enc = this.device.createCommandEncoder();
+        const rp = enc.beginRenderPass({ colorAttachments: [{
+            view: this.offTex.createView(), clearValue: this.clearValue, loadOp: "clear", storeOp: "store" }] });
+        const drawPts = (name) => { if (this.count[name] > 0) { rp.setBindGroup(0, this._bindGroup(this.buf[name])); rp.draw(6, this.count[name]); } };
+        rp.setPipeline(this.pPoints); drawPts("bg");
+        if (this.count.trail > 0) { rp.setPipeline(this.pLine); rp.setBindGroup(0, this._bindGroup(this.buf.trail)); rp.draw(6, this.count.trail); rp.setPipeline(this.pPoints); }
+        drawPts("fg");
+        drawPts("frontier");
+        rp.end();
+        this.device.queue.submit([enc.finish()]);
+        if (this.canvasOk && this.ctx) {
+            try {
+                const e2 = this.device.createCommandEncoder();
+                e2.copyTextureToTexture({ texture: this.offTex }, { texture: this.ctx.getCurrentTexture() }, [this.offW, this.offH]);
+                this.device.queue.submit([e2.finish()]);
+            } catch (e) { this.canvasOk = false; console.warn("[webgpu] present blit failed (offscreen-only):", e.message); }
+        }
+    }
+
+    // Export: read the offscreen texture back, un-premultiply to straight alpha, return a
+    // single composited PNG (the design accepts visual — not byte — equivalence here).
+    async exportDataURLs() {
+        if (!this.offTex) return [];
+        const bpr = Math.ceil(this.offW * 4 / 256) * 256;
+        const staging = this.device.createBuffer({ size: bpr * this.offH, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        const enc = this.device.createCommandEncoder();
+        enc.copyTextureToBuffer({ texture: this.offTex }, { buffer: staging, bytesPerRow: bpr }, [this.offW, this.offH]);
+        this.device.queue.submit([enc.finish()]);
+        await staging.mapAsync(GPUMapMode.READ);
+        const src = new Uint8Array(staging.getMappedRange());
+        const cv = document.createElement("canvas"); cv.width = this.offW; cv.height = this.offH;
+        const c2d = cv.getContext("2d"); const img = c2d.createImageData(this.offW, this.offH);
+        const bgra = this.format.startsWith("bgra");
+        for (let y = 0; y < this.offH; y++) for (let x = 0; x < this.offW; x++) {
+            const s = y * bpr + x * 4, d = (y * this.offW + x) * 4;
+            const a = src[s + 3];
+            const r = bgra ? src[s + 2] : src[s], g = src[s + 1], b = bgra ? src[s] : src[s + 2];
+            const inv = a > 0 ? 255 / a : 0;     // un-premultiply
+            img.data[d] = Math.min(255, r * inv); img.data[d + 1] = Math.min(255, g * inv);
+            img.data[d + 2] = Math.min(255, b * inv); img.data[d + 3] = a;
+        }
+        staging.unmap(); staging.destroy();
+        c2d.putImageData(img, 0, 0);
+        return [cv.toDataURL("image/png")];
+    }
+
+    destroy() {
+        this.canvas?.remove(); this.canvas = null; this.ctx = null;
+        this.offTex?.destroy(); this.offTex = null; this.offW = this.offH = 0;
+        for (const k of Object.keys(this.buf)) { this.buf[k]?.destroy(); this.buf[k] = null; this.count[k] = 0; }
+        this.layers = null; this.bgCacheKey = null;
+    }
+}
+
+// The active point-cloud renderer. Starts as Canvas 2D (the default + fallback); the
+// selection ladder below may swap in WebGPU under ?renderer=webgpu.
 let pointRenderer = new Canvas2DRenderer();
+window.__bl2d_renderer = "canvas2d";
+
+// Renderer selection ladder (docs/webgpu-main-app-integration-design.md §"Phase 3 …
+// selection ladder"). The app always renders Canvas 2D first; this only swaps to WebGPU
+// when ?renderer=webgpu AND every capability rung passes. Never blocks first paint;
+// falls back to Canvas 2D on any failure or device loss.
+function swapRenderer(next) {
+    const prev = pointRenderer;
+    pointRenderer = next;
+    next.bgCacheKey = null;
+    if (prev && prev !== next) prev.destroy();
+    window.__bl2d_renderer = next instanceof WebGPURenderer ? "webgpu" : "canvas2d";
+    if (typeof refreshChart === "function") refreshChart();
+}
+function swapToCanvas2D(reason) {
+    if (pointRenderer instanceof Canvas2DRenderer) return;
+    console.warn("[renderer] → Canvas 2D fallback:", reason);
+    swapRenderer(new Canvas2DRenderer());
+}
+async function chooseRenderer() {
+    const params = new URLSearchParams(location.search);
+    if (params.get("renderer") !== "webgpu") return;        // default path untouched
+    const headless = /HeadlessChrome/i.test(navigator.userAgent) || navigator.webdriver;
+    if (headless && !params.has("webgpuHeadless")) { console.log("[renderer] headless → staying Canvas 2D"); return; }
+    if (!navigator.gpu) { console.warn("[renderer] navigator.gpu missing → Canvas 2D"); return; }
+    try {
+        let adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+        if (!adapter) adapter = await navigator.gpu.requestAdapter({ forceFallbackAdapter: true });
+        if (!adapter) { console.warn("[renderer] no WebGPU adapter → Canvas 2D"); return; }
+        const device = await adapter.requestDevice();
+        const webgpu = new WebGPURenderer(device, adapter);
+        await webgpu.init();
+        device.lost.then((info) => { window.__bl2d_deviceLost = info.message; swapToCanvas2D("device lost: " + info.message); });
+        device.addEventListener?.("uncapturederror", (e) => { window.__bl2d_gpuError = e.error?.message; });
+        swapRenderer(webgpu);
+        console.log("[renderer] WebGPU active");
+    } catch (e) {
+        console.warn("[renderer] WebGPU init failed → Canvas 2D:", e?.message || e);
+    }
+}
+window.__bl2d_chooseRenderer = chooseRenderer;
+window.__bl2d_exportDataURLs = () => pointRenderer.exportDataURLs();   // headless WebGPU readback probe
 
 function recordPbpFrameTiming(totalMs, modelMs, renderMs, enabled) {
     if (!enabled) return;
@@ -2825,8 +3217,8 @@ function recordPbpFrameTiming(totalMs, modelMs, renderMs, enabled) {
     };
 }
 
-function exportChartSVG() {
-    const svgStr = buildExportSvgString();
+async function exportChartSVG() {
+    const svgStr = buildExportSvgString(await pointRenderer.exportDataURLs());
     if (!svgStr) return;
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([svgStr], { type: "image/svg+xml" }));
@@ -2909,7 +3301,7 @@ async function openShareModal() {
 
     // Generate PNG preview in the background
     try {
-        const svgStr = buildExportSvgString();
+        const svgStr = buildExportSvgString(await pointRenderer.exportDataURLs());
         if (svgStr) {
             const svgEl = document.getElementById("scatter-plot");
             const { width, height } = svgEl.getBoundingClientRect();
@@ -4294,6 +4686,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             strokeColor: "#ffffff", strokeWidth: 1.5,
         });
     }
+    // Composite the accumulated layers (no-op for Canvas 2D, which painted as it went;
+    // the WebGPU backend submits its single render pass here).
+    pointRenderer.present();
 
     // FLIP: animate dots from their previous screen positions to the new ones.
     // Hit circles (tooltip targets) are updated instantly — they must match the
