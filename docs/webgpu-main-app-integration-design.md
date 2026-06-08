@@ -224,18 +224,266 @@ from the POCs carry into `WebGPURenderer` verbatim.
 
 ## Phasing
 
-1. **Incremental frontier (JS), backend-agnostic.** Land `IncrementalFrontier` in
-   the `.evt` streaming path; verify against `core.c`. Ships value on the *current*
-   Canvas-2D renderer immediately (no WebGPU needed). *T3 — algorithmic.*
-2. **`PointRenderer` seam.** Refactor `drawCanvasPointLayer` call sites behind the
-   interface; `Canvas2DRenderer` is a no-op wrapper. Pure refactor, fully covered
-   by existing snapshots. *T2.*
+1. ✅ **Incremental frontier (JS), backend-agnostic.** `IncrementalFrontier` in the
+   `.evt` career streaming path; verified against `core.c`. *Shipped (Phase 1 + the
+   filter-aware Slice 3).*
+2. ✅ **`PointRenderer` seam.** `Canvas2DRenderer` owns the bg/fg layers behind a
+   narrow interface; no-op refactor, byte-identical snapshots. *Shipped (Phase 2).*
 3. **`WebGPURenderer` behind `?renderer=webgpu`.** Instanced cloud (bg/fg buffers),
-   capability check + fallback ladder, export via Canvas-2D copy. Frontier stays
-   SVG. *T3/T4 — new rendering backend.*
+   capability check + fallback ladder, export via texture readback. Frontier stays
+   SVG. *T3/T4 — new rendering backend. **Detailed design below.***
 4. **Stretch: GPU frontier staircase + (later) GPU compute-accumulate** for the
    streaming mode (the POC's `accumulate.wgsl`), and the **deferred `core.wasm`**
    path once pitch-by-pitch volumes land. *Separate session.*
+
+---
+
+## Phase 3 — `WebGPURenderer`: detailed design & data flows
+
+This is the first phase with real WebGPU code. It is **strictly a learning/headroom
+track**: Canvas 2D already meets the frame budget after Phase 1, so WebGPU is never
+the default and can never regress production. It plugs into the Phase-2 `PointRenderer`
+seam — `drawScatterPlot` is unchanged except for one added `present()` call; swapping
+the renderer is the whole integration.
+
+### Where it plugs in (the Phase-2 seam, extended)
+
+`drawScatterPlot` already drives a `pointRenderer` instance through:
+
+```
+pointRenderer.resize(w, h)
+pointRenderer.clear()                      // empty-data early-out
+pointRenderer.drawBackground(points, opts) // only when bgCacheKey changes
+pointRenderer.drawTrails(trails, opts)     // group-career only
+pointRenderer.drawForeground(points, opts)
+pointRenderer.drawFrontierDots(points, opts)
+pointRenderer.bgCanvas / .fgCanvas         // read by exportChartSVG
+```
+
+Phase 3 makes that surface a true **interface with two implementations** by adding
+**two methods** (no-ops on `Canvas2DRenderer`, the active work on `WebGPURenderer`):
+
+- **`present()`** — called once at the end of `drawScatterPlot`'s canvas section
+  (after `drawFrontierDots`). Canvas 2D paints immediately per call, so `present()`
+  is a no-op there. WebGPU **accumulates** the per-call geometry into resident GPU
+  buffers and submits **one render pass** in `present()`.
+- **`exportDataURLs()`** — returns the array of PNG data-URLs `exportChartSVG`
+  embeds. Canvas 2D returns `[bgCanvas.toDataURL(), fgCanvas.toDataURL()]` (today's
+  behavior). WebGPU returns `[<single composited readback PNG>]`. `exportChartSVG`
+  switches to this method so it never touches a WebGPU canvas's `toDataURL`
+  (unreliable) — it reads back the offscreen texture instead.
+
+Everything else — axes, gridlines, the **frontier staircase** (`path.frontier-staircase`),
+labels, legend, tooltip, the `d3.quadtree` hit-test — stays SVG / DOM, identical
+across backends. The WebGPU canvas renders **only the point cloud + group-career
+trails**.
+
+### Renderer selection ladder (`chooseRenderer`)
+
+Selection is **async and non-blocking**. The app *always* first constructs and renders
+with `Canvas2DRenderer` (so first paint and the default path are byte-for-byte
+unchanged). Only if every rung passes does it swap:
+
+```
+// at startup, after the first Canvas-2D render:
+if (urlFlag("renderer") !== "webgpu")        return;                 // default → stay Canvas 2D
+if (isHeadless())                            return;                 // see "Headless" below
+if (!navigator.gpu)                          return notice("no navigator.gpu");
+adapter = await navigator.gpu.requestAdapter();  if (!adapter) return notice("no adapter");
+device  = await adapter.requestDevice();
+const webgpu = new WebGPURenderer(device, adapter);
+try { await webgpu.init(); } catch (e)       return notice("init failed: " + e), webgpu.destroy();
+device.lost.then(() => swapToCanvas2D());                            // runtime fallback
+device.addEventListener("uncapturederror", budgetedFallback);
+swapRenderer(webgpu);                                                // destroy() the 2D layers, refreshChart()
+```
+
+`swapRenderer(next)` calls `current.destroy()` (removes its canvas(es) from
+`.chart-region`), sets `pointRenderer = next`, copies over `bgCacheKey = null` (forces
+a fresh background upload), and calls `refreshChart()`. `swapToCanvas2D()` is the same
+in reverse, used on device loss / error budget — the cloud just re-renders on a fresh
+`Canvas2DRenderer`. The app is **never blocked on the GPU**; a failed rung leaves the
+fully-working Canvas-2D render in place plus a one-line notice.
+
+### `WebGPURenderer` internals
+
+**One canvas, one offscreen texture, two pipelines.** A single `<canvas>` in the same
+absolutely-positioned `.plot-canvas` slot as the 2D layers (the static/dynamic split
+lives in *buffer upload cadence*, not separate surfaces). All rendering targets an
+**offscreen texture** first (valid even headless); a real browser then blits it to the
+canvas via `copyTextureToTexture` (the POC's proven pattern, `poc-webgpu/main.js`).
+
+Pipelines (WGSL inlined as JS template strings in `script.js`, *not* shader files — so
+there is no extra `fetch` and the multi-file path needs no new assets):
+
+- **Points pipeline** — instanced quads (6 verts/instance, `triangle-list`); WebGPU has
+  no point primitive. Per-instance attributes are **vertex-pulled from a storage
+  buffer**. Alpha blending on (`src-alpha / one-minus-src-alpha`). Fragment does the
+  round-disc test + an optional white ring (frontier/highlight dots).
+- **Lines pipeline** — group-career trails. Each trail segment is an instanced thin
+  quad (2 triangles) with a per-segment color + alpha ramp, so it matches the Canvas-2D
+  comet-tail. (A `line-strip` can't vary width/alpha per segment, so quads it is.)
+
+**Resident buffers** (re-uploaded only when their source changes — the static/dynamic
+split):
+
+| Buffer | Holds | Re-uploaded |
+|---|---|---|
+| `bgInst` | completed-season cloud instances | on `drawBackground` (i.e. when `bgCacheKey` changes) |
+| `fgInst` | open cloud + career-highlight head instances | every frame (`drawForeground`) |
+| `frontierInst` | frontier (`special`) dot instances | every frame (`drawFrontierDots`) |
+| `trailVerts` | group-career trail segment instances | every frame, group-career only (`drawTrails`) |
+| `uViewport` | uniform: CSS width, height (px) | on `resize` |
+
+Each `draw*` method **flattens** its `(points, opts)` into the matching instance buffer
+and `queue.writeBuffer`s it; it does **not** draw. `present()` records the single pass.
+
+### Data flow 1 — host point → GPU instance (the flatten)
+
+`drawScatterPlot` hands each renderer **the same data**: arrays of point objects in
+**data coordinates** (`d.x`, `d.y`) plus an `opts` bag of **callbacks** (`fillFor(d)`,
+`alphaFor(d)`, `radius` (number|fn), `strokeFor(d)`/`radiusFor(d)`). Canvas 2D calls
+these per point at draw time. WebGPU evaluates them **host-side, once per point**, into
+a packed instance record:
+
+```
+struct Inst {                       // 24 bytes, std430 (4-byte aligned)
+  px: f32, py: f32,                 // screen position, CSS px  = margin.left + xScale(d.x), margin.top + yScale(d.y)
+  radius: f32,                      // disc radius, CSS px       = radius(d) (or the number)
+  ring: f32,                        // white-ring width, CSS px  = strokeWidth if strokeFor(d) else 0
+  fill: u32,                        // packed RGBA8              = packColor(fillFor(d), alphaFor(d))
+  stroke: u32,                      // packed RGBA8 (ring)       = packColor(strokeFor(d) || "#fff", 1)
+};
+```
+
+Building it: a reusable scratch `ArrayBuffer` grown to `count * 24`; a `DataView`
+writes `px/py/radius/ring` (`setFloat32`, little-endian) and `fill/stroke`
+(`setUint32`). Points with non-finite screen coords are skipped (same as Canvas 2D's
+`isFinite` guard). The instance count is returned so `present()` knows how many to draw.
+
+**Color packing** (`packColor(cssColor, alpha)`): the callbacks return CSS color
+strings (hex, `rgb()`, named) via `colorOf()`. Parse once through a tiny cached parser —
+a 1×1 scratch `CanvasRenderingContext2D` (`fillStyle = css; fillRect; getImageData`) or
+`d3.color(css).rgb()` (d3 is already loaded) — memoized in a `Map<css → u32>` since the
+palette is tiny (era ramp / league / handedness). Pack as `r | g<<8 | b<<16 | a<<24`
+(little-endian RGBA8, matched in the shader by reading bytes).
+
+### Data flow 2 — coordinate & DPR mapping (vertex shader)
+
+Instance `px/py` are **CSS pixels, top-left origin** (exactly what Canvas 2D draws with
+after its `setTransform(dpr,…)`). The offscreen texture is sized `width*dpr ×
+height*dpr` (sharper on HiDPI) but NDC always spans the whole texture, so the mapping
+uses **CSS** dimensions (`uViewport = [cssW, cssH]`); DPR only sets texture resolution,
+never the math:
+
+```
+center_ndc = vec2( px/cssW * 2 - 1,  1 - py/cssH * 2 );   // note Y flip: pixel-down → NDC-up
+half_ndc   = vec2( (radius+ring)/cssW * 2, (radius+ring)/cssH * 2 );
+pos        = center_ndc + corner * half_ndc;              // corner ∈ {±1}² (the 6-vert quad)
+```
+
+The quad is grown to `radius + ring` so the white rim isn't clipped. The fragment
+recovers the pixel distance from center, `dist = length(corner) * (radius+ring)`, and:
+
+```
+if (dist > radius + ring*0.5)  discard;                   // outside the stroked disc
+if (ring > 0 && dist > radius - ring*0.5)  → stroke color // the rim (≈ Canvas 2D's centered stroke)
+else                                        → fill color   // the disc
+```
+
+This reproduces Canvas 2D's "fill disc of radius R, then stroke a `ring`-px line
+centered on R" to sub-pixel tolerance. Plain cloud dots pass `ring = 0` → a flat filled
+disc with the fill's alpha.
+
+### Data flow 3 — `present()` (the one render pass)
+
+```
+present():
+  if no layers → return
+  enc = device.createCommandEncoder()
+  rp  = enc.beginRenderPass({ view: offscreen, clearValue: <page bg>, loadOp:'clear', storeOp:'store' })
+  rp.setPipeline(points)
+    rp.setBindGroup(0, bg(uViewport, bgInst));       rp.draw(6, bgCount)         // completed cloud
+    if (trailCount)  { rp.setPipeline(lines); rp.setBindGroup(0, bg(uViewport, trailVerts)); rp.draw(6, trailCount); rp.setPipeline(points); }
+    rp.setBindGroup(0, bg(uViewport, fgInst));       rp.draw(6, fgCount)         // open cloud + highlight heads
+    rp.setBindGroup(0, bg(uViewport, frontierInst)); rp.draw(6, frontierCount)   // frontier dots (on top)
+  rp.end()
+  device.queue.submit([enc.finish()])
+  if (canvasOk) copyTextureToTexture(offscreen → ctx.getCurrentTexture())
+```
+
+The draw **order** mirrors Canvas 2D's layer order exactly: completed cloud (bg canvas)
+→ trails → open cloud + heads (fg canvas, `clear:false` over trails) → frontier dots on
+top. Because `present()` always clears and redraws every resident buffer, the per-frame
+"clear the fg" semantics of the 2D path are automatic; the `clear` opt is a Canvas-2D
+concern WebGPU ignores. The clear color is the page background (read once from CSS so
+light/dark themes match).
+
+The bg cache still works: when `bgCacheKey` is unchanged, `drawScatterPlot` doesn't call
+`drawBackground`, so `bgInst` is **retained** and `present()` redraws it anyway — same
+"don't rebuild the static cloud" optimization, expressed as "don't re-upload the
+buffer."
+
+### Data flow 4 — export (texture readback)
+
+`exportChartSVG` calls `pointRenderer.exportDataURLs()`. For WebGPU:
+`copyTextureToBuffer(offscreen → staging, bytesPerRow = ceil(w*4/256)*256)`,
+`mapAsync(READ)`, copy into a 2D `ImageData` (swizzling BGRA→RGBA when
+`getPreferredCanvasFormat()` is `bgra8unorm`), `putImageData` to a scratch 2D canvas,
+return `[canvas.toDataURL("image/png")]` — the POC's `captureDataUrl` verbatim. One
+composited `<image>` is embedded instead of two layers; the resulting share-image is
+**visually equivalent** (not byte-identical — different rasterizer). The **default and
+bundle paths are unchanged and exact**, since they never construct a `WebGPURenderer`.
+
+### Headless handling (the POC lesson, carried verbatim)
+
+Configuring a WebGPU canvas under headless Dawn (CDP automation) errors and **loses the
+device**. So:
+
+- **`chooseRenderer` bails before WebGPU entirely** when `/HeadlessChrome/i` UA or
+  `navigator.webdriver` — the *default app's* headless verification (every existing
+  `snap.js` check) runs on Canvas 2D, unaffected.
+- WebGPU-specific headless verification uses the **offscreen render + readback** path
+  (never `ctx.configure`), exactly like `poc-webgpu/snap-webgpu.js`. A
+  `?renderer=webgpu&webgpuHeadless=1` escape hatch (or a `window.__bl2d_webgpu*` hook)
+  lets a dedicated harness construct the renderer, render offscreen, and read back the
+  PNG for a structural parity diff — without ever configuring the canvas.
+
+The POC's other lessons carry too: retain the adapter (Dawn GCs the instance otherwise),
+`depthSlice` stays `UNDEFINED` (no depth attachment), **+Y-up NDC** (the Y flip above).
+
+### Bundle exclusion
+
+`build_bundle.py` is untouched. The WGSL lives in JS template strings and the
+`WebGPURenderer` class rides along in the inlined `script.js`, but it is **inert** in the
+bundle: `chooseRenderer` only runs under `?renderer=webgpu`, the bundle is opened from
+`file://` with no such flag, and no shader-file `fetch` or WASM blob is added. The
+bundle stays **functionally Canvas-2D-only**; the few KB of dormant WGSL text is not a
+CDN/WASM dependency. (If even that is unwanted later, the bundler can strip the class by
+regex — noted, not done.)
+
+### Verification
+
+- **Default path untouched.** Re-run the Phase-2 byte-identical snapshots **without**
+  the flag — must still match (the ladder returns immediately when the flag is absent).
+- **Headless guard.** `?renderer=webgpu` under `snap.js` must **not** configure a WebGPU
+  canvas (assert `window.__bl2d_renderer === "canvas2d"` and no console error); the
+  default render is identical to no-flag.
+- **WebGPU parity (offscreen).** A dedicated harness (POC-style offscreen + readback)
+  renders a fixed state under `WebGPURenderer` and diffs **structurally** against the
+  Canvas-2D PNG of the same state: same frontier dots (count + positions), same cloud
+  extent, same staircase (SVG, identical). Pixel-exact is not expected across
+  rasterizers; assert the frontier dot screen positions match within ±1px and the
+  on-frontier set is identical.
+- **Fallback drills.** Force each rung: `?renderer=webgpu` with `navigator.gpu` deleted →
+  Canvas 2D + notice; simulated `device.lost` → swap back, clean redraw, identical
+  hit-testing (`__bl2d_renderer` flips to `canvas2d`).
+- **Export.** Under WebGPU, `exportDataURLs()` returns a non-empty PNG that embeds the
+  cloud; under Canvas 2D, still the two layers. Bundle integrity unchanged
+  (`build_bundle.py` decode-count check; no WebGPU symbols *executed*).
+- **Perf headroom (informational).** `snap.js` evalJS timing of `present()` vs the
+  Canvas-2D draw at the heaviest state (2025 open year, full window) — the point of the
+  exercise, recorded but not gating.
 
 ## Risks
 
