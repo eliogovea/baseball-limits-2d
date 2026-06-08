@@ -3576,17 +3576,19 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // touched players move the frontier — O(window + frontier) vs the O(N log N) sweep.
     // Returns null (→ fall through to the full sweep) unless the gate holds:
     //   • evt career mode, model matches the active axes,
-    //   • both axes are counting (non-rate, monotone) stats,
-    //   • no attribute/threshold filter active (Slice 1 — see the design doc's phasing).
-    // The full point cloud (filtered/unique) is still built exactly as buildFrontier's
-    // else-branch does; only the frontier *subset* comes from the incremental engine,
-    // selected back out of `unique` by coordinate so downstream identity holds.
+    //   • both axes are counting (non-rate, monotone) stats.
+    // Attribute filters (bats/country — league/franchise are forced "all" for evt) are
+    // honored via a static per-player eligibility mask that gates which players' events
+    // feed the engine; the cloud (filtered/unique) already filters via seasonMatches. The
+    // threshold isn't a factor here (counting axes ⇒ minPa is always 0). The full point
+    // cloud is still built exactly as buildFrontier's else-branch; only the frontier
+    // *subset* comes from the engine, selected back out of `unique` by coordinate so
+    // downstream identity holds.
     function buildEvtIncrementalFrontier() {
         if (!filters.evt) return null;
         const model = pbpEvt;
         if (!model || model.xDim !== xDim || model.yDim !== yDim) return null;
         if (model.xs.rate || model.ys.rate) return null;
-        if (bats !== "all" || country !== "all" || minPa > 0) return null;
 
         // Cloud: same map → sort → dedup as buildFrontier (mode is "season" for evt career).
         const flt = [];
@@ -3602,21 +3604,34 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         const stream = buildEvtEventStream(model);
         const cur = Math.max(model.winStart, Math.min(model.winEnd, pbpCursorIdx)); // matches refreshChart's evt-career clamp
         let st = evtIncFrontier;
-        if (!st || st.stream !== stream || st.xSign !== xSign || st.ySign !== ySign) {
-            st = evtIncFrontier = { stream, xSign, ySign,
-                engine: createIncrementalFrontier(model.players.length, xSign, ySign),
-                comp: model.depList.map(() => new Float64Array(model.players.length)),
+        // A new model / sign flip / filter change invalidates the replay → fresh engine
+        // (the eligibility mask changes which players are admitted, so the state can't be
+        // patched incrementally — reset and replay forward from 0).
+        if (!st || st.stream !== stream || st.xSign !== xSign || st.ySign !== ySign ||
+            st.bats !== bats || st.country !== country) {
+            const players = model.players, elig = new Uint8Array(players.length);
+            const all = bats === "all" && country === "all";
+            for (let i = 0; i < players.length; i++) {
+                if (all) { elig[i] = 1; continue; }
+                const m = getMeta(players[i].name);
+                elig[i] = (m && (bats === "all" || m[handField] === bats) && (country === "all" || m.country === country)) ? 1 : 0;
+            }
+            st = evtIncFrontier = { stream, xSign, ySign, bats, country, elig,
+                engine: createIncrementalFrontier(players.length, xSign, ySign),
+                comp: model.depList.map(() => new Float64Array(players.length)),
                 applied: 0, lastCursor: -1 };
         }
         if (cur < st.lastCursor) { st.engine.reset(); for (const c of st.comp) c.fill(0); st.applied = 0; }
         const { date, player, dep, delta, n } = stream;
-        const depList = model.depList, comp = st.comp, cobj = {};
+        const depList = model.depList, comp = st.comp, elig = st.elig, cobj = {};
         let a = st.applied;
         while (a < n && date[a] <= cur) {
             const p = player[a];
-            comp[dep[a]][p] += delta[a];
-            for (let di = 0; di < depList.length; di++) cobj[depList[di]] = comp[di][p];
-            st.engine.applyEvent(p, model.xs.fn(cobj), model.ys.fn(cobj));
+            if (elig[p]) {                         // skip events of players excluded by the bats/country filter
+                comp[dep[a]][p] += delta[a];
+                for (let di = 0; di < depList.length; di++) cobj[depList[di]] = comp[di][p];
+                st.engine.applyEvent(p, model.xs.fn(cobj), model.ys.fn(cobj));
+            }
             a++;
         }
         st.applied = a; st.lastCursor = cur;
