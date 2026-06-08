@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>poc-webgpu — HR×SB replay (WebGPU twin of poc-vulkan)</title>
+<style>
+  :root { --bg:#0f1320; --panel:#171c2e; --ink:#e7ecf5; --muted:#8b95ad; --accent:#e23b3b; --grid:#272d42; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font:14px/1.4 -apple-system, system-ui, sans-serif; }
+  .wrap { display:flex; flex-direction:column; height:100%; }
+  header { padding:12px 18px; border-bottom:1px solid var(--grid); }
+  header h1 { margin:0; font-size:15px; font-weight:650; }
+  header p { margin:2px 0 0; color:var(--muted); font-size:12px; }
+  .chart-region { position:relative; flex:1 1 auto; min-height:0; }
+  #gpu { position:absolute; inset:0; width:100%; height:100%; display:block; }
+  .controls { display:flex; align-items:center; gap:14px; padding:12px 18px;
+    border-top:1px solid var(--grid); background:var(--panel); }
+  button { border:none; cursor:pointer; color:#fff; }
+  button#play { width:40px; height:40px; border-radius:50%; background:var(--accent); font-size:16px; flex:none; }
+  button#modeToggle { padding:8px 14px; border-radius:8px; background:#2a3350; font-size:13px; flex:none; }
+  #scrubber { flex:1 1 auto; accent-color:var(--accent); }
+  .readout { font-variant-numeric:tabular-nums; white-space:nowrap; min-width:200px; text-align:right; }
+  .readout .date { font-size:18px; font-weight:650; }
+  .readout .sub { color:var(--muted); font-size:12px; }
+  label.speed { color:var(--muted); font-size:12px; display:flex; align-items:center; gap:6px; }
+  #status { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    padding:40px; color:var(--muted); text-align:center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>poc-webgpu — Home Runs × Stolen Bases, game-by-game since 1871</h1>
+    <p>WebGPU twin of <b>poc-vulkan</b>: a compute shader accumulates the event stream into per-player counters on the GPU,
+       the vertex shader renders straight from them, and the Pareto frontier (red) is maintained incrementally in the WASM core.</p>
+  </header>
+  <div class="chart-region">
+    <canvas id="gpu"></canvas>
+    <div id="status">Initialising WebGPU + loading hr.evt.gz / sb.evt.gz…</div>
+  </div>
+  <div class="controls">
+    <button id="play" title="Play / pause">▶</button>
+    <button id="modeToggle" title="Toggle career / season-open-year">Career</button>
+    <input id="scrubber" type="range" min="0" max="0" value="0">
+    <label class="speed">speed
+      <input id="speed" type="range" min="1" max="60" value="24" style="width:90px; accent-color:var(--accent)">
+    </label>
+    <div class="readout"><div class="date" id="dateLabel">—</div><div class="sub" id="subLabel"></div></div>
+  </div>
+</div>
+<script type="module" src="main.js"></script>
+</body>
+</html>
