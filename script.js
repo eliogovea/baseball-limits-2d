@@ -1453,6 +1453,14 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     const loadingIndicator = document.getElementById("loading-indicator");
     let pendingRender = null;
 
+    // The bridge between the DOM and drawScatterPlot. It is the SINGLE place that reads
+    // the current control values (axes, year range, mode, filters), resolves the active
+    // dataset/data, decides which animation path is live (static | .bl2p game-by-game |
+    // .evt full-history | group-career), assembles the per-mode `filters` bag, and calls
+    // drawScatterPlot. Every interaction handler ends in refreshChart() rather than poking
+    // the chart directly — so there's exactly one render path to reason about. Reads from
+    // the DOM (not a JS state object) so the controls are the source of truth and
+    // applyUrlState can drive everything just by setting them.
     function refreshChart() {
         // Drop any draw still queued from a prior call: the guards below early-return
         // to hold the current frame, and a stale rAF would otherwise run against
@@ -2296,6 +2304,12 @@ function setEraCompareEnabled(on) {
     if (eb) eb.disabled = !on;
 }
 
+// Inverse of writeUrlState: read the hash once at startup and drive the controls to match
+// BEFORE the first render, so a deep link lands on the right view with no visible reflow.
+// It sets the DOM controls (selects/segmented buttons) rather than internal state, then
+// lets the normal change handlers + refreshChart flow from there — one code path, no
+// divergence between "user clicked" and "loaded from URL". Order matters (see below): the
+// dataset toggle must flip first so the dataset-specific axis options exist to select.
 function applyUrlState() {
     const u = parseUrlHash();
     const setSelect = (id, val) => {
@@ -2400,6 +2414,13 @@ function renderPresetShelf() {
 }
 
 let urlWriteTimer = null;
+// Serialize the full view into the URL hash so any view is a shareable/bookmarkable
+// deep link, and a reload restores exactly where you were. Debounced 120ms because it's
+// called on every refresh (incl. animation frames) — we don't want to thrash
+// history.replaceState. Two deliberate choices: (1) params at their DEFAULT value are
+// OMITTED (see URL_DEFAULTS) so a fresh view has a clean empty hash and links stay short;
+// (2) replaceState (not pushState) so dragging a slider doesn't bury the back button under
+// hundreds of history entries. applyUrlState() is the inverse, run once at startup.
 function writeUrlState(state) {
     clearTimeout(urlWriteTimer);
     urlWriteTimer = setTimeout(() => {
