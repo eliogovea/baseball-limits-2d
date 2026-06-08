@@ -274,6 +274,7 @@ let tooltipPinned = false;
 let viewDomain = null;          // {x: [a,b], y: [c,d]} | null
 let zoomMode = "off";
 let showWorstFrontier = false;  // toggle: false = best (default), true = worst
+const VERIFY_FRONTIER = new URLSearchParams(location.search).has("verifyFrontier"); // ?verifyFrontier=1 → assert incremental == full sweep each frame
 let hvEncodingEnabled = true;  // scale frontier dot radius by hypervolume contribution (always on)
 let isolationPinned = null;     // data-point reference for the pinned isolation ring, or null
 let animTimer = null;           // setInterval handle while frontier animation is running
@@ -283,6 +284,7 @@ let pbpCursorIdx = 0;           // global index into the concatenated multi-year
 let pbpExtentCache = null;      // { key, x, y } — axis-extent lock held across the smooth sweep
 let pbpCompletedCache = null;   // { key, points } — completed-season points (yearID < openYear) cached per open year so play doesn't re-filter all of data.points every frame
 let pbpFrontierPrepCache = null; // { key, filtered } — completed-season frontier rows, sorted for merge with the open season
+let evtIncFrontier = null;      // { stream, xSign, ySign, engine, comp, applied, lastCursor } — incremental .evt-career Pareto frontier state, replayed across frames (reset on backward seek / model rebuild)
 let pbpRaf = null;              // requestAnimationFrame handle while the cursor is playing
 let pendingCursorYmd = null;    // a t=YYYYMMDD from a deep-link, applied once data is loaded
 let chartCanvasLayers = null;   // { bg, fg } — high-cardinality point layers under the SVG overlay
@@ -1067,6 +1069,78 @@ function evtPointsAsOf(model, d) {                      // season-shaped rows fo
     }
     return rows;
 }
+// Flat, date-sorted event stream derived from the resident .evt model — the
+// `g_ev[]` the incremental frontier replays (poc-webgpu/core.c). One entry per
+// (player, dep, date) carrying that date's delta (cum[k]-cum[k-1]). Struct-of-
+// arrays of typed arrays, counting-sorted by date (date ∈ [0,numDates), so O(n)).
+// Memoized on the model so only the first incremental use pays for it.
+function buildEvtEventStream(model) {
+    if (model.evStream) return model.evStream;
+    const players = model.players, depList = model.depList;
+    let n = 0;
+    for (const p of players) for (const d of depList) n += (p.comp[d]?.dates.length || 0);
+    const date = new Uint16Array(n), player = new Uint32Array(n), dep = new Uint8Array(n), delta = new Int32Array(n);
+    let w = 0;
+    for (let pi = 0; pi < players.length; pi++) {
+        const comp = players[pi].comp;
+        for (let di = 0; di < depList.length; di++) {
+            const s = comp[depList[di]]; if (!s) continue;
+            const dts = s.dates, cum = s.cum; let prev = 0;
+            for (let k = 0; k < dts.length; k++) { date[w] = dts[k]; player[w] = pi; dep[w] = di; delta[w] = cum[k] - prev; prev = cum[k]; w++; }
+        }
+    }
+    // Counting sort by date (stable: preserves per-date player/dep order — irrelevant
+    // to the final frontier, which is read only after a whole date window is applied).
+    const D = model.numDates;
+    const cnt = new Uint32Array(D + 1);
+    for (let i = 0; i < n; i++) cnt[date[i] + 1]++;
+    for (let i = 0; i < D; i++) cnt[i + 1] += cnt[i];
+    const sd = new Uint16Array(n), sp = new Uint32Array(n), sdep = new Uint8Array(n), sdl = new Int32Array(n);
+    for (let i = 0; i < n; i++) { const pos = cnt[date[i]]++; sd[pos] = date[i]; sp[pos] = player[i]; sdep[pos] = dep[i]; sdl[pos] = delta[i]; }
+    model.evStream = { date: sd, player: sp, dep: sdep, delta: sdl, n };
+    return model.evStream;
+}
+
+// Incremental Pareto frontier — JS port of poc-webgpu/core.c `frontier_apply_event`
+// (commit a1e0ad0). Works in CANONICAL coords X=x*xSign, Y=y*ySign so it is always
+// "higher is better" (matching the +x/+y POC); the frontier stays sorted X-ascending /
+// Y-descending. Events must be monotone non-decreasing in canonical space — true for
+// the counting (.evt) axes this path is gated to. Each event moves exactly one player,
+// which can evict a contiguous dominated run and re-insert; nothing else is promoted.
+function createIncrementalFrontier(playerCount, xSign, ySign) {
+    const frX = [], frY = [], frP = [];           // canonical X, Y, player index — sorted X-asc / Y-desc
+    const onFront = new Uint8Array(playerCount);
+    function reset() { frX.length = 0; frY.length = 0; frP.length = 0; onFront.fill(0); }
+    function applyEvent(p, x, y) {
+        const X = x * xSign, Y = y * ySign;
+        if (onFront[p]) {                          // p is moving up-right: drop its old slot first
+            const i = frP.indexOf(p);
+            if (i >= 0) { frX.splice(i, 1); frY.splice(i, 1); frP.splice(i, 1); }
+            onFront[p] = 0;
+        }
+        let k = 0; while (k < frP.length && frX[k] < X) k++;
+        if (k < frP.length && frY[k] >= Y) return;            // dominated → not on the frontier
+        let j = 0; while (j < frP.length && !(frX[j] <= X && frY[j] <= Y)) j++;
+        let e = j; while (e < frP.length && frX[e] <= X && frY[e] <= Y) e++;
+        if (e > j) {                               // evict the contiguous run p now dominates
+            for (let t = j; t < e; t++) onFront[frP[t]] = 0;
+            frX.splice(j, e - j); frY.splice(j, e - j); frP.splice(j, e - j);
+        }
+        let ins = (e > j) ? j : 0;
+        if (e === j) while (ins < frP.length && frX[ins] < X) ins++;
+        frX.splice(ins, 0, X); frY.splice(ins, 0, Y); frP.splice(ins, 0, p);
+        onFront[p] = 1;
+    }
+    // Frontier as data-space [x,y] pairs in canonical-X-ascending order (staircase-ready;
+    // x = X*xSign since xSign is ±1). Maps back to point objects by coordinate in the driver.
+    function frontierXY() {
+        const out = new Array(frP.length);
+        for (let i = 0; i < frP.length; i++) out[i] = [frX[i] * xSign, frY[i] * ySign];
+        return out;
+    }
+    return { reset, applyEvent, frontierXY, onFront, get size() { return frP.length; } };
+}
+
 const evtClampedDate = (model) => Math.max(0, Math.min(model.numDates - 1, pbpCursorIdx));
 
 function pbpFindLastCoveredYearIdx(tl) {
@@ -1672,6 +1746,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         pbpExtentCache = null;
         pbpCompletedCache = null;
         pbpFrontierPrepCache = null;
+        evtIncFrontier = null;
         pbpCursorIdx = (startIdx != null)
             ? Math.max(0, Math.min(tl.totalEstimate - 1, startIdx))
             : pbpGlobalFor(tl, idx, entry.decoded.dateCount - 1);
@@ -1686,6 +1761,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         pbpExtentCache = null;
         pbpCompletedCache = null;
         pbpFrontierPrepCache = null;
+        evtIncFrontier = null;
         groupCareerMode = false;
         groupTrailHistory.clear();
         window.__bl2d_groupCareerActive = false;
@@ -1723,6 +1799,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         pbpExtentCache = null;
         pbpCompletedCache = null;
         pbpFrontierPrepCache = null;
+        evtIncFrontier = null;
     }
     // Rebuild the timeline span after the group membership changes mid-animation.
     window.__bl2d_rebuildGroupCareer = null;
@@ -3493,6 +3570,64 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         return frontierFromSortedRows(mergeSortedFrontierRows(completedRows, openRows));
     }
 
+    // .evt CAREER frontier maintained incrementally instead of swept full each frame
+    // (docs/webgpu-main-app-integration-design.md §C; JS port of poc-webgpu/core.c
+    // step_career). The cursor advances a small event window per frame, so only the
+    // touched players move the frontier — O(window + frontier) vs the O(N log N) sweep.
+    // Returns null (→ fall through to the full sweep) unless the gate holds:
+    //   • evt career mode, model matches the active axes,
+    //   • both axes are counting (non-rate, monotone) stats,
+    //   • no attribute/threshold filter active (Slice 1 — see the design doc's phasing).
+    // The full point cloud (filtered/unique) is still built exactly as buildFrontier's
+    // else-branch does; only the frontier *subset* comes from the incremental engine,
+    // selected back out of `unique` by coordinate so downstream identity holds.
+    function buildEvtIncrementalFrontier() {
+        if (!filters.evt) return null;
+        const model = pbpEvt;
+        if (!model || model.xDim !== xDim || model.yDim !== yDim) return null;
+        if (model.xs.rate || model.ys.rate) return null;
+        if (bats !== "all" || country !== "all" || minPa > 0) return null;
+
+        // Cloud: same map → sort → dedup as buildFrontier (mode is "season" for evt career).
+        const flt = [];
+        for (const p of points) { if (!seasonMatches(p)) continue; const row = toFrontierRow(p); if (row) flt.push(row); }
+        flt.sort(sortFrontierRows);
+        const uniq = [];
+        for (let i = 0; i < flt.length; i++) { const p = flt[i]; if (i === 0 || p.x !== flt[i - 1].x || p.y !== flt[i - 1].y) uniq.push(p); }
+        const pointByXY = new Map();
+        for (const u of uniq) pointByXY.set(u.x + "|" + u.y, u);
+
+        // Replay the date-sorted event stream up to the cursor, advancing the resident
+        // engine (reset + replay-forward on backward seek / new model / sign flip).
+        const stream = buildEvtEventStream(model);
+        const cur = Math.max(model.winStart, Math.min(model.winEnd, pbpCursorIdx)); // matches refreshChart's evt-career clamp
+        let st = evtIncFrontier;
+        if (!st || st.stream !== stream || st.xSign !== xSign || st.ySign !== ySign) {
+            st = evtIncFrontier = { stream, xSign, ySign,
+                engine: createIncrementalFrontier(model.players.length, xSign, ySign),
+                comp: model.depList.map(() => new Float64Array(model.players.length)),
+                applied: 0, lastCursor: -1 };
+        }
+        if (cur < st.lastCursor) { st.engine.reset(); for (const c of st.comp) c.fill(0); st.applied = 0; }
+        const { date, player, dep, delta, n } = stream;
+        const depList = model.depList, comp = st.comp, cobj = {};
+        let a = st.applied;
+        while (a < n && date[a] <= cur) {
+            const p = player[a];
+            comp[dep[a]][p] += delta[a];
+            for (let di = 0; di < depList.length; di++) cobj[depList[di]] = comp[di][p];
+            st.engine.applyEvent(p, model.xs.fn(cobj), model.ys.fn(cobj));
+            a++;
+        }
+        st.applied = a; st.lastCursor = cur;
+
+        // Select the frontier objects back out of `unique` by coordinate (every engine
+        // frontier point's (x,y) is a deduped cloud point), preserving canonical-X order.
+        const frontier = [];
+        for (const [x, y] of st.engine.frontierXY()) { const pt = pointByXY.get(x + "|" + y); if (pt) frontier.push(pt); }
+        return { filtered: flt, unique: uniq, frontier };
+    }
+
     // Left-to-right best-in-class envelope over an already-sorted, deduped array.
     // Signed values handle "lower is better" axes. Shared by buildFrontier and
     // the onion-peeling layers so layer 0 == the single frontier.
@@ -3523,10 +3658,26 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         return layers;
     }
 
-    const { filtered, unique, frontier } = buildSmoothActiveFrontier() || buildFrontier(seasonMatches);
+    const { filtered, unique, frontier } =
+        buildSmoothActiveFrontier() || buildEvtIncrementalFrontier() || buildFrontier(seasonMatches);
     const frontierSet = new Set(frontier);
     // Headless-verification hook: the current frontier's player keys + (x,y).
     window.__bl2d_frontierPids = frontier.map(d => d.playerID);
+    window.__bl2d_frontierXY = frontier.map(d => [d.x, d.y]);
+    // Dev assert (?verifyFrontier=1): the incremental frontier must equal a full sweep
+    // of the same cloud, compared as an (x,y) coordinate multiset (tie-breaks may pick a
+    // different equal-(x,y) object) — mirrors core.c verify_career/verify_season. A no-op
+    // on the non-incremental path (frontier already == sweep there).
+    if (VERIFY_FRONTIER) {
+        const ref = sweepFrontier(unique);
+        const tally = (arr) => { const m = new Map(); for (const d of arr) { const k = d.x + "|" + d.y; m.set(k, (m.get(k) || 0) + 1); } return m; };
+        const refM = tally(ref), gotM = tally(frontier);
+        let mis = 0;
+        for (const [k, v] of refM) mis += Math.abs(v - (gotM.get(k) || 0));
+        for (const [k, v] of gotM) if (!refM.has(k)) mis += v;
+        window.__bl2d_verifyFrontier = { mis, size: frontier.length, refSize: ref.length, cursor: pbpCursorIdx };
+        if (mis > 0) console.warn(`[verifyFrontier] incremental≠sweep: ${mis} coord mismatch(es) at cursor ${pbpCursorIdx} (incremental ${frontier.length} vs sweep ${ref.length})`);
+    }
 
     // Onion-peeling layers (layer 0 == frontier). depth=1 is the default and is
     // a no-op visually. Exposed for the headless invariant checks.
