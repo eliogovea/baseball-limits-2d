@@ -287,8 +287,8 @@ let pbpFrontierPrepCache = null; // { key, filtered } — completed-season front
 let evtIncFrontier = null;      // { stream, xSign, ySign, engine, comp, applied, lastCursor } — incremental .evt-career Pareto frontier state, replayed across frames (reset on backward seek / model rebuild)
 let pbpRaf = null;              // requestAnimationFrame handle while the cursor is playing
 let pendingCursorYmd = null;    // a t=YYYYMMDD from a deep-link, applied once data is loaded
-let chartCanvasLayers = null;   // { bg, fg } — high-cardinality point layers under the SVG overlay
-let chartCanvasBgCacheKey = null;
+// The point-cloud renderer (Canvas2DRenderer) owns the bg/fg canvas layers + the
+// background cache key — see the class near the export/render helpers below.
 let groupCareerMode = false;    // group-career animation: the selected players' cumulative careers race through stat-space (vs. the all-player accumulating cloud)
 let groupTrailHistory = new Map(); // playerID → [{x,y,cursor}] recent career positions (DATA coords) for the fading trail
 const GROUP_TRAIL_LEN = 40;     // max retained positions per player in a group-career trail (~ the last few seconds at 15fps)
@@ -2632,7 +2632,7 @@ function buildExportSvgString() {
     // behind the SVG overlay so SVG download and share-preview rasterisation keep
     // the complete chart instead of labels/axes only.
     const firstChild = clone.firstChild;
-    for (const canvas of [chartCanvasLayers?.bg, chartCanvasLayers?.fg]) {
+    for (const canvas of [pointRenderer.bgCanvas, pointRenderer.fgCanvas]) {
         if (!canvas) continue;
         const img = document.createElementNS("http://www.w3.org/2000/svg", "image");
         img.setAttribute("x", "0");
@@ -2648,108 +2648,166 @@ function buildExportSvgString() {
     return svgStr.replace(/(<svg[^>]*>)/, `$1<style>svg{background:${bg};}</style>`);
 }
 
-function ensureChartCanvasLayers(width, height) {
-    const region = document.querySelector(".chart-region");
-    const svg = document.getElementById("scatter-plot");
-    if (!region || !svg) return null;
-    if (!chartCanvasLayers) {
-        const bg = document.createElement("canvas");
-        const fg = document.createElement("canvas");
-        bg.className = "plot-canvas plot-canvas--background";
-        fg.className = "plot-canvas plot-canvas--foreground";
-        bg.setAttribute("aria-hidden", "true");
-        fg.setAttribute("aria-hidden", "true");
-        region.insertBefore(bg, svg);
-        region.insertBefore(fg, svg);
-        chartCanvasLayers = { bg, fg };
-    }
-    const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 3));
-    for (const canvas of [chartCanvasLayers.bg, chartCanvasLayers.fg]) {
-        const bw = Math.max(1, Math.round(width * dpr));
-        const bh = Math.max(1, Math.round(height * dpr));
-        if (canvas.width !== bw || canvas.height !== bh) {
-            canvas.width = bw;
-            canvas.height = bh;
-        }
-        canvas.style.width = `${width}px`;
-        canvas.style.height = `${height}px`;
-    }
-    chartCanvasLayers.dpr = dpr;
-    chartCanvasLayers.width = width;
-    chartCanvasLayers.height = height;
-    return chartCanvasLayers;
-}
+// PointRenderer seam (docs/webgpu-main-app-integration-design.md §A): the high-
+// cardinality point cloud is drawn through this object so a future WebGPU backend
+// can slot in behind the same method surface. Canvas2DRenderer is the only
+// implementation (the default + the offline bundle's only renderer). It owns the two
+// <canvas> layers under the SVG overlay (bg = key-cached completed-season cloud, fg =
+// per-frame open cloud + group-career trails + frontier dots), their DPR/sizes, and
+// the background-layer cache key. Method surface (the "interface" a WebGPURenderer
+// must match): resize(w,h)→layers|null; clear(); drawBackground(points,opts);
+// drawForeground(points,opts); drawTrails(trails,opts); drawFrontierDots(points,opts);
+// get dpr/bgCanvas/fgCanvas; get/set bgCacheKey; destroy().
+class Canvas2DRenderer {
+    constructor() { this.layers = null; this.bgCacheKey = null; }
+    get dpr() { return this.layers?.dpr || 1; }
+    get bgCanvas() { return this.layers?.bg || null; }
+    get fgCanvas() { return this.layers?.fg || null; }
 
-function clearChartCanvasLayers() {
-    if (!chartCanvasLayers) return;
-    chartCanvasBgCacheKey = null;
-    for (const canvas of [chartCanvasLayers.bg, chartCanvasLayers.fg]) {
+    // Lazily create the bg+fg canvases under the SVG overlay; size both to
+    // width*dpr × height*dpr (dpr clamped to [1,3]). Returns the layer handle, or
+    // null if the chart region / SVG isn't in the DOM yet.
+    resize(width, height) {
+        const region = document.querySelector(".chart-region");
+        const svg = document.getElementById("scatter-plot");
+        if (!region || !svg) return null;
+        if (!this.layers) {
+            const bg = document.createElement("canvas");
+            const fg = document.createElement("canvas");
+            bg.className = "plot-canvas plot-canvas--background";
+            fg.className = "plot-canvas plot-canvas--foreground";
+            bg.setAttribute("aria-hidden", "true");
+            fg.setAttribute("aria-hidden", "true");
+            region.insertBefore(bg, svg);
+            region.insertBefore(fg, svg);
+            this.layers = { bg, fg };
+        }
+        const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 3));
+        for (const canvas of [this.layers.bg, this.layers.fg]) {
+            const bw = Math.max(1, Math.round(width * dpr));
+            const bh = Math.max(1, Math.round(height * dpr));
+            if (canvas.width !== bw || canvas.height !== bh) {
+                canvas.width = bw;
+                canvas.height = bh;
+            }
+            canvas.style.width = `${width}px`;
+            canvas.style.height = `${height}px`;
+        }
+        this.layers.dpr = dpr;
+        this.layers.width = width;
+        this.layers.height = height;
+        return this.layers;
+    }
+
+    clear() {
+        if (!this.layers) return;
+        this.bgCacheKey = null;
+        for (const canvas of [this.layers.bg, this.layers.fg]) {
+            const ctx = canvas.getContext("2d");
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+    }
+
+    drawBackground(points, opts) { this._drawPoints(this.bgCanvas, points, opts); }
+    drawForeground(points, opts) { this._drawPoints(this.fgCanvas, points, opts); }
+
+    _drawPoints(canvas, points, opts) {
+        if (!canvas) return;
         const ctx = canvas.getContext("2d");
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-    }
-}
-
-function drawCanvasPointLayer(canvas, points, opts) {
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    const dpr = chartCanvasLayers?.dpr || 1;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const { margin, xScale, yScale, radius, fillFor, alpha = 1, alphaFor = null, strokeFor = null, strokeWidth = 0, clear = true } = opts;
-    // clear=false lets a caller composite dots ON TOP of an under-layer it already
-    // drew on this same canvas (group-career: trails first, then head-dots).
-    if (clear) ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
-    if (!points || !points.length) return;
-    for (const d of points) {
-        const cx = margin.left + xScale(d.x);
-        const cy = margin.top + yScale(d.y);
-        if (!isFinite(cx) || !isFinite(cy)) continue;
-        ctx.globalAlpha = alphaFor ? alphaFor(d) : alpha;
-        ctx.beginPath();
-        ctx.arc(cx, cy, typeof radius === "function" ? radius(d) : radius, 0, Math.PI * 2);
-        ctx.fillStyle = fillFor(d);
-        ctx.fill();
-        const stroke = strokeFor && strokeFor(d);
-        if (stroke && strokeWidth > 0) {
-            ctx.globalAlpha = 1;
-            ctx.lineWidth = strokeWidth;
-            ctx.strokeStyle = stroke;
-            ctx.stroke();
-        }
-    }
-    ctx.globalAlpha = 1;
-}
-
-// Group-career trails: for each player, stroke their recent career positions as a
-// poly-line whose alpha ramps 0→1 from oldest to newest, so the head pulls a short
-// fading comet-tail. Positions are stored as DATA coords (so zoom/pan re-projects);
-// caller clears the canvas first, then draws trails, then composites the head-dots.
-function drawCanvasTrails(canvas, trails, opts) {
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    const dpr = chartCanvasLayers?.dpr || 1;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const { margin, xScale, yScale, width = 2 } = opts;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.lineWidth = width;
-    for (const { color, points } of trails) {
-        if (!points || points.length < 2) continue;
-        const n = points.length;
-        for (let i = 1; i < n; i++) {
-            const a = points[i - 1], b = points[i];
-            const ax = margin.left + xScale(a.x), ay = margin.top + yScale(a.y);
-            const bx = margin.left + xScale(b.x), by = margin.top + yScale(b.y);
-            if (![ax, ay, bx, by].every(isFinite)) continue;
-            ctx.globalAlpha = (i / (n - 1)) * 0.85;   // oldest faint → newest near-opaque
-            ctx.strokeStyle = color;
+        const dpr = this.dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const { margin, xScale, yScale, radius, fillFor, alpha = 1, alphaFor = null, strokeFor = null, strokeWidth = 0, clear = true } = opts;
+        // clear=false lets a caller composite dots ON TOP of an under-layer it already
+        // drew on this same canvas (group-career: trails first, then head-dots).
+        if (clear) ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
+        if (!points || !points.length) return;
+        for (const d of points) {
+            const cx = margin.left + xScale(d.x);
+            const cy = margin.top + yScale(d.y);
+            if (!isFinite(cx) || !isFinite(cy)) continue;
+            ctx.globalAlpha = alphaFor ? alphaFor(d) : alpha;
             ctx.beginPath();
-            ctx.moveTo(ax, ay);
-            ctx.lineTo(bx, by);
+            ctx.arc(cx, cy, typeof radius === "function" ? radius(d) : radius, 0, Math.PI * 2);
+            ctx.fillStyle = fillFor(d);
+            ctx.fill();
+            const stroke = strokeFor && strokeFor(d);
+            if (stroke && strokeWidth > 0) {
+                ctx.globalAlpha = 1;
+                ctx.lineWidth = strokeWidth;
+                ctx.strokeStyle = stroke;
+                ctx.stroke();
+            }
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    // Group-career trails: clears the fg, then for each player strokes their recent
+    // career positions as a poly-line whose alpha ramps 0→1 from oldest to newest, so
+    // the head pulls a short fading comet-tail. Positions are DATA coords (so zoom/pan
+    // re-projects). The caller follows this with drawForeground(clear:false) so the
+    // head-dots composite over the tails on the same canvas.
+    drawTrails(trails, opts) {
+        const canvas = this.fgCanvas;
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        const dpr = this.dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
+        const { margin, xScale, yScale, width = 2 } = opts;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.lineWidth = width;
+        for (const { color, points } of trails) {
+            if (!points || points.length < 2) continue;
+            const n = points.length;
+            for (let i = 1; i < n; i++) {
+                const a = points[i - 1], b = points[i];
+                const ax = margin.left + xScale(a.x), ay = margin.top + yScale(a.y);
+                const bx = margin.left + xScale(b.x), by = margin.top + yScale(b.y);
+                if (![ax, ay, bx, by].every(isFinite)) continue;
+                ctx.globalAlpha = (i / (n - 1)) * 0.85;   // oldest faint → newest near-opaque
+                ctx.strokeStyle = color;
+                ctx.beginPath();
+                ctx.moveTo(ax, ay);
+                ctx.lineTo(bx, by);
+                ctx.stroke();
+            }
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    // Frontier (special) dots, composited over the fg cloud with NO clear (they sit on
+    // top of drawForeground's output). fillFor resolves the career/worst/encoding colour
+    // in the caller's scope; radiusFor sizes by the active size-by stat.
+    drawFrontierDots(points, opts) {
+        const canvas = this.fgCanvas;
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        const dpr = this.dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const { margin, xScale, yScale, radiusFor, fillFor, strokeColor = "#ffffff", strokeWidth = 1.5 } = opts;
+        for (const d of points) {
+            const cx = margin.left + xScale(d.x);
+            const cy = margin.top + yScale(d.y);
+            if (!isFinite(cx) || !isFinite(cy)) continue;
+            ctx.beginPath();
+            ctx.arc(cx, cy, radiusFor(d), 0, Math.PI * 2);
+            ctx.fillStyle = fillFor(d);
+            ctx.fill();
+            ctx.lineWidth = strokeWidth;
+            ctx.strokeStyle = strokeColor;
             ctx.stroke();
         }
     }
-    ctx.globalAlpha = 1;
+
+    destroy() {
+        if (!this.layers) return;
+        for (const canvas of [this.layers.bg, this.layers.fg]) canvas.remove();
+        this.layers = null;
+        this.bgCacheKey = null;
+    }
 }
+let pointRenderer = new Canvas2DRenderer();
 
 function recordPbpFrameTiming(totalMs, modelMs, renderMs, enabled) {
     if (!enabled) return;
@@ -3757,10 +3815,10 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const rect = svgEl.getBoundingClientRect();
     const width = rect.width;
     const height = rect.height;
-    const canvasLayers = ensureChartCanvasLayers(width, height);
+    pointRenderer.resize(width, height);
 
     if (unique.length === 0) {
-        clearChartCanvasLayers();
+        pointRenderer.clear();
         svg.append("text")
             .attr("x", "50%").attr("y", "50%")
             .attr("text-anchor", "middle").attr("dominant-baseline", "middle")
@@ -4141,17 +4199,17 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         sYear, eYear, mode, datasetKey, minPa, league, bats, country, franchise,
         xDim, yDim, colorBy, cloudOpacity, pointRadius,
         xScale.domain().join(","), yScale.domain().join(","),
-        width, height, chartCanvasLayers?.dpr || 1,
+        width, height, pointRenderer.dpr,
         backgroundPoints.length,
     ].join("|");
-    if (chartCanvasBgCacheKey !== bgKey) {
-        drawCanvasPointLayer(canvasLayers?.bg, backgroundPoints, {
+    if (pointRenderer.bgCacheKey !== bgKey) {
+        pointRenderer.drawBackground(backgroundPoints, {
             margin, xScale, yScale,
             radius: pointRadius,
             fillFor: d => colorOf(d, colorBy, getMeta),
             alpha: cloudOpacity,
         });
-        chartCanvasBgCacheKey = bgKey;
+        pointRenderer.bgCacheKey = bgKey;
     }
 
     // Career-highlight layer: dots only (no connecting line — the
@@ -4205,20 +4263,17 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     }
 
     const frontierColor = showWorstFrontier ? "#8b5cf6" : null;  // purple for worst, red (CSS) for best
-    // Group-career: paint the fading trails on the fg canvas FIRST (clearing it), then
-    // composite the head-dots on top (clear:false) so heads always sit over their tails.
-    if (filters.groupCareer && canvasLayers?.fg) {
-        const fgctx = canvasLayers.fg.getContext("2d");
-        const dpr = chartCanvasLayers?.dpr || 1;
-        fgctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        fgctx.clearRect(0, 0, canvasLayers.fg.width / dpr, canvasLayers.fg.height / dpr);
+    // Group-career: paint the fading trails on the fg canvas FIRST (drawTrails clears
+    // it), then composite the head-dots on top (clear:false) so heads always sit over
+    // their tails.
+    if (filters.groupCareer && pointRenderer.fgCanvas) {
         const trails = [...careerHighlights].map(([pid, color]) => ({ color, points: groupTrailHistory.get(pid) || [] }));
-        drawCanvasTrails(canvasLayers.fg, trails, { margin, xScale, yScale, width: 2.5 });
+        pointRenderer.drawTrails(trails, { margin, xScale, yScale, width: 2.5 });
     }
     const foregroundDrawPoints = foregroundCloudPoints.map(d => ({ ...d, _regularCloud: true }))
         .concat(highlightDrawPoints);
     const headRadius = filters.groupCareer ? 7 : Math.max(pointRadius + 3, 6);
-    drawCanvasPointLayer(canvasLayers?.fg, foregroundDrawPoints, {
+    pointRenderer.drawForeground(foregroundDrawPoints, {
         margin, xScale, yScale,
         radius: d => d._regularCloud ? pointRadius : headRadius,
         fillFor: d => d._regularCloud ? colorOf(d, colorBy, getMeta) : d._highlightColor,
@@ -4228,26 +4283,16 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         strokeWidth: 1.5,
         clear: !filters.groupCareer,               // keep the trails drawn just above
     });
-    if (!filters.groupCareer && canvasLayers?.fg) {
-        const ctx = canvasLayers.fg.getContext("2d");
-        const dpr = chartCanvasLayers?.dpr || 1;
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        for (const d of special) {
-            const cx = margin.left + xScale(d.x);
-            const cy = margin.top + yScale(d.y);
-            if (!isFinite(cx) || !isFinite(cy)) continue;
-            ctx.beginPath();
-            ctx.arc(cx, cy, radiusFor(d), 0, Math.PI * 2);
-            const careerColor = careerHighlights.get(d.playerID);
-            ctx.fillStyle = careerColor || frontierColor || colorOf(d, colorBy, getMeta);
-            ctx.fill();
-            // Follow the active Color-by encoding (era / league / bats), same as
-            // the cloud — frontier dots stay distinct via size + the white ring,
-            // not a fixed color, so the encoding isn't misrepresented.
-            ctx.lineWidth = 1.5;
-            ctx.strokeStyle = "#ffffff";
-            ctx.stroke();
-        }
+    if (!filters.groupCareer && pointRenderer.fgCanvas) {
+        // Frontier dots composite over the fg cloud (no clear). They follow the active
+        // Color-by encoding (era / league / bats), same as the cloud — staying distinct
+        // via size + the white ring, not a fixed colour, so the encoding isn't
+        // misrepresented; career/worst colours win when set.
+        pointRenderer.drawFrontierDots(special, {
+            margin, xScale, yScale, radiusFor,
+            fillFor: d => careerHighlights.get(d.playerID) || frontierColor || colorOf(d, colorBy, getMeta),
+            strokeColor: "#ffffff", strokeWidth: 1.5,
+        });
     }
 
     // FLIP: animate dots from their previous screen positions to the new ones.
