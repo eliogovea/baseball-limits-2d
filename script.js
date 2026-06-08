@@ -4431,6 +4431,22 @@ function setupYearPresets() {
 }
 
 
+// The single render entry point — called by refreshChart on every state change and on
+// every animation frame. It is one big function (not split) on purpose: it runs per
+// frame, so it avoids re-deriving shared locals across helper-call boundaries, and the
+// FLIP morph needs the before/after DOM state in one scope. Rough phases, in order:
+//   1. FLIP snapshot     — record current dot screen positions to tween FROM.
+//   2. filter + extent   — apply year/league/bats/country/threshold; lock or fit axes.
+//   3. frontier          — buildSmoothActiveFrontier | buildEvtIncrementalFrontier |
+//                          buildFrontier (the static O(n) sweep); plus onion-peel layers.
+//   4. hypervolume       — per-point contributions (skipped on "lite" playback frames).
+//   5. render cloud      — through pointRenderer (Canvas2D paints / WebGPU submits).
+//   6. render chrome     — axes, the dashed staircase, frontier dots, labels, isolation
+//                          rings, legend, leaderboard cards (the interaction-only bits are
+//                          skipped on lite frames and done on the settle/full frame).
+//   7. FLIP play         — tween dots from the snapshot positions to the new layout.
+// `filters` is the per-mode bag refreshChart assembles; `mode` is "season"/"career"
+// (note: evt-career passes "season" with filters.evt — see refreshChart).
 function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode = "season", filters = {}) {
     const frameStart = performance.now();
     // Any open axis-stat menu is anchored to the (about to be replaced) titles.
@@ -6105,6 +6121,15 @@ function enableSpotlightDrag(card, handle, pid) {
 // For each frontier point, re-sweeps `unique` excluding that point to find
 // the actual replacement frontier (cloud points may fill in), then takes
 // ΔHV = totalHv − altHv. O(F × N), F = frontier length, N = unique points.
+// Hypervolume (HV) and per-point HV CONTRIBUTION — the numbers that size the frontier
+// dots and rank the leaderboard. HV is the area of the region dominated by the frontier,
+// measured from a reference point R just below-left of the whole cloud: a frontier that
+// pushes further out (more HR AND more SB) dominates more area, so HV is a single scalar
+// for "how good is this frontier overall". A point's CONTRIBUTION is how much HV would be
+// LOST if it were removed (HV(frontier) − HV(frontier without it)) — i.e. the area only
+// IT dominates. That's the principled way to say which frontier members are most
+// singular (a lopsided record-holder contributes a lot; a point hugging its neighbours
+// contributes little). All math is in canonical (sign-folded) space so "more is better".
 function computeHvContributions(frontier, xSign, ySign, unique) {
     if (!frontier || frontier.length === 0) {
         return { refPoint: { x: 0, y: 0 }, totalHv: 0, items: [] };
@@ -6118,18 +6143,24 @@ function computeHvContributions(frontier, xSign, ySign, unique) {
         if (sx > xMaxS) xMaxS = sx;
         if (sy > yMaxS) yMaxS = sy;
     }
+    // Reference point R: nudged just BELOW-LEFT of the universe's min corner (by a tiny
+    // epsilon) so even the lowest frontier point encloses a sliver of positive area —
+    // otherwise a point sitting exactly on the min edge would contribute 0 and vanish.
     const epsX = Math.max(1e-9, (xMaxS - xMinS) * 1e-6);
     const epsY = Math.max(1e-9, (yMaxS - yMinS) * 1e-6);
     const Rx = xMinS - epsX;
     const Ry = yMinS - epsY;
     const refPoint = { x: Rx * xSign, y: Ry * ySign };
 
-    // 2D hypervolume via vertical strip decomposition.
-    // fr must be sorted by x*xSign ascending, y*ySign non-increasing.
+    // 2D hypervolume via vertical-strip decomposition. With the frontier sorted by
+    // canonical X ascending (Y therefore descending), each point owns a strip from the
+    // previous point's X to its own, of height (its Y − R.y). Summing the strips gives the
+    // total dominated area in one O(frontier) pass — no overlap, no double-counting,
+    // because the staircase is monotone. (fr must be in canonical-X-ascending order.)
     function hvOf(fr) {
         let hv = 0, xPrev = Rx;
         for (const p of fr) {
-            hv += (p.x * xSign - xPrev) * (p.y * ySign - Ry);
+            hv += (p.x * xSign - xPrev) * (p.y * ySign - Ry);   // strip width × height
             xPrev = p.x * xSign;
         }
         return hv;
