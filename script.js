@@ -36,16 +36,28 @@ function relLuminance(hex) {
 })();
 
 // Color palettes per encoding mode. Keep deliberate — Red/Blue echo MLB.
+// Categorical color tables for the two NON-era encodings (handedness, league). Era is
+// NOT here — it's the ordinal ERAS ramp above, because time is ordinal and wants a
+// luminance-ordered ramp, whereas bats/league are unordered categories that want
+// distinct hues. Each entry is an OBJECT (not a bare string) so applyTheme can mutate
+// `.color` in place per theme without any call site (colorOf) needing to change — the
+// indirection is what lets a theme switch re-skin the D3 chart for free. `unknown` is a
+// real bucket, not an error path: Lahman is missing handedness/country for some old
+// players, so colorOf must always resolve to a swatch. League carries a `.dark` variant
+// for chrome that needs a darker shade on light themes (legend dots vs. cloud).
 const COLOR_PALETTES = {
     bats: {
+        // Switch hitters get their own hue; L/R deliberately reuse the league red/blue
+        // (applyTheme overwrites these with the active theme's league colors) so the two
+        // categorical encodings share a palette and the legend stays visually coherent.
         L: { color: "#c8102e", name: "Left" },
         R: { color: "#002d72", name: "Right" },
         S: { color: "#7a3f5f", name: "Switch" },
         unknown: { color: "#94a3b8", name: "Unknown" },
     },
     league: {
-        AL: { color: "#c8102e", dark: "#c8102e", name: "American" },
-        NL: { color: "#002d72", dark: "#002d72", name: "National" },
+        AL: { color: "#c8102e", dark: "#c8102e", name: "American" },   // MLB red
+        NL: { color: "#002d72", dark: "#002d72", name: "National" },   // MLB blue
         unknown: { color: "#94a3b8", dark: "#0f172a", name: "Other" },
     },
 };
@@ -99,42 +111,57 @@ const THEMES = {
 let themeCloudOpacity = THEMES.classic.cloudOpacity;
 
 function applyTheme(name) {
-    const t = THEMES[name] || THEMES.classic;
+    const t = THEMES[name] || THEMES.classic;   // unknown name → Classic (defensive: URL/localStorage could be stale)
     const root = document.documentElement;
+    // 1. CSS chrome: write every theme var onto <html>. styles.css is authored entirely
+    //    against these vars, so the whole UI re-skins with no per-element work here.
     Object.entries(t.vars).forEach(([k, v]) => root.style.setProperty(k, v));
-    root.setAttribute("data-theme", name);
-    // Re-skin the D3-painted chart by mutating the in-place color tables.
-    t.cloud.forEach((c, i) => { if (ERAS[i]) ERAS[i].color = c; });
+    root.setAttribute("data-theme", name);       // a few CSS rules also key off [data-theme]
+    // 2. D3 chart: the chart is painted in JS (canvas/SVG), so CSS vars don't reach it.
+    //    Instead we MUTATE the existing color-table objects in place — colorOf/renderLegend
+    //    hold references to these same objects, so they pick up the new colors on the next
+    //    redraw without being passed the theme. (Reassigning ERAS/COLOR_PALETTES instead
+    //    would orphan those held references — hence in-place mutation.)
+    t.cloud.forEach((c, i) => { if (ERAS[i]) ERAS[i].color = c; });   // era ramp, band-for-band
     COLOR_PALETTES.league.AL.color = COLOR_PALETTES.league.AL.dark = t.league.AL;
     COLOR_PALETTES.league.NL.color = COLOR_PALETTES.league.NL.dark = t.league.NL;
-    COLOR_PALETTES.bats.L.color = t.league.AL;
+    COLOR_PALETTES.bats.L.color = t.league.AL;   // keep handedness sharing the league hues
     COLOR_PALETTES.bats.R.color = t.league.NL;
     COLOR_PALETTES.bats.S.color = t.switchColor;
-    themeCloudOpacity = t.cloudOpacity;
-    try { localStorage.setItem("bl2d-theme", name); } catch (e) {}
+    themeCloudOpacity = t.cloudOpacity;          // darker themes need a higher floor to stay legible
+    try { localStorage.setItem("bl2d-theme", name); } catch (e) {}   // private-mode/quota → ignore, just don't persist
     // Reflect the choice in the header switcher.
     document.querySelectorAll("#theme-switch .theme-btn").forEach(b =>
         b.classList.toggle("active", b.dataset.theme === name));
 }
 
+// Theme to apply at startup: the user's last choice, else Classic. Wrapped in try/catch
+// because localStorage throws in some privacy modes — we degrade to the default, never crash.
 function initialTheme() {
     try { return localStorage.getItem("bl2d-theme") || "classic"; } catch (e) { return "classic"; }
 }
 
+// The single source of truth for a background-cloud dot's fill, given the active
+// "Color by" encoding. Frontier-red / career-gold are decided by the caller and win over
+// this — colorOf only paints the cloud. getMeta is injected (not imported) so this stays
+// a pure function of its inputs, easy to reuse from the canvas and SVG paths alike.
 function colorOf(p, colorBy, getMeta) {
     if (colorBy === "era") {
+        // `p.year ?? p.yearID`: the smooth/streaming rows carry `.year`, the static
+        // season/career rows carry `.yearID` — accept either. `|| {color}` is the
+        // out-of-range guard (a year before 1871 has no era band) → a neutral slate.
         return (eraFor(p.year ?? p.yearID) || { color: "#4a6fa5" }).color;
     }
     if (colorBy === "bats") {
-        const m = getMeta(p.playerID);
-        const k = m && m.bats;
+        const m = getMeta(p.playerID);             // handedness lives in People, not the stat rows
+        const k = m && m.bats;                     // may be undefined (missing meta) → falls to `unknown`
         return (COLOR_PALETTES.bats[k] || COLOR_PALETTES.bats.unknown).color;
     }
     if (colorBy === "league") {
-        const k = p.lgID;
+        const k = p.lgID;                          // lgID is on the row itself (AL/NL/…)
         return (COLOR_PALETTES.league[k] || COLOR_PALETTES.league.unknown).color;
     }
-    return "#4a6fa5";
+    return "#4a6fa5";                              // unknown encoding → neutral (should not happen)
 }
 
 // Keep the chart legend honest: show the key for whatever encoding is actually
@@ -231,7 +258,10 @@ const FRANCHISES = [
     { id: "tor", abbr: "TOR", color: "#134A8E", division: "AL East",    name: "Toronto Blue Jays",                            teams: ["TOR"] },
     { id: "was", abbr: "WSH", color: "#AB0003", division: "NL East",    name: "Washington Nationals",  note: "incl. Montreal Expos",          teams: ["MON","WAS"] },
 ];
-// Fast lookups
+// Fast lookups, flattened from FRANCHISES once at load. A stat row carries a historical
+// Lahman teamID (e.g. "BRO" for 1950s Brooklyn); FRANCHISE_BY_TEAM maps it to the modern
+// franchise id ("lad") so the franchise filter can match a Dodgers career across its
+// Brooklyn→LA move. BY_ID is the reverse, for rendering the dropdown/label from an id.
 const FRANCHISE_BY_TEAM = new Map(FRANCHISES.flatMap(f => f.teams.map(t => [t, f.id])));
 const FRANCHISE_BY_ID   = new Map(FRANCHISES.map(f => [f.id, f]));
 const DIVISIONS = [
@@ -251,11 +281,14 @@ const HIGHLIGHT_COLORS = ["#f59e0b","#14b8a6","#a855f7","#f97316","#84cc16","#ec
 let careerHighlights = new Map(); // playerID → color
 let spotlightPos = new Map();     // playerID → {left, top} once the user drags a card
 
+// Add a player to the highlight set, assigning the first FREE palette color (so two
+// highlighted players never collide, and removing+re-adding reuses a freed color rather
+// than cycling off the end). No-op if already highlighted or the 6-slot palette is full.
 function addHighlight(playerID) {
     if (!playerID || careerHighlights.has(playerID)) return;
     if (careerHighlights.size >= HIGHLIGHT_COLORS.length) return;
     const used = new Set(careerHighlights.values());
-    const color = HIGHLIGHT_COLORS.find(c => !used.has(c));
+    const color = HIGHLIGHT_COLORS.find(c => !used.has(c));   // lowest-index unused color
     careerHighlights.set(playerID, color);
 }
 function removeHighlight(playerID) { careerHighlights.delete(playerID); }
@@ -358,8 +391,22 @@ const URL_DEFAULTS = {
     t: "",
 };
 
-// Per-dataset metadata. The Stats toggle in the UI switches `activeDataset`;
-// every read of selectors / threshold field / dimensions goes through here.
+// Per-dataset metadata — the central declaration that makes batting vs. pitching a
+// data difference, not a code difference. The Stats toggle sets `activeDatasetKey`;
+// every read of axis options / threshold / formatting goes through here, so adding a
+// dataset is mostly a matter of adding an entry. Field families and why each exists:
+//   • dimensions      — the ordered axis-dropdown options.
+//   • defaultX/Y      — the fresh-view axes (also the URL_DEFAULTS).
+//   • thresholdField  — the playing-time gate (PA / IP); rows below the slider value are
+//                       dropped before the Pareto sweep so cup-of-coffee outliers don't
+//                       distort the frontier.
+//   • rateStats       — ratios (AVG, ERA, …); used for number formatting (decimals) and
+//                       to decide when the qualifier threshold matters.
+//   • lowerIsBetter   — stats where SMALL is good (ERA, SO, GIDP). The frontier sweep
+//                       finds the upper-right envelope, so for these axes the sign is
+//                       flipped (xSign/ySign) to find the correct (lower-left) limit.
+//   • thresholdConfig — per-mode slider range/step/default/presets (Season defaults to the
+//                       qualifier minimum; Career to 0 — see the inline note).
 const DATASETS = {
     batting: {
         label: "Batting",
@@ -456,6 +503,13 @@ const PITCHING_COUNT_COLS = ["W","L","G","GS","CG","SHO","SV","IPouts","H","ER",
 // frontier.
 const z = (v) => (isFinite(v) ? v : 0);
 
+// CSV rows arrive as all-strings. This turns each row into a typed point with every
+// derived stat PRE-COMPUTED once at load, so the hot frontier path (which runs per
+// frame) only reads numbers, never parses or divides. The formulas mirror
+// EVT_REGISTRY.batting.derived — they must agree, since the same axis can be fed by a
+// static season row (here) OR a streamed .evt cumulative (there). Rate stats are NaN
+// when their denominator is 0 (no AB yet); NaN is deliberate — it drops the point from
+// the chart rather than plotting a bogus 0.000.
 function parseBattingRows(rawPoints) {
     const out = [];
     for (const r of rawPoints) {
@@ -518,6 +572,10 @@ function parsePitchingRows(rawPoints) {
     return out;
 }
 
+// Group all of a player's season rows under their playerID, once at load. This is the
+// O(1) lookup the click-to-highlight career trail needs: clicking one frontier season
+// must instantly find that player's OTHER seasons to plot the gold trail, without
+// re-scanning the whole points array each click.
 function buildPlayerIndex(points) {
     const idx = new Map();
     for (const p of points) {
@@ -528,6 +586,12 @@ function buildPlayerIndex(points) {
     return idx;
 }
 
+// Load + parse one dataset. The same call serves both run modes: in the multi-file dev
+// site `d3.csv` fetches from data/; in the single-file bundle the bundler regex-swaps
+// these exact two calls for in-memory decoders (so keep the literal paths stable — see
+// CLAUDE.md "Single-file bundle"). The decoder also attaches a `.metaFor` (People lookup)
+// to its result array; the CSV path leaves it undefined and buildMetaFromPeopleCsv fills
+// `metaFor` instead — either way `metaFor(playerID)` resolves handedness/country.
 async function loadDataset(key) {
     // The bundler swaps these two d3.csv() calls for the inline decoders.
     const rawPoints = key === "pitching"
@@ -562,6 +626,22 @@ function decodePbpSeason(year, dataset) {
     return promise;
 }
 
+// Decode one BL2P season blob (little-endian, produced by
+// scripts/convert_retrosheet_pbp.py). The format is a hand-rolled columnar binary chosen
+// over JSON/CSV because a season is ~thousands of player-games and we want it small over
+// the wire AND zero-parse on the hot path. Layout, in order:
+//   "BL2P"                      4-byte magic
+//   major,minor,dataset,flags   4 bytes (only major is checked)
+//   year, P, D, C               4× u16  — year, #players, #dates, #stat columns
+//   dates[D]                    D× u16  — the day-of-year index for each game date
+//   cols[C]                     per col: u8 bit-width, u8 name-len, name bytes
+//   names[P]                    per player: u8 len, name bytes
+//   gameCounts[P]               P× u16  — games per player (Σ = G, the total game rows)
+//   dateIdxAll[G]               G× u16  — each game row's date index (grouped by player)
+//   columns[C]                  G× `width`-bit values, LSB-first, byte-aligned per column
+// The values are PER-GAME deltas; we prefix-sum them per player at the end so a cursor
+// lookup is "cumulative as of date X" without re-summing. Throws on bad magic/version so
+// decodePbpSeason's caller can degrade to whole-season animation.
 function parseBl2p(buf) {
     const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     const dec = new TextDecoder();
@@ -571,9 +651,9 @@ function parseBl2p(buf) {
     const major = buf[off++]; off += 3;           // minor, dataset, flags (unused here)
     if (major !== 1) throw new Error("parseBl2p: unsupported version " + major);
     const year = dv.getUint16(off, true); off += 2;
-    const P = dv.getUint16(off, true); off += 2;
-    const D = dv.getUint16(off, true); off += 2;
-    const C = dv.getUint16(off, true); off += 2;
+    const P = dv.getUint16(off, true); off += 2;   // players
+    const D = dv.getUint16(off, true); off += 2;   // distinct game dates
+    const C = dv.getUint16(off, true); off += 2;   // stat columns
 
     const dates = new Uint16Array(D);
     for (let i = 0; i < D; i++) { dates[i] = dv.getUint16(off, true); off += 2; }
@@ -599,23 +679,30 @@ function parseBl2p(buf) {
     const dateIdxAll = new Uint16Array(G);
     for (let i = 0; i < G; i++) { dateIdxAll[i] = dv.getUint16(off, true); off += 2; }
 
-    // Bit-unpack each column (LSB-first), byte-aligned at each column boundary.
+    // Bit-unpack each column. Each stat is stored in just `width` bits (most per-game
+    // counts fit in 2–4 bits — a player rarely hits 4 HR in a game), packed LSB-first
+    // into a bit stream that resets to a byte boundary at each column. The classic
+    // shift-register unpack: keep an accumulator `acc` with `nbits` valid low bits, refill
+    // a byte at a time until we have ≥ width, then take the low `width` bits and shift them
+    // out. `mask` clears the high bits; `acc >>>= width` (unsigned) discards the consumed value.
     const colArrays = {};
     for (const { name, width } of cols) {
         const arr = new Int32Array(G);
         const mask = (1 << width) - 1;
         let acc = 0, nbits = 0, p = off;
         for (let i = 0; i < G; i++) {
-            while (nbits < width) { acc |= buf[p++] << nbits; nbits += 8; }
-            arr[i] = acc & mask;
-            acc >>>= width;
+            while (nbits < width) { acc |= buf[p++] << nbits; nbits += 8; }  // refill
+            arr[i] = acc & mask;                                            // take width bits
+            acc >>>= width;                                                 // drop them
             nbits -= width;
         }
-        off += Math.ceil((G * width) / 8);
+        off += Math.ceil((G * width) / 8);          // next column is byte-aligned
         colArrays[name] = arr;
     }
 
-    // Prefix-sum per player into cumulative-by-game arrays.
+    // Prefix-sum per player into cumulative-by-game arrays: arr[i] is the running total
+    // through game i, so pbpPointsAsOf can binary-search "state as of date X" in O(log n)
+    // instead of summing deltas every frame.
     const colNames = cols.map((c) => c.name);
     const perPlayer = new Map();
     let g = 0;
