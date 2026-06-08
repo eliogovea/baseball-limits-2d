@@ -1022,6 +1022,23 @@ function evtEligible(xDim, yDim) {
     // from Lahman data.points, open growing from .evt — pitching is all step events).
     return !!evtReg() && !!evtDimSpec(xDim) && !!evtDimSpec(yDim);
 }
+// Decode one STEV ("stat event") blob — a single counting stat's full-history per-player
+// event stream (data/pbp/<stat>.evt.gz, built by build_stat_streams.js). One file per
+// stat (HR, SB, …); buildEvtModel loads the two/few a chart needs. Layout:
+//   "STEV"                  4-byte magic
+//   version                 1 byte
+//   statName                u8 len + name bytes
+//   numDates, numSeasons    2× u16  — global date table size, #seasons
+//   seasons[numSeasons]     per season: u16 year, u16 #dates  (lets yearOf[] be rebuilt)
+//   doy[numDates]           u16 each — day-of-year per global date index
+//   P                       u32 — #players
+//   names[P]                per player: u8 len + name bytes
+//   players[P]              per player: varint n, then n×(varint dDate, varint dCum)
+// The two inner streams are DELTA-encoded and LEB128 varint-packed: dates and cumulative
+// values are both monotone, so storing successive DIFFERENCES keeps every number tiny
+// (1 byte each, usually) and the gzip layer compresses the rest. We prefix-sum the deltas
+// back (`gd += `, `run += `) into absolute global-date indices and absolute cumulative
+// totals as we read — so evtAsOf can binary-search a player's value as of any date.
 function decodeStev(buf) {
     const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     const dec = new TextDecoder(); let off = 0;
@@ -1037,12 +1054,13 @@ function decodeStev(buf) {
     const P = dv.getUint32(off, true); off += 4;
     const names = new Array(P);
     for (let i = 0; i < P; i++) { const nl = buf[off++]; names[i] = dec.decode(buf.subarray(off, off + nl)); off += nl; }
+    // LEB128 varint reader: 7 data bits per byte, high bit = "more bytes follow".
     const rv = () => { let v = 0, s = 0, b; do { b = buf[off++]; v |= (b & 127) << s; s += 7; } while (b & 128); return v >>> 0; };
     const byName = new Map();
     for (let i = 0; i < P; i++) {
         const n = rv(); const dates = new Uint16Array(n); const cum = new Uint16Array(n);
-        let gd = 0, run = 0;
-        for (let k = 0; k < n; k++) { gd += rv(); run += rv(); dates[k] = gd; cum[k] = run; }
+        let gd = 0, run = 0;                          // running date index + running cumulative total
+        for (let k = 0; k < n; k++) { gd += rv(); run += rv(); dates[k] = gd; cum[k] = run; }  // un-delta
         byName.set(names[i], { dates, cum });
     }
     return { stat, numDates, seasons, doy, byName };
@@ -1244,24 +1262,42 @@ function gpuScaleUniform(xScale, yScale, margin, width, height, radius, alpha) {
 // the counting (.evt) axes this path is gated to. Each event moves exactly one player,
 // which can evict a contiguous dominated run and re-insert; nothing else is promoted.
 function createIncrementalFrontier(playerCount, xSign, ySign) {
-    const frX = [], frY = [], frP = [];           // canonical X, Y, player index — sorted X-asc / Y-desc
+    // The live frontier as three PARALLEL arrays (struct-of-arrays, kept sorted by
+    // canonical X ascending ⇒ canonical Y descending — a staircase). frP[i] is the player
+    // owning slot i. onFront[p] is a fast membership test (avoids scanning frP). All math
+    // is in CANONICAL space (X = x·xSign): with xSign/ySign ∈ {+1,−1} a "lower is better"
+    // axis becomes "higher is better", so one piece of code handles all four quadrants.
+    const frX = [], frY = [], frP = [];
     const onFront = new Uint8Array(playerCount);
     function reset() { frX.length = 0; frY.length = 0; frP.length = 0; onFront.fill(0); }
+    // Apply ONE event: player p's stat just advanced to (x, y). Because the .evt streams
+    // are counting stats, a player's canonical (X, Y) only ever moves UP and/or RIGHT — it
+    // never regresses. That monotonicity is what makes the update O(frontier) instead of a
+    // full O(N) re-sweep: p can only ENTER the frontier or push further out, dominating a
+    // CONTIGUOUS run of neighbours; nothing else changes membership.
     function applyEvent(p, x, y) {
         const X = x * xSign, Y = y * ySign;
-        if (onFront[p]) {                          // p is moving up-right: drop its old slot first
+        if (onFront[p]) {
+            // p was already on the frontier and just moved up-right; remove its stale slot
+            // so we can re-insert at the correct (now further-out) position below.
             const i = frP.indexOf(p);
             if (i >= 0) { frX.splice(i, 1); frY.splice(i, 1); frP.splice(i, 1); }
             onFront[p] = 0;
         }
+        // Dominance test: find the first slot with X' ≥ X. If that neighbour also has
+        // Y' ≥ Y, it dominates p (≥ in both) → p is not on the frontier, nothing to do.
         let k = 0; while (k < frP.length && frX[k] < X) k++;
-        if (k < frP.length && frY[k] >= Y) return;            // dominated → not on the frontier
+        if (k < frP.length && frY[k] >= Y) return;
+        // p IS on the frontier. Find the contiguous run [j, e) of existing slots that p now
+        // dominates (X' ≤ X AND Y' ≤ Y) — the staircase ordering guarantees they're adjacent.
         let j = 0; while (j < frP.length && !(frX[j] <= X && frY[j] <= Y)) j++;
         let e = j; while (e < frP.length && frX[e] <= X && frY[e] <= Y) e++;
-        if (e > j) {                               // evict the contiguous run p now dominates
+        if (e > j) {                               // evict that run (they're no longer extreme)
             for (let t = j; t < e; t++) onFront[frP[t]] = 0;
             frX.splice(j, e - j); frY.splice(j, e - j); frP.splice(j, e - j);
         }
+        // Insert p in canonical-X order: at j if it replaced a run, else binary-walk to the
+        // first slot with X' ≥ X (an insert that dominates nobody, e.g. a new low-X/high-Y point).
         let ins = (e > j) ? j : 0;
         if (e === j) while (ins < frP.length && frX[ins] < X) ins++;
         frX.splice(ins, 0, X); frY.splice(ins, 0, Y); frP.splice(ins, 0, p);
