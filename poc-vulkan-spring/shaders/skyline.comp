@@ -1,0 +1,52 @@
+#version 450
+// ── skyline.comp — per-frame GPU Pareto frontier ("the limits"), brute force ────────────────
+//
+// WHY THIS EXISTS
+// The baseline kept the non-dominated set on the CPU, updated incrementally as integer events
+// arrived (monotone ⇒ O(1) amortized per event). That trick relies on the points living at exact
+// integer (hr,sb). The SPRING twin draws SMOOTHED float positions pos[] that slide between integer
+// states, so the visible frontier must be recomputed from pos[] every frame — the integer-event
+// incremental shortcut no longer applies. This pass does that recompute on the GPU.
+//
+// THE DEFINITION (2-D Pareto / skyline, maximize both axes)
+// Point i is ON the frontier ("non-dominated") iff NO other point j dominates it, where j
+// dominates i when j is ≥ on both axes and strictly greater on at least one:
+//        (pj.x >= pi.x AND pj.y >= pi.y) AND (pj.x > pi.x OR pj.y > pi.y)
+// The strict tie-break (the second clause) is the same one the snapshot's brute-force check uses,
+// so settled positions (pos ≈ integer) reproduce the baseline's frontier exactly.
+//
+// WHY BRUTE FORCE O(n^2) IS THE RIGHT CALL HERE
+// n ≈ 11k players ⇒ ~124M comparisons/frame. On an Apple GPU that is well under a millisecond; a
+// sort-based O(n log^2 n) skyline would be exact too but needs a GPU sort + scan + compaction —
+// far more code for no practical win at this n. We deliberately did NOT adopt the pasted summary's
+// spatial-tiling / dirty-tile scheme: its premise ("a point's influence is spatially local") is
+// FALSE for Pareto domination — a single high point dominates an entire lower-left quadrant,
+// spanning arbitrarily many tiles. Tiling only pays off at millions of points (see the design doc).
+//
+// FLOAT-TIE CAVEAT: mid-glide, two players with equal integer counters can have pos values that
+// differ only by float rounding, so the strict test may flicker which of a coincident pair is
+// "on-front". This is sub-pixel and purely cosmetic; the snapshot validates at the SETTLED state
+// where pos == integer and the result is exact.
+//
+// VULKAN/WGSL NOTE: GLSL original of skyline.wgsl; identical logic, WGSL just uses a uniform buffer
+// for `count` and (in the twin) feeds onFront on to a fully-GPU staircase builder.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 4)          buffer OnFront { uint onFront[]; };  // 1 = on frontier (output)
+layout(std430, binding = 6) readonly buffer Pos     { vec2 pos[]; };       // smoothed positions (input)
+
+layout(push_constant) uniform PC { uint count; } pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;        // one thread per player
+    if (i >= pc.count) return;
+
+    vec2 pi = pos[i];
+    uint dominated = 0u;
+    for (uint j = 0u; j < pc.count; ++j) {   // scan everyone; early-out as soon as one dominates i
+        vec2 pj = pos[j];
+        if (pj.x >= pi.x && pj.y >= pi.y && (pj.x > pi.x || pj.y > pi.y)) { dominated = 1u; break; }
+    }
+    onFront[i] = (dominated == 0u) ? 1u : 0u;
+}

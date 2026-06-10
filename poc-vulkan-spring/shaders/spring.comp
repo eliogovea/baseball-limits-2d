@@ -1,0 +1,71 @@
+#version 450
+// ── spring.comp — GPU critically-damped spring motion (the SPRING twin's new pass) ──────────
+//
+// WHY THIS EXISTS
+// In the baseline POC a player's dot sits exactly at (hr[i], sb[i]) — the integer counters the
+// accumulate pass wrote. When a counter ticks up, the dot *teleports* one notch. This pass makes
+// the dot GLIDE there instead: we keep a continuous rendered position pos[i] and velocity vel[i]
+// per player, and every frame nudge pos toward the integer "target" (hr, sb) with a critically-
+// damped spring. The accumulate pass is unchanged — hr[]/sb[] are now read as the spring TARGET,
+// not the thing we draw. points.vert draws pos[] instead.
+//
+// WHY A CRITICALLY-DAMPED SPRING (and not a lerp)
+// The honest physical model for "smoothly chase a moving target with no jitter" is a damped
+// harmonic oscillator. The 1-D ODE for the offset (x - target) under a spring of natural angular
+// frequency w and damping ratio z is:
+//        x'' + 2*z*w*x' + w^2*(x - target) = 0
+//   • z < 1 (under-damped): the dot oscillates around the target before settling — springy wobble.
+//   • z > 1 (over-damped):  no wobble but sluggish, two decaying exponentials.
+//   • z = 1 (CRITICALLY damped): the fastest possible approach with NO overshoot. Exactly what we
+//     want — the dot rushes to its new (hr,sb) and stops dead, never sailing past it. w sets how
+//     snappy: larger w ⇒ shorter settle time (~ a few / w seconds). We hardcode z = 1 by using the
+//     closed form below; only w ("omega") is exposed.
+//
+// WHY THE WEIRD POLYNOMIAL `e` (numerical stability)
+// A naive explicit Euler step of the ODE (vel += accel*dt; pos += vel*dt) goes UNSTABLE when
+// w*dt is large — exactly the case on a hitch (window drag, a stalled first frame, or the huge-dt
+// "settle" we use in the snapshot). The classic fix (Game Programming Gems 4, "critically damped
+// spring" / Unity's SmoothDamp) substitutes a stable rational approximation of the exact decay
+// factor e^{-w*dt}:
+//        e ≈ 1 / (1 + (w*dt) + 0.5*(w*dt)^2 + (1/6)*(w*dt)^3 + (1/24)*(w*dt)^4)
+// This stays in (0, 1] for ALL dt ≥ 0, so the system always decays monotonically toward the
+// target — it can never blow up and never overshoots, regardless of frame-time spikes. The update
+// is the analytic solution of the critically-damped ODE over one step, written with that stable e.
+//
+// VULKAN/WGSL NOTE: this is the GLSL original of spring.wgsl. The math is identical; the only
+// platform differences are push-constants here vs a uniform buffer in WGSL, and that WGSL reads
+// the atomic-typed hr/sb via atomicLoad (here they are plain readonly storage reads).
+
+layout(local_size_x = 64) in;
+
+// hr[]/sb[] are the integer counters the accumulate pass owns; we only READ them here, as the
+// spring's destination. (They are the same descriptor-set bindings the other passes use; a shader
+// may legally declare a binding `readonly` even though another shader writes it.)
+layout(std430, binding = 1) readonly buffer Hr  { uint hr[]; };
+layout(std430, binding = 2) readonly buffer Sb  { uint sb[]; };
+// pos[] = the smoothed rendered position (in HR/SB data units, NOT clip space — points.vert maps
+// data→NDC exactly as before, so these constants stay window-independent). vel[] = motion state.
+layout(std430, binding = 6) buffer Pos { vec2 pos[]; };
+layout(std430, binding = 7) buffer Vel { vec2 vel[]; };
+
+// dt: this frame's delta (seconds), clamped host-side. omega: spring stiffness (1/sec). count:
+// number of players (so the partial final workgroup can bail). WebGPU passes these in a uniform
+// buffer; Vulkan uses a push constant.
+layout(push_constant) uniform PC { float dt; float omega; uint count; } pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;        // one thread per player
+    if (i >= pc.count) return;               // guard the partial final workgroup
+
+    vec2 target = vec2(float(hr[i]), float(sb[i]));  // integer counters → float destination
+    vec2 x = pos[i];
+    vec2 v = vel[i];
+
+    // Stable critically-damped step (vec2 does both axes at once). See the header for the math.
+    float wd = pc.omega * pc.dt;
+    float e  = 1.0 / (1.0 + wd + 0.5*wd*wd + (1.0/6.0)*wd*wd*wd + (1.0/24.0)*wd*wd*wd*wd);
+    vec2 change = x - target;                 // current offset from the target
+    vec2 temp   = (v + pc.omega * change) * pc.dt;
+    pos[i] = target + (change + temp) * e;    // new position: decays toward target, no overshoot
+    vel[i] = (v - pc.omega * temp) * e;       // new velocity: consistent with the analytic solution
+}
