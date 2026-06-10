@@ -309,7 +309,6 @@ let zoomMode = "off";
 let showWorstFrontier = false;  // toggle: false = best (default), true = worst
 const VERIFY_FRONTIER = new URLSearchParams(location.search).has("verifyFrontier"); // ?verifyFrontier=1 → assert incremental == full sweep each frame
 let hvEncodingEnabled = true;  // scale frontier dot radius by hypervolume contribution (always on)
-let isolationPinned = null;     // data-point reference for the pinned isolation ring, or null
 let animTimer = null;           // setInterval handle while frontier animation is running
 let animExtentCache = null;     // { key, x, y } — full-range axis extents cached per animation session
 let pbpTimeline = null;         // multi-year cursor model (buildPbpTimeline) when smooth mode is on, else null
@@ -1315,19 +1314,10 @@ function createIncrementalFrontier(playerCount, xSign, ySign) {
 
 const evtClampedDate = (model) => Math.max(0, Math.min(model.numDates - 1, pbpCursorIdx));
 
-function pbpFindLastCoveredYearIdx(tl) {
-    for (let i = tl.years.length - 1; i >= 0; i--) if (tl.years[i].status === "covered") return i;
-    return -1;
-}
-
 // Day-of-year ↔ calendar helpers for the cursor's URL token (YYYYMMDD) and label.
 function pbpDayToYmd(year, doy) {
     const d = new Date(Date.UTC(year, 0, doy));
     return `${year}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`;
-}
-function pbpDayLabel(year, doy) {
-    return new Date(Date.UTC(year, 0, doy))
-        .toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
 }
 function pbpYmdToDay(ymd) {
     const y = +ymd.slice(0, 4), m = +ymd.slice(4, 6), d = +ymd.slice(6, 8);
@@ -4462,18 +4452,6 @@ function closeShareModal() {
     if (backdrop) backdrop.hidden = true;
 }
 
-function _flashActionBtn(btn, label, doneLabel = "Done!") {
-    const orig = btn.textContent.trim();
-    btn.classList.add("share-action-btn--done");
-    btn.textContent = doneLabel;
-    setTimeout(() => {
-        btn.classList.remove("share-action-btn--done");
-        btn.textContent = orig;
-        // Restore the icon that was stripped by textContent assignment
-        btn.dispatchEvent(new Event("_restoreicon"));
-    }, 1800);
-}
-
 function setupShareButton() {
     const shareBtn   = document.getElementById("share-btn");
     const backdrop   = document.getElementById("share-backdrop");
@@ -4800,8 +4778,6 @@ function buildFranchisePicker() {
     updateFranchiseDimming("all");
 }
 
-function populatePlayerDatalist() { /* replaced by setupPlayerSearch — no-op */ }
-
 function setupPlayerSearch() {
     const input = document.getElementById("player-search");
     const box   = document.getElementById("player-suggestions");
@@ -4934,12 +4910,6 @@ function setupPaPresets() {
             slider.value = btn.dataset.pa;
             slider.dispatchEvent(new Event("input", { bubbles: true }));
         });
-    });
-}
-
-function syncPresetActive(value) {
-    document.querySelectorAll(".preset[data-pa]").forEach((btn) => {
-        btn.classList.toggle("active", parseInt(btn.dataset.pa) === value);
     });
 }
 
@@ -6305,34 +6275,6 @@ function positionTooltip(event, tooltip) {
     if (y + ttRect.height + pad > vh) y = vh - ttRect.height - pad;
     tooltip.style.left = x + "px";
     tooltip.style.top = y + "px";
-}
-
-function drawIsolationRingPinned(ringGroup, iso, color, plotW, plotH) {
-    // Thin line from frontier centre to nearest neighbour
-    ringGroup.append("line")
-        .attr("class", "isolation-ring-spoke")
-        .attr("x1", iso.cx).attr("y1", iso.cy)
-        .attr("x2", iso.nx).attr("y2", iso.ny)
-        .style("stroke", color);
-    // The ring itself
-    ringGroup.append("circle")
-        .attr("class", "isolation-ring isolation-ring--pinned")
-        .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
-        .style("stroke", color);
-    // Small marker dot at the nearest neighbour
-    ringGroup.append("circle")
-        .attr("class", "isolation-ring-neighbour")
-        .attr("cx", iso.nx).attr("cy", iso.ny).attr("r", 4)
-        .style("fill", color);
-    // // "Loneliness Radius" label: place along the spoke, clamped inside the chart.
-    // const labelAngle = -Math.PI / 4; // 45° top-right
-    // const lx = Math.min(Math.max(iso.cx + iso.r * Math.cos(labelAngle), 4), plotW - 4);
-    // const ly = Math.min(Math.max(iso.cy + iso.r * Math.sin(labelAngle), 14), plotH - 4);
-    // ringGroup.append("text")
-    //     .attr("class", "isolation-ring-label")
-    //     .attr("x", lx).attr("y", ly)
-    //     .style("fill", color)
-    //     .text("Loneliness Radius");
 }
 
 function escapeHtml(s) {
