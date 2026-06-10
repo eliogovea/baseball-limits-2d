@@ -21,7 +21,9 @@ Branch: `feat/event-level-pbp`.
   block: runner stats SB/CS/R are now exact (real `br*_pre`/`run*` identities → substitutions
   handled), and ALL stats come from one exact pass. **This rewrite is UNTESTED** — the next
   step was `python3 scripts/build_stat_files.py 2023 --out /tmp/stat_test` to validate one
-  season, which got interrupted.
+  season. ✅ **2023 validated exact** (HR 5,868, BB 15,819 [walk col is inclusive — not
+  15,345], SO 41,843, H 40,839, 2B 8,228, RBI 21,512 all == Lahman; SB 3,503 / CS 866 /
+  R 22,432 populated). Builder is correct; full 1910-2025 build was kicked off next.
 - The committed S1 stat files are **BL2E-sourced and use a different gpid scheme**
   (sorted-retroID) than the new builder (first-appearance order). The full plays.csv rebuild
   will **overwrite** `stat_players.bl2s.gz` + all `stat_*.bl2s.gz` with a consistent new gpid
