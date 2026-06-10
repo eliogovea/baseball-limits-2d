@@ -77,6 +77,15 @@ _TO_BASE = {1: D_TO1, 2: D_TO2, 3: D_TO3}
 FLAG_COLS = ["iw", "sb2", "sb3", "sbh", "cs2", "cs3", "csh", "pko1", "pko2", "pko3",
              "wp", "pb", "bk", "oa", "di", "gdp", "othdp", "tp", "fle", "k_safe"]
 
+# --- Layer C (fielding detail) — header flag bit1, opt-in via --fielding ----------
+# The "everything Retrosheet encodes" superset. f2-f9 reference the main player dict
+# (fielders are players); umpires get their own dict; loc/fseq/hittype are small
+# value-coded string dicts; e1-e9 are sparse error counts.
+FIELD_POS = ["f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9"]          # C,1B,2B,3B,SS,LF,CF,RF
+UMP_FIELDS = ["umphome", "ump1b", "ump2b", "ump3b", "umplf", "umprf"]
+ERR_FIELDS = ["e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "e9"]
+VALUE_DICT_COLS = ["loc", "fseq", "hittype"]                          # string-coded
+
 # Handedness L/R/B(switch)/? -> 2 bits.
 HAND = {"R": 0, "L": 1, "B": 2}
 
@@ -194,8 +203,9 @@ def read_season(csv_path, year):
     return ordered, n_rows
 
 
-def build_bl2e(ordered_games, year, retro_to_display, include_pitches=True):
-    """Assemble the BL2E byte payload (Layer A, plus Layer B pitches) for one season."""
+def build_bl2e(ordered_games, year, retro_to_display, include_pitches=True,
+               include_fielding=False):
+    """Assemble the BL2E byte payload (Layer A + B pitches + C fielding) for one season."""
     # --- Player dictionary, keyed by retroID (identity matters for replay; unlike
     # BL2P we must NOT merge two retroIDs onto one display name). Collect every
     # retroID that appears as batter, pitcher, or a pre-play baserunner.
@@ -216,6 +226,10 @@ def build_bl2e(ordered_games, year, retro_to_display, include_pitches=True):
             for b in (1, 2, 3):
                 if row[f"br{b}_pre"]:
                     intern(row[f"br{b}_pre"])
+            if include_fielding:                 # fielders are players too
+                for fp in FIELD_POS:
+                    if row[fp]:
+                        intern(row[fp])
     P = len(pid_index)
     if P >= 0xFFFF:
         sys.exit(f"player count {P} hits the u16 sentinel")
@@ -238,6 +252,19 @@ def build_bl2e(ordered_games, year, retro_to_display, include_pitches=True):
         "dispB", "disp1", "disp2", "disp3", "flags")}
     game_table = []                       # (dayOfYear, visIdx, homeIdx, firstEventIdx, gid)
     pitch_strings = []                    # Layer B: raw pitch sequence per event, in order
+
+    # Layer C raw collectors (only filled when include_fielding).
+    fc = {fp: [] for fp in FIELD_POS}     # fielder -> player-dict index per event
+    uc = {u: [] for u in UMP_FIELDS}      # umpire  -> umpire-dict index per event
+    ump_index = {}                        # umpire retroID ('' included) -> index
+    def intern_ump(rid):
+        i = ump_index.get(rid)
+        if i is None:
+            i = len(ump_index); ump_index[rid] = i
+        return i
+    vc = {c: [] for c in VALUE_DICT_COLS}  # loc/fseq/hittype -> raw string per event
+    ec = {e: [] for e in ERR_FIELDS}       # e1..e9 -> int per event
+
     E = 0
     for gid, g in ordered_games:
         first_event = E
@@ -266,6 +293,15 @@ def build_bl2e(ordered_games, year, retro_to_display, include_pitches=True):
             cols["disp2"].append(d2); cols["disp3"].append(d3)
             cols["flags"].append(flags_value(row))
             pitch_strings.append(row.get("pitches") or "")
+            if include_fielding:
+                for fp in FIELD_POS:
+                    fc[fp].append(intern(row[fp]))      # 0xFFFF if blank
+                for u in UMP_FIELDS:
+                    uc[u].append(intern_ump(row[u]))
+                for c in VALUE_DICT_COLS:
+                    vc[c].append(row[c])
+                for e in ERR_FIELDS:
+                    ec[e].append(_int(row[e]))
             E += 1
         game_table.append((day_of_year(g["date"]),
                            intern_team(vis_team), intern_team(home_team),
@@ -299,7 +335,7 @@ def build_bl2e(ordered_games, year, retro_to_display, include_pitches=True):
     # --- Serialize -------------------------------------------------------------
     buf = io.BytesIO()
     buf.write(b"BL2E")
-    flags_byte = 0x01 if has_pitches else 0  # bit0 hasPitches, bit1 hasFielding (P5).
+    flags_byte = (0x01 if has_pitches else 0) | (0x02 if include_fielding else 0)
     buf.write(struct.pack("<BBB", FORMAT_MAJOR, FORMAT_MINOR, flags_byte))
     buf.write(struct.pack("<HIHHH", year, E, Gn, P, len(team_index)))
     buf.write(struct.pack("<H", len(col_order)))
@@ -353,14 +389,60 @@ def build_bl2e(ordered_games, year, retro_to_display, include_pitches=True):
         buf.write(pack_bits(symbol_stream, sym_width))
         pitch_bytes = buf.tell() - before
 
+    # --- Layer C fielding section (only if --fielding) -------------------------
+    # u16 colCount | colCount × (u8 width + u8 nameLen + name)   -- self-describing
+    # u16 umpCount | umpCount × (u8 len + retroID)               -- umpire dict
+    # for loc,fseq,hittype: u16 nVals | nVals × (u8 len + value) -- value dicts
+    # payload: each column E values bit-packed @ its width (player/umpire/value index, or err count)
+    fielding_bytes = 0
+    if include_fielding:
+        before = buf.tell()
+        # Value dicts for the string-coded columns (sorted -> deterministic).
+        val_dicts = {c: sorted(set(vc[c])) for c in VALUE_DICT_COLS}
+        val_index = {c: {v: i for i, v in enumerate(vals)} for c, vals in val_dicts.items()}
+        # Assemble the Layer C columns in fixed order: fielders, umpires, value-coded, errors.
+        c_cols = ([(fp, fc[fp]) for fp in FIELD_POS]
+                  + [(u, uc[u]) for u in UMP_FIELDS]
+                  + [(c, [val_index[c][v] for v in vc[c]]) for c in VALUE_DICT_COLS]
+                  + [(e, ec[e]) for e in ERR_FIELDS])
+        c_widths = []
+        for _name, vals in c_cols:
+            mx = max(vals) if vals else 0
+            c_widths.append(1 if mx == 0 else max(1, math.ceil(math.log2(mx + 1))))
+        buf.write(struct.pack("<H", len(c_cols)))
+        for (name, _), w in zip(c_cols, c_widths):
+            nb = name.encode("utf-8")
+            buf.write(struct.pack("<BB", w, len(nb))); buf.write(nb)
+        # Umpire dict (own index space; '' is a real entry, no sentinel).
+        ump_by_index = [None] * len(ump_index)
+        for rid, i in ump_index.items():
+            ump_by_index[i] = rid
+        buf.write(struct.pack("<H", len(ump_by_index)))
+        for rid in ump_by_index:
+            b = (rid or "").encode("utf-8")
+            buf.write(struct.pack("<B", len(b))); buf.write(b)
+        # Value dicts.
+        for c in VALUE_DICT_COLS:
+            buf.write(struct.pack("<H", len(val_dicts[c])))
+            for v in val_dicts[c]:
+                b = v.encode("utf-8")
+                buf.write(struct.pack("<B", len(b))); buf.write(b)
+        # Payload.
+        for (_name, vals), w in zip(c_cols, c_widths):
+            buf.write(pack_bits(vals, w))
+        fielding_bytes = buf.tell() - before
+
     stats = {"events": E, "games": Gn, "players": P, "teams": len(team_index),
              "unmapped": n_unmapped, "widths": widths, "raw_bytes": buf.tell(),
              "has_pitches": has_pitches, "pitch_chars": sum(pitch_lens),
-             "pitch_alphabet": "".join(pitch_alphabet), "pitch_bytes": pitch_bytes}
+             "pitch_alphabet": "".join(pitch_alphabet), "pitch_bytes": pitch_bytes,
+             "has_fielding": include_fielding, "umpires": len(ump_index),
+             "fielding_bytes": fielding_bytes}
     return buf.getvalue(), stats
 
 
-def convert(csv_path, year, out_dir, retro_to_display, force=False, include_pitches=True):
+def convert(csv_path, year, out_dir, retro_to_display, force=False, include_pitches=True,
+            include_fielding=False):
     out_path = out_dir / f"e{year}.bl2e.gz"
     if out_path.exists() and not force:
         print(f"  {year}: e{year}.bl2e.gz exists — skipping (use --force to rebuild)")
@@ -369,7 +451,8 @@ def convert(csv_path, year, out_dir, retro_to_display, force=False, include_pitc
     if n_rows == 0:
         print(f"  {year}: no regular-season plays found — skipping")
         return None
-    binary, stats = build_bl2e(ordered, year, retro_to_display, include_pitches=include_pitches)
+    binary, stats = build_bl2e(ordered, year, retro_to_display,
+                               include_pitches=include_pitches, include_fielding=include_fielding)
     compressed = gzip.compress(binary, compresslevel=9)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(compressed)
@@ -381,6 +464,9 @@ def convert(csv_path, year, out_dir, retro_to_display, force=False, include_pitc
               f"raw section {stats['pitch_bytes']:,} B")
     else:
         print("    pitches: none (pre-pitch era or --no-pitches)")
+    if stats["has_fielding"]:
+        print(f"    fielding (Layer C): {stats['umpires']} umpires, raw section "
+              f"{stats['fielding_bytes']:,} B")
     print(f"    raw {stats['raw_bytes']:,} B -> gzip {len(compressed):,} B "
           f"({len(compressed) * 8 / max(1, stats['events']):.1f} bits/event)")
     return stats
@@ -393,6 +479,8 @@ def main():
     ap.add_argument("--out", default=str(OUT_DIR), help="output dir (default data/pbp)")
     ap.add_argument("--force", action="store_true", help="rebuild even if the output file exists")
     ap.add_argument("--no-pitches", action="store_true", help="omit Layer B pitch sequences")
+    ap.add_argument("--fielding", action="store_true",
+                    help="include Layer C fielding detail (f2-f9, umpires, loc, fseq, hittype, e1-e9)")
     args = ap.parse_args()
     out_dir = Path(args.out)
     if "-" in args.year:
@@ -403,7 +491,7 @@ def main():
     retro_to_display = build_retro_to_display(PEOPLE_PATH)
     for y in years:
         convert(args.csv, y, out_dir, retro_to_display, force=args.force,
-                include_pitches=not args.no_pitches)
+                include_pitches=not args.no_pitches, include_fielding=args.fielding)
 
 
 if __name__ == "__main__":

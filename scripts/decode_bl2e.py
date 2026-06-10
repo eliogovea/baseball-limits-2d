@@ -38,6 +38,7 @@ class Bl2e:
     games: list                 # [(dayOfYear, visIdx, homeIdx, firstEventIdx, gid), ...]
     col: dict                   # name -> [value per event]
     pitches: list               # Layer B: raw pitch string per event ([] if none)
+    fielding: dict              # Layer C: {col, umpires, valdict} or None
 
     def game_of_event(self, ev):
         """Binary-search the game table for the game containing event index `ev`."""
@@ -132,10 +133,38 @@ def decode(path):
     else:
         pitches = [""] * E
 
+    # Layer C fielding section (header flag bit1): self-describing columns + umpire dict
+    # + value dicts for loc/fseq/hittype.
+    fielding = None
+    if flags & 0x02:
+        ccount, = struct.unpack("<H", raw[off:off + 2]); off += 2
+        cmeta = []
+        for _ in range(ccount):
+            w, l = struct.unpack("<BB", raw[off:off + 2]); off += 2
+            cmeta.append((raw[off:off + l].decode("utf-8"), w)); off += l
+        ump_count, = struct.unpack("<H", raw[off:off + 2]); off += 2
+        umpires = []
+        for _ in range(ump_count):
+            l = raw[off]; off += 1
+            umpires.append(raw[off:off + l].decode("utf-8")); off += l
+        valdict = {}
+        for name in ("loc", "fseq", "hittype"):
+            n, = struct.unpack("<H", raw[off:off + 2]); off += 2
+            vals = []
+            for _ in range(n):
+                l = raw[off]; off += 1
+                vals.append(raw[off:off + l].decode("utf-8")); off += l
+            valdict[name] = vals
+        fcol = {}
+        for name, w in cmeta:
+            fcol[name], off = _unpack_bits(raw, off, E, w)
+        fielding = {"col": fcol, "umpires": umpires, "valdict": valdict}
+
     if off != len(raw):
         sys.exit(f"{path}: {len(raw) - off} trailing bytes after payload")
 
-    return Bl2e(major, minor, flags, year, E, teams, colmeta, players, games, col, pitches)
+    return Bl2e(major, minor, flags, year, E, teams, colmeta, players, games, col,
+                pitches, fielding)
 
 
 def main():
@@ -152,6 +181,11 @@ def main():
         nchars = sum(len(s) for s in d.pitches)
         print(f"pitches: {nchars:,} chars over {sum(1 for s in d.pitches if s):,} events; "
               f"e.g. {next((s for s in d.pitches if s), '')!r}")
+    if d.fielding:
+        f = d.fielding
+        print(f"fielding (Layer C): {len(f['col'])} cols, {len(f['umpires'])} umpires, "
+              f"loc/{len(f['valdict']['loc'])} fseq/{len(f['valdict']['fseq'])} "
+              f"hittype/{len(f['valdict']['hittype'])} value dicts")
 
 
 if __name__ == "__main__":

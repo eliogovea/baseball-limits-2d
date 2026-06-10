@@ -54,6 +54,7 @@ def main():
     ap.add_argument("--out", default=str(OUT_DIR))
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--no-pitches", action="store_true")
+    ap.add_argument("--fielding", action="store_true", help="include Layer C fielding detail")
     args = ap.parse_args()
 
     out_dir = Path(args.out)
@@ -79,7 +80,8 @@ def main():
                 failed += 1
                 continue
             stats = convert(str(csv_path), y, out_dir, retro_to_display,
-                            force=args.force, include_pitches=not args.no_pitches)
+                            force=args.force, include_pitches=not args.no_pitches,
+                            include_fielding=args.fielding)
             if stats is None:
                 failed += 1
             else:

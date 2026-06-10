@@ -24,7 +24,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from decode_bl2e import decode, D_OUT
 from convert_retrosheet_events import (
-    outcome_code, dispositions, flags_value, _hand, read_season,
+    outcome_code, dispositions, flags_value, _hand, read_season, _int,
+    FIELD_POS, UMP_FIELDS, ERR_FIELDS, VALUE_DICT_COLS,
 )
 
 csv.field_size_limit(1 << 20)
@@ -99,10 +100,38 @@ def main():
                 if mism < 10:
                     print(f"  mismatch ev{ev} pitches: decoded {d.pitches[ev]!r} != {exp_pitch!r}")
                 mism += 1
+            # Layer C: fielders (player retroIDs), umpires, value-coded loc/fseq/hittype, errors
+            if d.fielding:
+                fc = d.fielding["col"]
+                for fp in FIELD_POS:
+                    idx = fc[fp][ev]
+                    got = "" if idx == 0xFFFF else d.players[idx][0]
+                    if got != row[fp]:
+                        if mism < 10:
+                            print(f"  mismatch ev{ev} {fp}: decoded {got!r} != {row[fp]!r}")
+                        mism += 1
+                for u in UMP_FIELDS:
+                    got = d.fielding["umpires"][fc[u][ev]]
+                    if got != row[u]:
+                        if mism < 10:
+                            print(f"  mismatch ev{ev} {u}: decoded {got!r} != {row[u]!r}")
+                        mism += 1
+                for c in VALUE_DICT_COLS:
+                    got = d.fielding["valdict"][c][fc[c][ev]]
+                    if got != row[c]:
+                        if mism < 10:
+                            print(f"  mismatch ev{ev} {c}: decoded {got!r} != {row[c]!r}")
+                        mism += 1
+                for e in ERR_FIELDS:
+                    if fc[e][ev] != _int(row[e]):
+                        if mism < 10:
+                            print(f"  mismatch ev{ev} {e}: decoded {fc[e][ev]} != {row[e]!r}")
+                        mism += 1
             checked += 1
             ev += 1
+    layers = "15 cols + batter id + pitches" + (" + fielding" if d.fielding else "")
     if mism == 0:
-        print(f"PASS round-trip: {checked:,} events × 15 cols + batter id + pitches all match")
+        print(f"PASS round-trip: {checked:,} events × {layers} all match")
     else:
         print(f"FAIL round-trip: {mism:,} mismatches over {checked:,} events")
         ok = False

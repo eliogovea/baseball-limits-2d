@@ -32,7 +32,10 @@ layers:
   legitimately run higher. Fidelity itself proven by exact round-trip + exact match to
   Retrosheet's own plays.csv column sums (1927/1955). Older numeric fields can be blank →
   tolerant `_int()` in the converter.
-- [ ] **P5** — optional Layer C fielding detail behind `--fielding`.
+- [x] **P5** — optional Layer C fielding detail behind `--fielding` (header flag bit1):
+  f2–f9, the six umpires, loc/fseq/hittype (value-coded), e1–e9. Round-trips verbatim
+  (2023 + 1955, all checks pass). Cost: +~44 b/event (2023 → 97.2 b/event, 2.32 MB; 1955 →
+  65.7). NOT built into the corpus — opt-in (`--fielding` / `build_bl2e_corpus.py --fielding`).
 
 **Size decision — RESOLVED (keep explicit).** Layer A measures **~33 bits/event** (2023):
 of that, `batterIdx` (9.0 b/ev) + `pitcherIdx` (5.3) + inning/half/outs/handedness (~6.4)
@@ -67,7 +70,7 @@ python3 scripts/convert_retrosheet_events.py /path/to/plays.csv 1903-2025
 - **C — fielding detail** (P5, header `flags` bit1, `--fielding`): `f2`–`f9`, `loc`,
   `hittype`, `fseq`, errors, umpires.
 
-## Byte layout (little-endian) — Layer A, format v1.0
+## Byte layout (little-endian) — format v1.0
 
 ```
 HEADER:
@@ -80,8 +83,23 @@ PLAYER DICT:  P × (u8 idLen + utf8 retroID + u8 nameLen + utf8 displayName)
               -- keyed by retroID (identity preserved for replay; NOT merged by name)
 GAME TABLE:   Gn × ( u16 dayOfYear | u8 visTeamIdx | u8 homeTeamIdx
                      | u32 firstEventIdx | u8 gidLen + utf8 gid )
-EVENT PAYLOAD: for each column in order, E values × bitWidth bits (LSB-first,
+EVENT PAYLOAD (Layer A): for each column in order, E values × bitWidth bits (LSB-first,
                byte-padded at each column boundary — same `pack_bits` as BL2P)
+
+LAYER B (only if flags bit0):                       -- pitch sequences
+  u8 symCount | symCount × utf8 char                -- pitch-symbol alphabet
+  u8 lenWidth | pitchLen[E] packed @ lenWidth        -- per-event pitch count
+  symbol stream packed @ ceil(log2 symCount)         -- Σ pitchLen symbols; raw string verbatim
+
+LAYER C (only if flags bit1):                       -- fielding detail
+  u16 ccount | ccount × (u8 bitWidth + u8 nameLen + name)   -- self-describing columns
+  u16 umpCount | umpCount × (u8 len + retroID)              -- umpire dict ('' is entry 0…)
+  for loc, fseq, hittype: u16 nVals | nVals × (u8 len + value)   -- string value dicts
+  payload: ccount columns × E values, bit-packed @ each width
+    f2..f9            -> main player-dict index (0xFFFF = none)
+    umphome..umprf    -> umpire-dict index
+    loc, fseq, hittype-> value-dict index
+    e1..e9            -> error count (0–2)
 ```
 
 Events are stored grouped by game (chronological by date, then gid), and within a game in
