@@ -71,7 +71,9 @@ def _unpack_bits(buf, off, n, width):
     return vals, off + (n * width + 7) // 8
 
 
-def decode(path):
+def decode(path, lite=False):
+    """Decode a BL2E file. lite=True stops after the Layer A columns (skips pitch /
+    fielding parsing) — for callers that only need the core columns + game table."""
     raw = gzip.decompress(Path(path).read_bytes())
     p = 0
 
@@ -114,6 +116,10 @@ def decode(path):
     off = p
     for name, w in colmeta:
         col[name], off = _unpack_bits(raw, off, E, w)
+
+    if lite:                              # skip Layer B/C — caller only needs core columns
+        return Bl2e(major, minor, flags, year, E, teams, colmeta, players, games, col,
+                    [""] * E, None)
 
     # Layer B pitch section (header flag bit0): symbol alphabet + per-event length
     # column + a flat symbol stream sliced back into one string per event.
