@@ -229,12 +229,20 @@ from the POCs carry into `WebGPURenderer` verbatim.
    filter-aware Slice 3).*
 2. ✅ **`PointRenderer` seam.** `Canvas2DRenderer` owns the bg/fg layers behind a
    narrow interface; no-op refactor, byte-identical snapshots. *Shipped (Phase 2).*
-3. **`WebGPURenderer` behind `?renderer=webgpu`.** Instanced cloud (bg/fg buffers),
+3. ✅ **`WebGPURenderer` behind `?renderer=webgpu`.** Instanced cloud (bg/fg buffers),
    capability check + fallback ladder, export via texture readback. Frontier stays
-   SVG. *T3/T4 — new rendering backend. **Detailed design below.***
-4. **Stretch: GPU frontier staircase + (later) GPU compute-accumulate** for the
-   streaming mode (the POC's `accumulate.wgsl`), and the **deferred `core.wasm`**
-   path once pitch-by-pitch volumes land. *Separate session.*
+   SVG. *Shipped (Phase 3).*
+4. ✅ **GPU compute-accumulate cloud (hybrid).** The POC's `accumulate.wgsl` in the app:
+   the `.evt`-career cloud is accumulated on the GPU and vertex-pulled (no per-frame
+   `evtPointsAsOf`/readback), generalized to any monotone linear counting axis. **The JS
+   incremental frontier stays authoritative** (frontier/staircase/tooltips/cards); the GPU
+   only replaces the cloud. *Shipped (Phase 4) — see README.*
+5. **Spring motion + two explicit streaming engines** (the POC `spring` + `skyline` + GPU
+   `staircase`, dropping the CPU frontier from the GPU path). Builds on the shipped Phase-4
+   accumulate; lands as a **second, explicit streaming engine** alongside the CPU one (see
+   [§Phase 5](#phase-5--spring-motion--two-explicit-streaming-engines) below). The
+   **deferred `core.wasm`** path (once pitch-by-pitch volumes land) is still a separate
+   session. *T4 — new GPU compute/render pipeline contract. **Detailed design below.***
 
 ---
 
@@ -496,3 +504,270 @@ regex — noted, not done.)
   track, justified as such, gated so it can never regress production.
 - **Export divergence.** Mitigation: export always uses the Canvas-2D copy.
 - **Bundle bloat.** Mitigation: WebGPU/WASM strictly excluded from `build_bundle.py`.
+
+---
+
+## Phase 5 — Spring motion + two explicit streaming engines
+
+Phase 3 added a GPU backend for the **static** scatter cloud; Phase 4 (shipped, see README) put the
+streaming **cloud** on the GPU via `accumulate.wgsl` while keeping the JS frontier authoritative.
+Phase 5 brings in the rest of the [`poc-webgpu-spring`](../poc-webgpu-spring/) pipeline — **GPU spring
+motion + a per-frame GPU Pareto skyline + a fully-GPU staircase**, dropping the CPU frontier from the
+GPU path — for the **animated `.evt` streaming** path. The POC's frame graph is:
+
+```
+accumulate.wgsl  atomicAdd the new [lo,count) event slice into per-player counters  (the spring TARGET)
+      │
+spring.wgsl      glide pos[] toward the counters, critically damped (no overshoot); update vel[]
+      │
+skyline.wgsl     onFront[i] = 1 iff no j dominates pos[i]   (brute-force O(n²), exact at n≈11k)
+      │
+staircase.wgsl   compact on-front ids → rank-sort by x → emit step verts + a GPU draw count
+      ▼
+points.wgsl  instanced-quad cloud, vertex-pull from pos[]   ·   line.wgsl  staircase via drawIndirect
+```
+
+In the POC the CPU does **almost nothing per frame** (only the event-slice `[lo,count)` and a wrap
+flag) and there is **zero GPU→CPU readback in the live loop** — readback only happens once, in the
+verify/capture hooks, because configuring/reading a WebGPU canvas under headless Chrome is the
+documented device-loss trigger. Phase 4 brings that property into the app.
+
+### Architecture decision: two engines, not a hybrid
+
+The streaming path is built as **two explicit, self-contained engines**, selected once when the
+streaming model becomes active — **not** one engine with a "use GPU" flag, and **not** the Phase-3
+`PointRenderer` seam extended:
+
+```
+chooseStreamingEngine(model):
+  if ?renderer=webgpu AND evtGpuMonotone(model).ok AND navigator.gpu AND !isHeadless()
+      AND (await tryInitGpu())          -> gpuStreaming   // full GPU
+  else                                  -> cpuStreaming   // full CPU (default + fallback)
+```
+
+**Why two engines instead of a shared abstraction:**
+
+- The GPU engine receives **events + uniforms**, never screen-space points. A shared
+  `setForeground(points)`-style seam (Phase 3's `PointRenderer`) would be a *lie* for the GPU path —
+  it would force the GPU to pretend it consumes the same per-point screen data the CPU draws. The two
+  data flows are genuinely different, so the interfaces are too.
+- The GPU frontier is the GPU `skyline` kernel; the CPU frontier is `createIncrementalFrontier`. These
+  are **two different implementations of the same math**, not one engine with the other disabled. Keeping
+  them separate means each can be read, reasoned about, and verified on its own, and the CPU path is the
+  always-present fallback the rest of this doc guarantees.
+- Reuse is deliberately minimal (table below): share the *data* (model load, the event stream both
+  consume, metadata, SVG chrome), separate the *behavior* (frontier, cloud, staircase, motion, loop).
+
+On `device.lost` the GPU engine tears down and `chooseStreamingEngine` re-resolves to `cpuStreaming`
+with a clean redraw. The non-streaming **static** scatter is untouched — it keeps its Phase-2/3
+Canvas-2D / `PointRenderer` path. This split is **only** for the animated `.evt` streaming path.
+
+#### `cpuStreaming` — full CPU (default + fallback)
+
+The path that exists today, made explicit and self-owned:
+
+- **Frontier** — `createIncrementalFrontier` (script.js:1264), replayed over `buildEvtEventStream` as
+  the cursor advances; reset+replay on backward seek.
+- **Cloud** — Canvas 2D (`drawCanvasPointLayer`, bg/fg split).
+- **Staircase** — SVG `path.frontier-staircase`.
+- **Interaction** — live CPU `d3.quadtree`, cards, hypervolume, labels, maintained as today; `smoothLite`
+  defers the heavy parts to idle.
+- No GPU, no readback, no WGSL. This is the **mandatory fallback** and what the offline `dist/` bundle
+  uses.
+
+#### `gpuStreaming` — full GPU (the POC pipeline)
+
+One command encoder per frame:
+
+```
+accumulate (if count>0)  →  spring  →  skyline  →  reset/compact/ranksort/emit  →  render(points + line.drawIndirect)
+```
+
+- **Frontier is the GPU `skyline` → `onFront`**; the staircase is the GPU `drawIndirect` line (vertex
+  count written by the `emit` pass, never plumbed through JS). **No CPU frontier runs in this engine.**
+- **Interaction** (SVG labels, cards, HV, quadtree, click-to-highlight) is rebuilt by this engine's own
+  **throttled idle readback** — see [§Reconciliation](#reconciliation--idle-readback-not-per-frame).
+- POC lessons carried verbatim: `depthSlice = UNDEFINED`, **+Y-up NDC** (no flip), retain the adapter,
+  render to an **offscreen texture** then `copyTextureToTexture` blit, and keep **all** per-frame
+  readback off the loop.
+
+#### Shared vs. separate — only what's genuinely needed
+
+| Shared (one copy, both engines use it) | Separate (each engine owns its own) |
+|---|---|
+| `.evt` decode + model (`decodeStev`, `loadEvtStat`, `buildEvtModel`) | frontier computation (CPU `IncrementalFrontier` vs GPU `skyline`) |
+| `buildEvtEventStream(model)` — the event stream both consume | cloud rendering (Canvas 2D vs instanced quads) |
+| `evtGpuMonotone` / `gpuScaleUniform` (gate + coeffs/scale; GPU-only consumer) | staircase (SVG path vs GPU `drawIndirect`) |
+| player metadata (names, debut, era key) | motion (CPU step vs GPU spring) |
+| SVG chrome: axes, gridlines, legend, tooltip shell | the per-frame loop (`refreshChart`/`smoothLite` vs GPU encoder submit) |
+| leaf DOM builders (card-from-`{set,pos,meta}`, label emit) *where identical* | interaction-data maintenance (live CPU vs idle GPU readback) |
+
+### The integration surface already exists
+
+The app already built the CPU side of this pipeline (all in `script.js`), so Phase 4 is largely
+**wiring existing feeds to the POC's GPU passes**:
+
+- **`buildEvtEventStream(model)` (:1182)** → a flat, **date-sorted** struct-of-arrays event stream
+  `{date, player, dep, delta, n}` — this *is* the events buffer `accumulate.wgsl` reads.
+- **`evtGpuMonotone(model)` (:1223)** → gates GPU-accumulability (counting axes only, no rate stats,
+  integer ≥0 coefficients) **and** derives per-component coefficients `cx[]/cy[]`, so one accumulate
+  pass maps a streamed `delta` to its X and Y contributions.
+- **`gpuScaleUniform(...)` (:1250)** → packs the D3 linear scales as slope+intercept + viewport +
+  radius/alpha for the cloud vertex shader (matches the CSS-px mapping Canvas 2D uses).
+- **`smoothLite` (:294)** → already skips HV/cards/rings/quadtree during play and fires a full
+  interactive render when idle — the exact hook the throttled readback rides.
+
+### Communication design — minimize CPU↔GPU traffic
+
+The central question: **copy the events once, or stream them as time passes?** → **Copy once.**
+
+Upload the full date-sorted event stream to a **resident** GPU storage buffer **once per axis
+selection**. Per frame the CPU sends only a tiny window uniform. Streaming events per frame is
+rejected because:
+
+- Events are **static** for a given filter+axis — re-sending them is pure waste.
+- Backward seek / scrub / wrap is **free** with resident events: zero the counters and re-accumulate
+  `[lo, cursor)` entirely on the GPU (the POC's `zeroGpu` path), no upload.
+- Per-frame CPU→GPU traffic collapses to ~32 bytes (two uniforms).
+
+#### What crosses the bus, and how often
+
+| Data | Direction | Cadence | Size | Mechanism |
+|---|---|---|---|---|
+| events buffer (date-sorted SoA stream) | CPU→GPU | **once per axis change** | ~MBs | `buildEvtEventStream` → `writeBuffer` |
+| static per-player meta (`debut`, era key, size stat) | CPU→GPU | once per axis change | ~tens KB | `writeBuffer` |
+| per-player **filter mask** (league/bats/country/include) | CPU→GPU | **on filter change only** | ~`playerCount` B | `writeBuffer` |
+| `bWin` `{lo,count}` (this frame's new slice) | CPU→GPU | **per frame** | 16 B | uniform |
+| `bSpring` `{dt,omega}` | CPU→GPU | per frame | 16 B | uniform |
+| `bParams` (scales slope/intercept + viewport, from `gpuScaleUniform`) | CPU→GPU | on resize / extent change | 16–32 B | uniform |
+| `onFront[]` + integer counters (X,Y per player) | **GPU→CPU** | **idle only** (smoothLite settle) | ~`playerCount`×3×4 B | one `mapAsync` |
+| anything | GPU→CPU | **per frame** | **0** | — (avoids headless device-loss) |
+
+#### Filters & scales — "same for all other information"
+
+- **Year-range** is **not** a re-upload and **not** a mask: events are date-sorted, so a year boundary
+  maps to an **index range** in the resident stream. Narrowing the range = change `lo` and re-accumulate
+  `[lo, cursor)` on the GPU. Pure GPU work, zero bytes uploaded.
+- **Player-attribute filters** (league / bats / country) → a small **per-player mask buffer**
+  (~`playerCount` bytes), rewritten only on filter change. `skyline` excludes masked players from the
+  frontier; `points`/`line` skip (alpha 0 / discard) masked instances. The big events buffer stays
+  resident — only the tiny mask moves. Counters for masked players are simply ignored downstream, so no
+  counter recompute is needed on an attribute-filter change.
+- **Axis change** is the only event that re-uploads the events buffer (a different stat = a different
+  stream), zeroes counters, and replays from the cursor.
+- **Scales / viewport** — `gpuScaleUniform` already exists; send `bParams` on resize / data-extent
+  change (the POC re-sends it per frame at `main.js:318` — fine, it's 32 bytes).
+
+### GPU frame graph & resident buffers
+
+Buffers mirror `poc-webgpu-spring/main.js`, generalized from the POC's hard-wired HR/SB to the active
+axis pair via `evtGpuMonotone`'s `cx/cy` coefficients:
+
+| Buffer | Holds | Re-uploaded / written |
+|---|---|---|
+| `bEvents` | date-sorted `{date, player, delta}` stream | once per axis change (CPU) |
+| `bX` / `bY` | per-player integer counters (the spring target) | GPU `accumulate`; zeroed on wrap/scrub |
+| `bPos` / `bVel` | smoothed positions / velocities | GPU `spring`; zeroed on wrap |
+| `bDebut` | per-player debut (era colour) | once per axis change (CPU) |
+| `bMask` | per-player include flag (attribute filters) | on filter change (CPU) |
+| `bOnFront` | per-player frontier flag | GPU `skyline` |
+| `bFrontIdx`/`bFrontSorted`/`bCount` | staircase scratch (compact + rank-sort) | GPU, reset each frame |
+| `bStaircase`/`bIndirect` | step verts + GPU-written draw count | GPU `emit`; drawn via `drawIndirect` |
+| `bWin`/`bSpring`/`bParams` | uniforms (window / spring / scales+viewport) | per frame / on change (CPU) |
+
+Per-frame host loop (`gpuStreaming.renderAt(cursor)`): compute `{lo,count}` + wrap from the model;
+write `bWin`/`bSpring` (and `bParams` if dirty); if wrap, zero `bX/bY/bPos/bVel` and reset `bCount`;
+record one encoder — `accumulate` (if `count>0`) → `spring` → `skyline` → reset/compact/ranksort/emit
+→ render (`points` `draw(6, playerCount)` + `line.drawIndirect`); submit; blit offscreen→canvas only
+when `canvasOk` (the `!isHeadless()` gate). **No per-frame `onFront`/`staircase` upload** — both are
+produced on the GPU.
+
+The **math** (carried from `gpu-spring-skyline-design.md`, to be re-derived inline in the WGSL):
+the critically-damped spring uses the stable polynomial-`e` integrator (`e = 1/(1+wd+½wd²+…)`,
+`wd = ω·dt`) — unconditionally stable, never overshoots; the skyline is the exact O(n²) domination
+test with the strict tie-break (`pj≥pi` componentwise and `pj≠pi`); brute force is correct at n≈11k
+because **tiling fails for Pareto domination** (one high point dominates an entire lower-left quadrant
+spanning arbitrarily many tiles).
+
+### Reconciliation — idle readback, not per-frame
+
+The GPU shows smoothed float positions; the DOM/interaction layer needs the semantic (integer)
+frontier. They are reconciled by the `gpuStreaming` engine's **own** throttled readback:
+
+- On `smoothLite` settle/idle, one `mapAsync` reads back `onFront[]` + the integer counters.
+- From that + the resident `.evt` metadata (names, debut), the engine rebuilds the quadtree, cards,
+  HV, and frontier labels — exactly the work `smoothLite` already defers to idle.
+- **Never per frame** — a per-frame `mapAsync` is the documented headless device-loss trigger. During
+  active play, interaction is already suppressed by `smoothLite`, so there is nothing to keep live.
+
+The CPU `IncrementalFrontier` stays in the codebase as the `cpuStreaming` engine and as the
+verification oracle alongside `core.c`'s `verify_career()`.
+
+**Implementation status (shipped behind `?renderer=webgpu&gpustream=1`).** The GPU compute+render
+pipeline is built and verified: spring (`WEBGPU_SPRING_WGSL`), skyline (`WEBGPU_SKYLINE_WGSL`), the
+fully-GPU staircase (`WEBGPU_STAIRCASE_WGSL`, three entry points + `drawIndirect`), the spring cloud
+(`WEBGPU_SPRINGCLOUD_WGSL`, two-pass so frontier dots sit on top), and the staircase line
+(`WEBGPU_STAIRLINE_WGSL`) — all in `WebGPURenderer` (`_initSpring`/`_initSpringBuffers`/`present`),
+gated by `gpuSpring` in `drawScatterPlot`. Verified by `__bl2d_verifySpring` (springMis 0, skylineMis
+0, frontier = Bonds 762/514 + Henderson 296/1406). **Deviation from the above:** the *render* drops
+the CPU frontier (GPU `onFront`/staircase own the picture), but the cheap JS `IncrementalFrontier`
+still **runs live** to feed DOM/interaction (cards, quadtree, labels) — the throttled idle `onFront`
+readback that would *replace* it is not yet wired (a follow-up). So today: GPU owns the picture, CPU
+still owns the interaction data; the two agree at settled state. Other follow-ups: a crisper
+quad-based staircase line (the 1px `line-strip` aliases under SwiftShader at high DPR) and honouring
+the bats/country mask on the GPU.
+
+### File separation (evaluated; deferred)
+
+Keep both engines in `script.js` for this pass (single-file-by-design; the bundler inlines `script.js`
+verbatim). Write each engine as a contiguous, clearly-headed block with a narrow seam to the shared
+code, so a later split is mechanical:
+
+- **When to split** — once `gpuStreaming` (WGSL strings + buffer setup + frame graph + idle readback)
+  dominates `script.js` diffs, lift it to `streaming_gpu.js` and `cpuStreaming` to `streaming_cpu.js`,
+  leaving the shared model/chrome in `script.js`.
+- **Bundle impact** — `build_bundle.py` inlines only `script.js`. On a split, either concatenate the
+  new files or (preferred) keep `streaming_gpu.js` out of the bundle entirely, since the bundle is
+  Canvas-2D-only. **Do not change the bundler in this pass.**
+
+### Commenting standard (hard requirement)
+
+All new code carries **pedagogical, learning-resource comments** matching this repo's standard (the
+`gpu-spring-skyline-design.md` "Code commenting standard" and the recent pedagogical-pass commits):
+explain the *why* of every non-obvious mechanic (copy-once events; year-range-as-index-bounds; the
+filter mask vs re-upload; no per-frame readback; two engines vs a flag); derive the spring/skyline/
+staircase math inline; block headers per engine and per GPU pass; WGSL at POC comment density; and
+comment the engine-selection branch and the shared-vs-separate seam so the future file split is obvious.
+
+### Verification
+
+- **Default path untouched.** Phase-2 byte-identical snapshots with no flag still match.
+- **Headless guard.** `?renderer=webgpu` under `snap.js` must not configure a WebGPU canvas
+  (`__bl2d_renderer === "canvas2d"`, no console error).
+- **Frontier == oracle.** A POC-style offscreen harness drives to a fixed cursor, settles springs,
+  reads back `onFront` **once**, and asserts it equals `core.c`'s `verify_career()` brute force
+  (`frontierMis 0`); plus the standing spot-checks: career all-time frontier = Bonds 762/514 +
+  Henderson 296/1406; single-season HR 73 / SB 138.
+- **Spring convergence.** Settled `pos` within ½ unit of the integer counters (`springMis 0`).
+- **Idle reconciliation.** After playback settles, cards/HV/labels/quadtree match the GPU `onFront`
+  readback; click-to-highlight and tooltips work on settled state.
+- **Engine selection / fallback drills.** `chooseStreamingEngine` resolves to `gpuStreaming` only when
+  every gate passes; `navigator.gpu` deleted → `cpuStreaming` (full CPU engine), identical hit-testing;
+  simulated `device.lost` → re-resolves to `cpuStreaming` mid-session, clean redraw.
+- **Engine independence.** With `?renderer=webgpu`, confirm the CPU frontier code is **not** on the live
+  path (instrument `createIncrementalFrontier` to assert it isn't called during GPU playback) — proving
+  the two implementations are genuinely separate, not a shared engine with a flag.
+- **Bundle integrity.** `python3 scripts/build_bundle.py` decode-count unchanged; no WebGPU/WASM
+  symbols *executed* in `dist/index.html`.
+
+### Risks
+
+- **Two streaming engines drift.** Mitigation: the shared surface is *data only* (model + event stream
+  + metadata + chrome); both are pinned to the same `core.c` oracle; the engine-independence assert
+  keeps the boundary honest.
+- **SwiftShader O(n²) snapshot cost.** Use the one-dispatch settle (huge `dt`) so verification stays
+  accumulate + 1 spring + 1 skyline. Real Apple GPU: trivial at 60 fps.
+- **Headless device-loss.** Keep **all** per-frame readback off the loop; the only `mapAsync` calls are
+  the one-shot verify/capture hooks and the idle reconciliation. The `!isHeadless()` canvas gate stays.
+- **Frontier-size bound** (`MAX_FRONT`, GPU staircase). Clamp the compact `atomicAdd`; assert in the
+  verify hook.

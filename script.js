@@ -3252,6 +3252,260 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(i.fill.rgb, i.fill.a * aa);
 }`;
 
+// ═════════════════════════════════════════════════════════════════════════════
+// Phase 5 — the `gpuStreaming` ENGINE: GPU spring motion + GPU Pareto skyline +
+// a fully-GPU staircase (port of poc-webgpu-spring/). This is a SECOND, explicit
+// streaming engine, selected by ?renderer=webgpu&gpustream=1. The shipped Phase-4
+// path (?renderer=webgpu alone) is a HYBRID: GPU accumulates the cloud but the JS
+// incremental frontier stays authoritative and the staircase is SVG. Phase 5 moves
+// the WHOLE picture onto the GPU — positions glide (spring), the frontier is
+// recomputed on the GPU each frame (skyline), and the red staircase is built and
+// drawn entirely on the GPU (compact→rank-sort→emit→drawIndirect). The CPU keeps
+// the cheap incremental frontier ONLY to feed DOM/interaction (cards, quadtree,
+// labels); it no longer drives the GPU picture. Full design + the "why two engines,
+// not a hybrid" rationale: docs/webgpu-main-app-integration-design.md §"Phase 5".
+//
+// The frame graph (one command encoder; separate compute passes serialize):
+//   accumulate (Phase-4, reused) → spring → skyline → reset/compact/ranksort/emit
+//   → render: spring-cloud (vertex-pull from pos[]) + staircase via drawIndirect.
+//
+// MINIMIZING CPU↔GPU TRAFFIC (the design's core question): the event stream is
+// uploaded ONCE (uploadEvtStream, reused from Phase 4); per frame only tiny
+// uniforms cross the bus ({lo,count} window + {dt,omega} spring), and there is
+// ZERO per-frame GPU→CPU readback (a per-frame mapAsync is the documented headless
+// device-loss trigger). The frontier/positions are read back ONCE, only in the
+// __bl2d_verify* hooks, never in the render loop.
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Frontier-size bound for the GPU staircase scratch buffers (matches the POC's
+// MAX_FRONT). The compact pass guards writes against this; the verify hook asserts
+// the real frontier never approaches it (this dataset's all-time frontier is ~2).
+const WEBGPU_MAX_FRONT = 2048;
+
+// Spring stiffness ω (rad/s): ~0.3 s critically-damped settle, matching the POC. Higher
+// ⇒ snappier; the integrator is stable for any value/Δt.
+const WEBGPU_SPRING_OMEGA = 12;
+
+// WGSL (compute): critically-damped spring. Glides pos[] toward the integer counters
+// (xcount,ycount) — which Phase-4's accumulate already maintains — with NO overshoot,
+// using the unconditionally-stable polynomial-e integrator (Game Programming Gems 4 /
+// SmoothDamp). Derivation: the offset (x−target) obeys x'' + 2ζω·x' + ω²(x−target)=0;
+// at the critical ratio ζ=1 there is no overshoot, and replacing the exact decay e^{−ωΔt}
+// with the polynomial 1/(1+wd+½wd²+…) keeps it in (0,1] for ANY Δt, so a frame-time spike
+// can't blow it up. The counters are declared atomic for accumulate; here there are no
+// concurrent writers, so we bind the SAME buffers through a plain read-only array<u32> view
+// (a well-defined non-atomic read of atomic storage).
+const WEBGPU_SPRING_WGSL = `
+struct Spring { dt: f32, omega: f32, n: u32, _pad: u32 };
+@group(0) @binding(0) var<uniform>             S:   Spring;
+@group(0) @binding(1) var<storage, read>       hr:  array<u32>;        // target X (the accumulated counter)
+@group(0) @binding(2) var<storage, read>       sb:  array<u32>;        // target Y
+@group(0) @binding(3) var<storage, read_write> pos: array<vec2<f32>>;  // rendered position (data units)
+@group(0) @binding(4) var<storage, read_write> vel: array<vec2<f32>>;  // motion state
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= S.n) { return; }
+  let tgt = vec2<f32>(f32(hr[i]), f32(sb[i]));   // 'target' is reserved in WGSL → tgt
+  let x = pos[i];
+  let v = vel[i];
+  let wd = S.omega * S.dt;
+  let e  = 1.0 / (1.0 + wd + 0.5*wd*wd + (1.0/6.0)*wd*wd*wd + (1.0/24.0)*wd*wd*wd*wd);
+  let change = x - tgt;
+  let temp   = (v + S.omega * change) * S.dt;
+  pos[i] = tgt + (change + temp) * e;            // decays toward target, no overshoot
+  vel[i] = (v - S.omega * temp) * e;
+}`;
+
+// WGSL (compute): per-frame GPU Pareto skyline. onFront[i]=1 iff no j STRICTLY dominates
+// pos[i] (pj ≥ pi on both axes, strictly greater on one). Brute-force O(n²) over the
+// smoothed positions — n≈11k ⇒ ~124M comparisons/frame, sub-ms on real hardware. We use
+// brute force (not spatial tiling) because tiling's "influence is local" premise is FALSE
+// for Pareto domination: one high point dominates an entire lower-left quadrant spanning
+// arbitrarily many tiles. Same strict tie-break as core.c's verify_career oracle, so settled
+// positions (pos ≈ integer) reproduce the CPU frontier exactly. The (0,0) "no events yet"
+// players are dominated by everyone ⇒ onFront=0 ⇒ not drawn as frontier (matches the cloud's
+// (0,0) drop).
+const WEBGPU_SKYLINE_WGSL = `
+struct Spring { dt: f32, omega: f32, n: u32, _pad: u32 };
+@group(0) @binding(0) var<uniform>             S:       Spring;
+@group(0) @binding(1) var<storage, read_write> onFront: array<u32>;
+@group(0) @binding(2) var<storage, read>       pos:     array<vec2<f32>>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= S.n) { return; }
+  let pi = pos[i];
+  if (pi.x == 0.0 && pi.y == 0.0) { onFront[i] = 0u; return; }   // no events yet → off-front
+  var dom = 0u;
+  for (var j = 0u; j < S.n; j = j + 1u) {
+    let pj = pos[j];
+    if (pj.x >= pi.x && pj.y >= pi.y && (pj.x > pi.x || pj.y > pi.y)) { dom = 1u; break; }
+  }
+  onFront[i] = select(1u, 0u, dom == 1u);
+}`;
+
+// WGSL (compute): the fully-GPU staircase — three @compute entry points in one module,
+// sharing one (superset) bind-group layout. WHY fully-GPU (vs the Vulkan twin's cheap CPU
+// staircase): WebGPU can't read pos[]/onFront[] back per frame (async mapAsync = the headless
+// device-loss trigger), so we turn onFront[] into an ordered line-strip + a GPU-written draw
+// count without ever touching the CPU. The frontier size K is tiny (≤ WEBGPU_MAX_FRONT):
+//   1. compact  — one thread/player; append on-front ids into frontIdx[0..K), K via atomicAdd.
+//   2. ranksort — one thread/frontier-slot; O(K²) rank (count smaller-x, ties by index),
+//                 scatter pos into frontSorted[rank]. Trivial at this K.
+//   3. emit     — one thread/sorted-slot; write the two step vertices (corner + vertical drop);
+//                 thread 0 writes the left cap and indirect.vertexCount = 1 + 2K.
+// Separate compute passes in one encoder serialize, so each pass sees the prior's writes. The
+// host resets count→0 and indirect→{0,1,0,0} each frame, so K==0 draws nothing.
+const WEBGPU_STAIRCASE_WGSL = `
+const MAX_FRONT : u32 = ${WEBGPU_MAX_FRONT}u;
+struct Spring   { dt: f32, omega: f32, n: u32, _pad: u32 };
+struct DrawArgs { vertexCount: u32, instanceCount: u32, firstVertex: u32, firstInstance: u32 };
+@group(0) @binding(0) var<uniform>             S:           Spring;
+@group(0) @binding(1) var<storage, read>       onFront:     array<u32>;
+@group(0) @binding(2) var<storage, read>       pos:         array<vec2<f32>>;
+@group(0) @binding(3) var<storage, read_write> frontIdx:    array<u32>;
+@group(0) @binding(4) var<storage, read_write> frontSorted: array<vec2<f32>>;
+@group(0) @binding(5) var<storage, read_write> count:       array<atomic<u32>>;
+@group(0) @binding(6) var<storage, read_write> staircase:   array<vec2<f32>>;
+@group(0) @binding(7) var<storage, read_write> indirect:    DrawArgs;
+@compute @workgroup_size(64)
+fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= S.n) { return; }
+  if (onFront[i] != 0u) {
+    let k = atomicAdd(&count[0], 1u);
+    if (k < MAX_FRONT) { frontIdx[k] = i; }
+  }
+}
+@compute @workgroup_size(64)
+fn ranksort(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let kk = gid.x;
+  let K = atomicLoad(&count[0]);
+  if (kk >= K) { return; }
+  let p  = frontIdx[kk];
+  let pp = pos[p];
+  var rank = 0u;
+  for (var j = 0u; j < K; j = j + 1u) {
+    let q  = frontIdx[j];
+    let qx = pos[q].x;
+    if (qx < pp.x || (qx == pp.x && q < p)) { rank = rank + 1u; }
+  }
+  frontSorted[rank] = pp;
+}
+@compute @workgroup_size(64)
+fn emit(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let r = gid.x;
+  let K = atomicLoad(&count[0]);
+  if (r >= K) { return; }
+  if (r == 0u) {
+    staircase[0] = vec2<f32>(0.0, frontSorted[0].y);   // left cap on the y-axis
+    indirect.vertexCount   = 1u + 2u * K;
+    indirect.instanceCount = 1u;
+    indirect.firstVertex   = 0u;
+    indirect.firstInstance = 0u;
+  }
+  let here = frontSorted[r];
+  let next = r + 1u;
+  let hasNext = next < K;
+  let safe = select(0u, next, hasNext);
+  let dropY = select(0.0, frontSorted[safe].y, hasNext);   // last point drops to the x-axis
+  staircase[1u + 2u*r]      = here;
+  staircase[1u + 2u*r + 1u] = vec2<f32>(here.x, dropY);
+}`;
+
+// WGSL (render): the spring CLOUD. Like WEBGPU_EVTCLOUD_WGSL but vertex-pulls the smoothed
+// vec2 pos[] (not the raw u32 counters) and reads onFront[] so the GPU draws the frontier
+// emphasis itself (bigger radius + white ring) — no CPU frontier dots in this engine. To keep
+// the frontier dots strictly ON TOP of the cloud (instanced draw order ≠ depth), present()
+// draws this pipeline TWICE with two bind groups differing only in `frontierPass`: pass 0 draws
+// the non-front cloud (front instances degenerate), pass 1 draws only the front dots over it.
+// Coordinate mapping is identical to the Phase-4 cloud (slope/intercept = the D3 linear scale),
+// so the GPU picture lands pixel-for-pixel on the SVG axes.
+const WEBGPU_SPRINGCLOUD_WGSL = `
+struct S { slopeX: f32, interceptX: f32, slopeY: f32, interceptY: f32, vpX: f32, vpY: f32,
+           radius: f32, alpha: f32, frontierRadius: f32, ring: f32, frontierPass: f32, _pad: f32 };
+@group(0) @binding(0) var<uniform> u: S;
+@group(0) @binding(1) var<storage, read> pos:     array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> col:     array<u32>;   // packed RGBA8 era colour per player
+@group(0) @binding(3) var<storage, read> onFront: array<u32>;
+struct VSOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) off: vec2<f32>,
+  @location(1) @interpolate(flat) fill: vec4<f32>,
+  @location(2) @interpolate(flat) stroke: vec4<f32>,
+  @location(3) @interpolate(flat) radius: f32,
+  @location(4) @interpolate(flat) ring: f32,
+};
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(-1.0,1.0),
+  vec2<f32>(-1.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>( 1.0,1.0));
+fn unpack(c: u32) -> vec4<f32> {
+  return vec4<f32>(f32(c & 0xffu), f32((c >> 8u) & 0xffu), f32((c >> 16u) & 0xffu), f32((c >> 24u) & 0xffu)) / 255.0;
+}
+fn degenerate() -> VSOut {
+  var o: VSOut;
+  o.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);   // outside the clip cube → discarded
+  o.off = vec2<f32>(0.0); o.fill = vec4<f32>(0.0); o.stroke = vec4<f32>(0.0); o.radius = 0.0; o.ring = 0.0;
+  return o;
+}
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  let p = pos[ii];
+  if (p.x == 0.0 && p.y == 0.0) { return degenerate(); }      // no events yet → drop
+  let front = onFront[ii] != 0u;
+  if (u.frontierPass > 0.5 && !front) { return degenerate(); } // front pass: only frontier dots
+  if (u.frontierPass < 0.5 &&  front) { return degenerate(); } // cloud pass: skip frontier dots
+  let r    = select(u.radius, u.frontierRadius, front);
+  let ring = select(0.0, u.ring, front);
+  let ext  = r + ring;
+  let px = u.interceptX + u.slopeX * p.x;
+  let py = u.interceptY + u.slopeY * p.y;
+  let cx = px / u.vpX * 2.0 - 1.0;
+  let cy = 1.0 - py / u.vpY * 2.0;            // pixel-down → NDC-up
+  let corner = C[vi];
+  var o: VSOut;
+  o.pos = vec4<f32>(cx + corner.x * ext / u.vpX * 2.0, cy + corner.y * ext / u.vpY * 2.0, 0.0, 1.0);
+  o.off = corner * ext;
+  o.radius = r; o.ring = ring;
+  o.fill = vec4<f32>(unpack(col[ii]).rgb, select(u.alpha, 1.0, front));  // frontier dots are opaque
+  o.stroke = vec4<f32>(1.0, 1.0, 1.0, 1.0);                              // white ring
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let dist = length(i.off);
+  let outer = i.radius + i.ring * 0.5;
+  let aa = 1.0 - smoothstep(outer - 0.75, outer + 0.75, dist);
+  if (aa <= 0.0) { discard; }
+  var col: vec4<f32>;
+  if (i.ring > 0.0 && dist > i.radius - i.ring * 0.5) { col = i.stroke; }
+  else { col = i.fill; }
+  return vec4<f32>(col.rgb, col.a * aa);
+}`;
+
+// WGSL (render): the GPU staircase line. Vertex-pulls the staircase[] vertices the emit pass
+// wrote (in data units), maps them with the SAME slope/intercept as the cloud so the red step
+// line sits exactly on the axes, and draws them as a line-strip via drawIndirect — the vertex
+// count came from the GPU (emit wrote indirect.vertexCount), never plumbed through JS. Reuses
+// the spring-cloud's S uniform (only the first six scale fields matter here).
+const WEBGPU_STAIRLINE_WGSL = `
+struct S { slopeX: f32, interceptX: f32, slopeY: f32, interceptY: f32, vpX: f32, vpY: f32,
+           radius: f32, alpha: f32, frontierRadius: f32, ring: f32, frontierPass: f32, _pad: f32 };
+@group(0) @binding(0) var<uniform> u: S;
+@group(0) @binding(1) var<storage, read> staircase: array<vec2<f32>>;
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+  let p = staircase[vi];
+  let px = u.interceptX + u.slopeX * p.x;
+  let py = u.interceptY + u.slopeY * p.y;
+  return vec4<f32>(px / u.vpX * 2.0 - 1.0, 1.0 - py / u.vpY * 2.0, 0.0, 1.0);
+}
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+  return vec4<f32>(0.85, 0.12, 0.20, 1.0);   // MLB red — the frontier staircase
+}`;
+
 // WebGPURenderer — the experimental ?renderer=webgpu backend (a learning/headroom
 // track; never the default, gated so it can never regress production). Implements the
 // same PointRenderer surface as Canvas2DRenderer but accumulates each draw* call into a
@@ -3277,6 +3531,12 @@ class WebGPURenderer {
         // first eligible frame uploads the event stream via uploadEvtStream(); see the
         // WEBGPU_ACCUM_WGSL / WEBGPU_EVTCLOUD_WGSL block above for the why.
         this.evt = null;
+        // Phase-5 gpuStreaming engine: ?renderer=webgpu&gpustream=1 turns the hybrid
+        // Phase-4 cloud into the FULL-GPU pipeline (spring + skyline + GPU staircase).
+        // Without the flag this stays the shipped Phase-4 hybrid. Explicit, opt-in, never
+        // the default. See docs/webgpu-main-app-integration-design.md §"Phase 5".
+        this.springMode = new URLSearchParams(location.search).has("gpustream");
+        this.lastSpringT = 0;   // wall-clock of the previous spring frame (for dt)
     }
     get dpr() { return this.layers?.dpr || 1; }
     get bgCanvas() { return this.canvas; }   // truthy → drawScatterPlot's fg-gated blocks run
@@ -3348,9 +3608,60 @@ class WebGPURenderer {
             fragment: { module: cloudMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
             primitive: { topology: "triangle-list" } });
 
+        // ── Phase-5 gpuStreaming pipelines (only built when ?gpustream=1) ──────────
+        // Skipped entirely in the shipped Phase-4 hybrid so it carries zero extra cost.
+        if (this.springMode) this._initSpring(dev, blend);
+
         // clear colour = the chart background (transparent so the page/SVG shows through;
         // dots blend over it). Premultiplied alpha mode → clear to 0.
         this.clearValue = { r: 0, g: 0, b: 0, a: 0 };
+    }
+
+    // Build the full-GPU streaming pipelines: spring + skyline (compute), the 3-entry-point
+    // GPU staircase (compute), the spring cloud + staircase line (render). Each compute pass
+    // gets its own bind-group layout (it binds different buffers); the staircase's three
+    // entry points SHARE one superset layout (a pass using a subset of the bindings is legal).
+    _initSpring(dev, blend) {
+        const C = GPUShaderStage.COMPUTE, V = GPUShaderStage.VERTEX;
+        const ro = (b, vis) => ({ binding: b, visibility: vis, buffer: { type: "read-only-storage" } });
+        const rw = (b, vis) => ({ binding: b, visibility: vis, buffer: { type: "storage" } });
+        const un = (b, vis) => ({ binding: b, visibility: vis, buffer: { type: "uniform" } });
+        const mkPipe = (code, layout, entry) => dev.createComputePipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [layout] }),
+            compute: { module: dev.createShaderModule({ code }), entryPoint: entry } });
+
+        // spring: {uSpring, hr ro, sb ro, pos rw, vel rw}
+        this.springBgl = dev.createBindGroupLayout({ entries: [
+            un(0, C), ro(1, C), ro(2, C), rw(3, C), rw(4, C) ] });
+        this.pSpring = mkPipe(WEBGPU_SPRING_WGSL, this.springBgl, "main");
+        // skyline: {uSpring, onFront rw, pos ro}
+        this.skylineBgl = dev.createBindGroupLayout({ entries: [ un(0, C), rw(1, C), ro(2, C) ] });
+        this.pSkyline = mkPipe(WEBGPU_SKYLINE_WGSL, this.skylineBgl, "main");
+        // staircase (shared layout for compact/ranksort/emit):
+        //   {uSpring, onFront ro, pos ro, frontIdx rw, frontSorted rw, count rw, staircase rw, indirect rw}
+        this.stairBgl = dev.createBindGroupLayout({ entries: [
+            un(0, C), ro(1, C), ro(2, C), rw(3, C), rw(4, C), rw(5, C), rw(6, C), rw(7, C) ] });
+        const stairLayout = dev.createPipelineLayout({ bindGroupLayouts: [this.stairBgl] });
+        const stairMod = dev.createShaderModule({ code: WEBGPU_STAIRCASE_WGSL });
+        const mkStair = (entry) => dev.createComputePipeline({ layout: stairLayout, compute: { module: stairMod, entryPoint: entry } });
+        this.pStairCompact = mkStair("compact");
+        this.pStairRanksort = mkStair("ranksort");
+        this.pStairEmit = mkStair("emit");
+        // spring cloud (render): {uSpringScale, pos ro, col ro, onFront ro}
+        this.springCloudBgl = dev.createBindGroupLayout({ entries: [
+            un(0, V), ro(1, V), ro(2, V), ro(3, V) ] });
+        this.pSpringCloud = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.springCloudBgl] }),
+            vertex: { module: dev.createShaderModule({ code: WEBGPU_SPRINGCLOUD_WGSL }), entryPoint: "vs" },
+            fragment: { module: dev.createShaderModule({ code: WEBGPU_SPRINGCLOUD_WGSL }), entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+        // staircase line (render, line-strip via drawIndirect): {uSpringScale, staircase ro}
+        this.stairLineBgl = dev.createBindGroupLayout({ entries: [ un(0, V), ro(1, V) ] });
+        this.pStairLine = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.stairLineBgl] }),
+            vertex: { module: dev.createShaderModule({ code: WEBGPU_STAIRLINE_WGSL }), entryPoint: "vs" },
+            fragment: { module: dev.createShaderModule({ code: WEBGPU_STAIRLINE_WGSL }), entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "line-strip" } });
     }
 
     // Lazily create + size the single canvas (same .plot-canvas slot as the 2D layers)
@@ -3536,7 +3847,8 @@ class WebGPURenderer {
                 bEvents, bX, bY, bColor, uWin, uScale, bgAccum, bgCloud,
                 debut, colorTheme: null, zeros: new Uint32Array(players),
                 gpuApplied: null,   // how many stream events the counters reflect (null = none yet)
-                pending: null, failed: false };
+                pending: null, failed: false, spring: null };
+            if (this.springMode) this._initSpringBuffers(model, players);
             this._refreshEvtColors(model);
             return true;
         } catch (e) {
@@ -3544,6 +3856,45 @@ class WebGPURenderer {
             this._destroyEvt();
             return false;
         }
+    }
+
+    // Allocate the Phase-5 full-GPU buffers + bind groups (only under ?gpustream=1). The
+    // spring TARGET is the Phase-4 counters bX/bY (bound here read-only); pos/vel are the
+    // smoothed motion state; onFront + the staircase scratch hold the GPU frontier. All are
+    // GPU-resident — nothing here re-uploads per frame; the live loop only writes the tiny
+    // uSpring/uSpringScale uniforms (see springStep/present).
+    _initSpringBuffers(model, players) {
+        const dev = this.device, BU = GPUBufferUsage;
+        const e = this.evt;
+        const pos2 = Math.max(16, players * 8);                 // vec2<f32> per player
+        const stor = BU.STORAGE | BU.COPY_DST;
+        const bPos = dev.createBuffer({ size: pos2, usage: stor | BU.COPY_SRC });   // COPY_SRC: verify readback
+        const bVel = dev.createBuffer({ size: pos2, usage: stor });
+        const bOnFront = dev.createBuffer({ size: Math.max(16, players * 4), usage: stor | BU.COPY_SRC });
+        // GPU-staircase scratch (frontier size bounded by WEBGPU_MAX_FRONT).
+        const MF = WEBGPU_MAX_FRONT;
+        const bFrontIdx = dev.createBuffer({ size: MF * 4, usage: stor });
+        const bFrontSorted = dev.createBuffer({ size: MF * 8, usage: stor });
+        const bCount = dev.createBuffer({ size: 16, usage: stor | BU.COPY_SRC });    // atomic K (reset each frame; COPY_SRC for verify)
+        const bStaircase = dev.createBuffer({ size: (1 + 2 * MF) * 8, usage: stor | BU.COPY_SRC });
+        const bIndirect = dev.createBuffer({ size: 16, usage: BU.INDIRECT | BU.STORAGE | BU.COPY_DST | BU.COPY_SRC });
+        // small per-frame uniforms (the only things that cross the bus each frame).
+        const uSpring = dev.createBuffer({ size: 16, usage: BU.UNIFORM | BU.COPY_DST });
+        const uSpringScale0 = dev.createBuffer({ size: 48, usage: BU.UNIFORM | BU.COPY_DST });
+        const uSpringScale1 = dev.createBuffer({ size: 48, usage: BU.UNIFORM | BU.COPY_DST });
+        const bg = (layout, buffers) => dev.createBindGroup({ layout,
+            entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })) });
+        e.spring = {
+            bPos, bVel, bOnFront, bFrontIdx, bFrontSorted, bCount, bStaircase, bIndirect,
+            uSpring, uSpringScale0, uSpringScale1,
+            zerosVec2: new Float32Array(players * 2),
+            bgSpring:       bg(this.springBgl,      [uSpring, e.bX, e.bY, bPos, bVel]),
+            bgSkyline:      bg(this.skylineBgl,     [uSpring, bOnFront, bPos]),
+            bgStair:        bg(this.stairBgl,       [uSpring, bOnFront, bPos, bFrontIdx, bFrontSorted, bCount, bStaircase, bIndirect]),
+            bgSpringCloud0: bg(this.springCloudBgl, [uSpringScale0, bPos, e.bColor, bOnFront]),
+            bgSpringCloud1: bg(this.springCloudBgl, [uSpringScale1, bPos, e.bColor, bOnFront]),
+            bgStairLine:    bg(this.stairLineBgl,   [uSpringScale0, bStaircase]),
+        };
     }
 
     // Pack each player's era colour into the col[] buffer. Era colours are per-theme
@@ -3579,7 +3930,8 @@ class WebGPURenderer {
         const dev = this.device;
         const target = win.applied >>> 0;
         let lo, count;
-        if (win.zero || e.gpuApplied == null || e.gpuApplied > target) {
+        const didZero = win.zero || e.gpuApplied == null || e.gpuApplied > target;
+        if (didZero) {
             dev.queue.writeBuffer(e.bX, 0, e.zeros);   // restart the running sums at 0
             dev.queue.writeBuffer(e.bY, 0, e.zeros);
             lo = 0; count = target;
@@ -3591,7 +3943,37 @@ class WebGPURenderer {
         dev.queue.writeBuffer(e.uScale, 0, new Float32Array([
             scales.slopeX, scales.interceptX, scales.slopeY, scales.interceptY,
             scales.vpX, scales.vpY, scales.radius, scales.alpha ]));
-        e.pending = { count, instanceCount };
+        e.pending = { count, instanceCount, spring: false };
+        // ── Phase-5: queue the spring/skyline/staircase uniforms for this frame ──────
+        // Only the tiny uniforms cross the bus here (dt/omega + the axis scale). On a
+        // wrap/backward-seek we ALSO zero pos/vel so the cloud snaps back to the origin
+        // for a clean replay. The staircase scratch (count, indirect) is reset every
+        // frame so a frame with K==0 draws nothing.
+        if (this.springMode && e.spring) {
+            const s = e.spring;
+            const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
+            let dt = this.lastSpringT ? (now - this.lastSpringT) / 1000 : 1 / 60;
+            this.lastSpringT = now;
+            if (!isFinite(dt) || dt <= 0) dt = 1 / 60;
+            dt = Math.min(dt, 0.05);                    // clamp a stall/tab-switch spike
+            if (didZero) {
+                dev.queue.writeBuffer(s.bPos, 0, s.zerosVec2);
+                dev.queue.writeBuffer(s.bVel, 0, s.zerosVec2);
+            }
+            dev.queue.writeBuffer(s.bCount, 0, new Uint32Array([0]));
+            dev.queue.writeBuffer(s.bIndirect, 0, new Uint32Array([0, 1, 0, 0]));
+            const uSpring = new ArrayBuffer(16);
+            new Float32Array(uSpring, 0, 2).set([dt, WEBGPU_SPRING_OMEGA]);
+            new Uint32Array(uSpring, 8, 2).set([e.players, 0]);
+            dev.queue.writeBuffer(s.uSpring, 0, uSpring);
+            // The frontier dots inherit the cloud's era colour but are drawn bigger + ringed.
+            const fr = Math.max((scales.radius || 2.5) + 3, 6), ring = 1.5;
+            const base = [scales.slopeX, scales.interceptX, scales.slopeY, scales.interceptY,
+                scales.vpX, scales.vpY, scales.radius, scales.alpha, fr, ring];
+            dev.queue.writeBuffer(s.uSpringScale0, 0, new Float32Array([...base, 0, 0]));  // cloud pass
+            dev.queue.writeBuffer(s.uSpringScale1, 0, new Float32Array([...base, 1, 0]));  // frontier pass
+            e.pending.spring = true;
+        }
     }
 
     // Read the per-player counters back to the CPU (buffer→buffer copy → MAP_READ). Used
@@ -3614,9 +3996,80 @@ class WebGPURenderer {
         return { x, y, players: e.players };
     }
 
+    // Generic one-shot buffer→CPU readbacks (verify hooks ONLY — never the render loop).
+    async _readback(buf, byteLen, Ctor) {
+        const st = this.device.createBuffer({ size: Math.max(16, byteLen), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        const enc = this.device.createCommandEncoder();
+        enc.copyBufferToBuffer(buf, 0, st, 0, byteLen);
+        this.device.queue.submit([enc.finish()]);
+        await st.mapAsync(GPUMapMode.READ);
+        const out = new Ctor(st.getMappedRange().slice(0, byteLen));
+        st.unmap(); st.destroy();
+        return out;
+    }
+
+    // ── Phase-5 verification (the gpuStreaming oracle; one-shot, never in renderAt) ──────
+    // Mirrors poc-webgpu-spring's verify_career. Drives the GPU to END-OF-HISTORY and settles
+    // the springs in ONE huge-Δt step (e≈0 ⇒ pos snaps to the integer target — the gliding is a
+    // live-only effect, the END state is what's verified), runs the GPU skyline + staircase, then
+    // reads pos/onFront/counters back ONCE and compares to a CPU brute-force Pareto over the
+    // integer counters (same strict tie-break as the shader). Returns the two invariants:
+    //   springMis  — settled pos != integer counter (±0.5) ⇒ the spring integrator diverged.
+    //   skylineMis — GPU onFront != CPU brute-force ⇒ the GPU frontier kernel is wrong.
+    async verifySpring() {
+        const e = this.evt, s = e && e.spring;
+        if (!e || !s) return null;
+        const dev = this.device, n = e.players;
+        // 1. one dedicated encoder: zero state, accumulate ALL events, settle, skyline, staircase.
+        dev.queue.writeBuffer(e.bX, 0, e.zeros);
+        dev.queue.writeBuffer(e.bY, 0, e.zeros);
+        dev.queue.writeBuffer(s.bPos, 0, s.zerosVec2);
+        dev.queue.writeBuffer(s.bVel, 0, s.zerosVec2);
+        dev.queue.writeBuffer(s.bCount, 0, new Uint32Array([0]));
+        dev.queue.writeBuffer(s.bIndirect, 0, new Uint32Array([0, 1, 0, 0]));
+        dev.queue.writeBuffer(e.uWin, 0, new Uint32Array([0, e.streamN, 0, 0]));
+        const us = new ArrayBuffer(16);
+        new Float32Array(us, 0, 2).set([1000, WEBGPU_SPRING_OMEGA]);   // huge dt ⇒ pos snaps to target
+        new Uint32Array(us, 8, 2).set([n, 0]);
+        dev.queue.writeBuffer(s.uSpring, 0, us);
+        const enc = dev.createCommandEncoder();
+        const pass = (pipe, bg, wg) => { const cp = enc.beginComputePass(); cp.setPipeline(pipe); cp.setBindGroup(0, bg); cp.dispatchWorkgroups(wg); cp.end(); };
+        pass(this.pAccum, e.bgAccum, Math.ceil(e.streamN / 64));
+        const wgN = Math.ceil(n / 64), wgK = Math.ceil(WEBGPU_MAX_FRONT / 64);
+        pass(this.pSpring, s.bgSpring, wgN);
+        pass(this.pSkyline, s.bgSkyline, wgN);
+        pass(this.pStairCompact, s.bgStair, wgN);
+        pass(this.pStairRanksort, s.bgStair, wgK);
+        pass(this.pStairEmit, s.bgStair, wgK);
+        dev.queue.submit([enc.finish()]);
+        e.gpuApplied = e.streamN;   // keep live bookkeeping consistent after the forced accumulate
+        // 2. read back once.
+        const x = await this._readback(e.bX, n * 4, Uint32Array);
+        const y = await this._readback(e.bY, n * 4, Uint32Array);
+        const pos = await this._readback(s.bPos, n * 8, Float32Array);
+        const onFront = await this._readback(s.bOnFront, n * 4, Uint32Array);
+        // 3. spring convergence + 4. skyline vs CPU brute force.
+        let springMis = 0, skylineMis = 0, frontierSize = 0, maxX = 0, maxY = 0;
+        for (let i = 0; i < n; i++) { if (x[i] > maxX) maxX = x[i]; if (y[i] > maxY) maxY = y[i]; }
+        for (let i = 0; i < n; i++) {
+            if (Math.abs(pos[i * 2] - x[i]) > 0.5 || Math.abs(pos[i * 2 + 1] - y[i]) > 0.5) springMis++;
+            const xi = x[i], yi = y[i];
+            let dom = (xi === 0 && yi === 0) ? 1 : 0;     // origin players are off-front (match the shader)
+            if (!dom) for (let j = 0; j < n; j++) { if (x[j] >= xi && y[j] >= yi && (x[j] > xi || y[j] > yi)) { dom = 1; break; } }
+            const cpuFront = dom ? 0 : 1;
+            if ((onFront[i] ? 1 : 0) !== cpuFront) skylineMis++;
+            if (cpuFront) frontierSize++;
+        }
+        return { springMis, skylineMis, frontierSize, maxX, maxY, x, y, pos, onFront, players: n };
+    }
+
     _destroyEvt() {
         const e = this.evt; if (!e) return;
         for (const k of ["bEvents", "bX", "bY", "bColor", "uWin", "uScale"]) e[k]?.destroy();
+        if (e.spring) {
+            for (const k of ["bPos", "bVel", "bOnFront", "bFrontIdx", "bFrontSorted", "bCount",
+                "bStaircase", "bIndirect", "uSpring", "uSpringScale0", "uSpringScale1"]) e.spring[k]?.destroy();
+        }
         this.evt = null;
     }
 
@@ -3642,15 +4095,39 @@ class WebGPURenderer {
                 cp.end();
             } catch (e2) { evt.failed = true; console.warn("[webgpu] accumulate pass failed → CPU cloud:", e2.message); }
         }
+        // ── Phase-5 compute passes (the gpuStreaming frame graph) ───────────────────
+        // Run EVERY gpu frame (even count==0) so points keep gliding and the frontier
+        // updates. Separate compute passes in one encoder serialize, so spring sees the
+        // accumulate writes, skyline sees spring's pos, and the staircase passes chain
+        // compact→ranksort→emit. ranksort/emit over-dispatch to MAX_FRONT and self-guard
+        // against the GPU-side K (the host can't know K without a readback).
+        const springOn = gpuCloud && !evt.failed && evt.pending.spring && evt.spring;
+        if (springOn) {
+            try {
+                const s = evt.spring;
+                const wgN = Math.ceil(evt.players / 64), wgK = Math.ceil(WEBGPU_MAX_FRONT / 64);
+                const pass = (pipe, bg, wg) => { const cp = enc.beginComputePass(); cp.setPipeline(pipe); cp.setBindGroup(0, bg); cp.dispatchWorkgroups(wg); cp.end(); };
+                pass(this.pSpring, s.bgSpring, wgN);          // glide pos toward the counters
+                pass(this.pSkyline, s.bgSkyline, wgN);        // onFront = GPU Pareto frontier
+                pass(this.pStairCompact, s.bgStair, wgN);     // gather on-front ids
+                pass(this.pStairRanksort, s.bgStair, wgK);    // rank-sort by x
+                pass(this.pStairEmit, s.bgStair, wgK);        // emit step verts + indirect count
+            } catch (e3) { evt.failed = true; console.warn("[webgpu] spring passes failed → CPU cloud:", e3.message); }
+        }
         const rp = enc.beginRenderPass({ colorAttachments: [{
             view: this.offTex.createView(), clearValue: this.clearValue, loadOp: "clear", storeOp: "store" }] });
         const drawPts = (name) => { if (this.count[name] > 0) { rp.setBindGroup(0, this._bindGroup(this.buf[name])); rp.draw(6, this.count[name]); } };
         rp.setPipeline(this.pPoints); drawPts("bg");
-        // GPU-accumulated cloud sits at the background cloud's layer (behind trails,
-        // heads, and frontier dots). It uses its own pipeline + bind group (it vertex-
-        // pulls from the counters), so we switch pipelines around it. instanceCount =
-        // one quad per player; the vertex shader drops (0,0) players itself.
-        if (gpuCloud && !evt.failed && evt.pending.instanceCount > 0) {
+        // The cloud sits at the background layer (behind trails, heads, frontier dots).
+        // Phase-5 spring path: vertex-pull the SMOOTHED pos[] (pass 0 = non-front cloud);
+        // the frontier dots (pass 1) + the GPU staircase are drawn LAST, on top. Phase-4
+        // hybrid path: the original counter-pull cloud.
+        if (springOn && evt.pending.instanceCount > 0) {
+            rp.setPipeline(this.pSpringCloud);
+            rp.setBindGroup(0, evt.spring.bgSpringCloud0);
+            rp.draw(6, evt.pending.instanceCount);
+            rp.setPipeline(this.pPoints);
+        } else if (gpuCloud && !evt.failed && evt.pending.instanceCount > 0) {
             rp.setPipeline(this.pCloud);
             rp.setBindGroup(0, evt.bgCloud);
             rp.draw(6, evt.pending.instanceCount);
@@ -3658,7 +4135,19 @@ class WebGPURenderer {
         }
         if (this.count.trail > 0) { rp.setPipeline(this.pLine); rp.setBindGroup(0, this._bindGroup(this.buf.trail)); rp.draw(6, this.count.trail); rp.setPipeline(this.pPoints); }
         drawPts("fg");
-        drawPts("frontier");
+        drawPts("frontier");   // Phase-4 hybrid frontier dots (no-op in spring mode — GPU owns them)
+        // Phase-5: frontier dots (pass 1, front-only) + the red staircase via drawIndirect,
+        // both on top of the cloud/heads. The staircase's vertex count was written by the
+        // GPU emit pass into bIndirect — it never round-tripped through JS.
+        if (springOn && evt.pending.instanceCount > 0) {
+            const s = evt.spring;
+            rp.setPipeline(this.pSpringCloud);
+            rp.setBindGroup(0, s.bgSpringCloud1);
+            rp.draw(6, evt.pending.instanceCount);
+            rp.setPipeline(this.pStairLine);
+            rp.setBindGroup(0, s.bgStairLine);
+            rp.drawIndirect(s.bIndirect, 0);
+        }
         rp.end();
         this.device.queue.submit([enc.finish()]);
         if (evt) evt.pending = null;   // consume the request; the next GPU frame re-stashes it
@@ -3835,6 +4324,21 @@ window.__bl2d_gpuCounters = async (names = []) => {
 // Player-name → resident-model index (so a headless probe can read a specific player's
 // GPU counter, e.g. Bonds / Henderson record spot-checks).
 window.__bl2d_evtPlayerIndex = (name) => pbpEvt ? pbpEvt.players.findIndex((p) => p.name === name) : -1;
+
+// Phase-5 gpuStreaming invariant probe (the spring + GPU skyline oracle). Requires
+// ?renderer=webgpu&gpustream=1 and an active .evt-career model. One-shot: drives the GPU to
+// end-of-history, settles, reads back once, and compares to a CPU brute-force frontier.
+// Returns {springMis, skylineMis, frontierSize, maxX, maxY, records{name:{x,y,onFront}}}.
+window.__bl2d_verifySpring = async (names = ["Barry Bonds", "Rickey Henderson"]) => {
+    if (!(pointRenderer instanceof WebGPURenderer) || !pointRenderer.springMode || !pbpEvt) return null;
+    pointRenderer.uploadEvtStream(pbpEvt);
+    const r = await pointRenderer.verifySpring();
+    if (!r) return null;
+    const records = {};
+    for (const nm of names) { const i = pbpEvt.players.findIndex((p) => p.name === nm); if (i >= 0) records[nm] = { x: r.x[i], y: r.y[i], onFront: !!r.onFront[i] }; }
+    return { springMis: r.springMis, skylineMis: r.skylineMis, frontierSize: r.frontierSize, maxX: r.maxX, maxY: r.maxY, players: r.players, records };
+};
+window.__bl2d_springMode = () => pointRenderer instanceof WebGPURenderer && !!pointRenderer.springMode;
 
 function recordPbpFrameTiming(totalMs, modelMs, renderMs, enabled) {
     if (!enabled) return;
@@ -5091,6 +5595,52 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         }
     }
 
+    // ── Optional GPU compute-accumulate cloud gate ──────────────────────────────
+    // When ALL of these hold, the high-cardinality .evt-career cloud is accumulated +
+    // drawn on the GPU (see the WEBGPU_ACCUM_WGSL block) instead of rebuilt on the CPU
+    // each frame. Any miss falls back to the existing CPU instanced cloud with NO visual
+    // change — the gate is a strict subset of the conditions under which the JS
+    // incremental frontier ran, so frontierResult.gpu is guaranteed present when true:
+    //   1. the active backend is WebGPU;
+    //   2. this is the .evt play-by-play CAREER cloud (filters.evt is set only for the
+    //      evt-career path — evt-season omits it; note drawMode is "season" for both,
+    //      so we key off filters.evt, NOT the mode argument);
+    //   3. the resident model matches the active axes;
+    //   4. both axes are counting (non-rate) …
+    //   5. … AND a monotone-nondecreasing linear combination of streamed components, so a
+    //      per-player running sum is exact — single (HR, SB) OR composite (TB, PA), but
+    //      never a stat that can decrease (evtGpuMonotone);
+    //   6. the era colour encoding (the GPU cloud only paints era — others fall back);
+    //   7. no sign inversion (worst-frontier flips the [0,max] mapping);
+    //   8. no bats/country filter (an eligibility mask would desync GPU counters from
+    //      the JS shadow, breaking the counterMis invariant — fall back instead);
+    //   9. a "lite" (playback/scrub) frame only — paused/idle frames keep the CPU cloud
+    //      so hover hit-testing + the quadtree still work on real point objects;
+    //  10. the event stream uploaded OK for this model (idempotent; first frame pays it).
+    // Computed HERE (before the staircase/frontier-dot rendering) because gpuSpring gates
+    // whether those CPU draws are suppressed in favour of the GPU's own frontier output.
+    const gpuCloud = !!(
+        pointRenderer instanceof WebGPURenderer &&
+        filters.evt &&
+        pbpEvt && pbpEvt.xDim === xDim && pbpEvt.yDim === yDim &&
+        !pbpEvt.xs.rate && !pbpEvt.ys.rate &&
+        evtGpuMonotone(pbpEvt).ok &&
+        colorBy === "era" &&
+        xSign === 1 && ySign === 1 && !showWorstFrontier &&
+        bats === "all" && country === "all" &&
+        filters.lite &&
+        frontierResult.gpu &&
+        pointRenderer.uploadEvtStream(pbpEvt)
+    );
+    window.__bl2d_evtGpuCloud = gpuCloud;
+    // Phase-5 gpuStreaming engine active this frame (?gpustream=1 + a GPU cloud frame):
+    // the GPU owns the WHOLE picture — spring-smoothed cloud, the GPU skyline frontier
+    // dots, and the GPU staircase — so we suppress the CPU frontier dots AND the SVG
+    // staircase below (the cheap JS incremental frontier still runs, but only to feed
+    // DOM/interaction: cards, the quadtree hit-test, labels). See §"Phase 5".
+    const gpuSpring = gpuCloud && pointRenderer.springMode;
+    window.__bl2d_gpuSpring = gpuSpring;
+
     // Group-career suppresses the staircase + HV shade: with only a handful of
     // career dots tracing trajectories, the Pareto envelope clutters more than it
     // clarifies — the focus is the trails + heads.
@@ -5115,10 +5665,15 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             .attr("d", "M " + xAnti + "," + yAnti + " L " + line.map(p => p.join(",")).join(" L ") + " Z")
             .style("fill", "url(#hv-shade-grad)");
 
-        g.append("path")
-            .attr("class", "frontier-staircase")
-            .attr("d", "M " + line.map(p => p.join(",")).join(" L "))
-            .style("stroke", showWorstFrontier ? "#8b5cf6" : null);
+        // Under gpuSpring the GPU draws the red staircase itself (drawIndirect), so skip
+        // the SVG line to avoid double-drawing it. The HV shade (a fill from the CPU
+        // frontier, which still runs for interaction) stays — it's behind the cloud.
+        if (!gpuSpring) {
+            g.append("path")
+                .attr("class", "frontier-staircase")
+                .attr("d", "M " + line.map(p => p.join(",")).join(" L "))
+                .style("stroke", showWorstFrontier ? "#8b5cf6" : null);
+        }
     }
 
     // Era-vs-era overlay: the comparison frontier (teal) + its dominated region,
@@ -5235,43 +5790,6 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const cloudOpacity = careerHighlights.size > 0 ? 0.1 : themeCloudOpacity;
     const smoothOpenYear = filters.smooth ? eYear : null;
 
-    // ── Optional GPU compute-accumulate cloud gate ──────────────────────────────
-    // When ALL of these hold, the high-cardinality .evt-career cloud is accumulated +
-    // drawn on the GPU (see the WEBGPU_ACCUM_WGSL block) instead of rebuilt on the CPU
-    // each frame. Any miss falls back to the existing CPU instanced cloud with NO visual
-    // change — the gate is a strict subset of the conditions under which the JS
-    // incremental frontier ran, so frontierResult.gpu is guaranteed present when true:
-    //   1. the active backend is WebGPU;
-    //   2. this is the .evt play-by-play CAREER cloud (filters.evt is set only for the
-    //      evt-career path — evt-season omits it; note drawMode is "season" for both,
-    //      so we key off filters.evt, NOT the mode argument);
-    //   3. the resident model matches the active axes;
-    //   4. both axes are counting (non-rate) …
-    //   5. … AND a monotone-nondecreasing linear combination of streamed components, so a
-    //      per-player running sum is exact — single (HR, SB) OR composite (TB, PA), but
-    //      never a stat that can decrease (evtGpuMonotone);
-    //   6. the era colour encoding (the GPU cloud only paints era — others fall back);
-    //   7. no sign inversion (worst-frontier flips the [0,max] mapping);
-    //   8. no bats/country filter (an eligibility mask would desync GPU counters from
-    //      the JS shadow, breaking the counterMis invariant — fall back instead);
-    //   9. a "lite" (playback/scrub) frame only — paused/idle frames keep the CPU cloud
-    //      so hover hit-testing + the quadtree still work on real point objects;
-    //  10. the event stream uploaded OK for this model (idempotent; first frame pays it).
-    const gpuCloud = !!(
-        pointRenderer instanceof WebGPURenderer &&
-        filters.evt &&
-        pbpEvt && pbpEvt.xDim === xDim && pbpEvt.yDim === yDim &&
-        !pbpEvt.xs.rate && !pbpEvt.ys.rate &&
-        evtGpuMonotone(pbpEvt).ok &&
-        colorBy === "era" &&
-        xSign === 1 && ySign === 1 && !showWorstFrontier &&
-        bats === "all" && country === "all" &&
-        filters.lite &&
-        frontierResult.gpu &&
-        pointRenderer.uploadEvtStream(pbpEvt)
-    );
-    window.__bl2d_evtGpuCloud = gpuCloud;
-
     // .evt: every point's (x,y) moves each frame (cumulative grows), so the whole cloud
     // goes on the redrawn-every-frame foreground; the cached background would freeze it.
     // .bl2p accumulating: completed seasons are static → cache them on the background.
@@ -5380,11 +5898,12 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         strokeWidth: 1.5,
         clear: !filters.groupCareer,               // keep the trails drawn just above
     });
-    if (!filters.groupCareer && pointRenderer.fgCanvas) {
+    if (!filters.groupCareer && pointRenderer.fgCanvas && !gpuSpring) {
         // Frontier dots composite over the fg cloud (no clear). They follow the active
         // Color-by encoding (era / league / bats), same as the cloud — staying distinct
         // via size + the white ring, not a fixed colour, so the encoding isn't
-        // misrepresented; career/worst colours win when set.
+        // misrepresented; career/worst colours win when set. Skipped under gpuSpring —
+        // the GPU skyline draws the frontier dots itself (from onFront[]).
         pointRenderer.drawFrontierDots(special, {
             margin, xScale, yScale, radiusFor,
             fillFor: d => careerHighlights.get(d.playerID) || frontierColor || colorOf(d, colorBy, getMeta),
