@@ -36,11 +36,61 @@ cell, no intra-season motion). All source→format converters are kept so any la
   SO, HBP, SF, SH, GIDP, G. Built 1910–2025 (~13.9 MB total). Verified: round-trips; career
   HR exact (Bonds 762, Ruth 714, Aaron 755, Mays 660; Henderson 296 = our pipeline's value);
   2023 HR date-filtered = 5,868 (exact).
-- [ ] **S1b** — BL2E **replay** pass for runner-attributed **SB, CS, R** (credited to the
-  baserunner / scorer via threaded identities). Needed: SB is the default chart axis.
+- [ ] **S1b** — runner-attributed **SB, CS, R**. ⚠️ **BLOCKED on a source decision** (see
+  Decision 10). The BL2E *replay* approach was built and tested but is **rejected for shipping**:
+  it lands ~0.5–1.5% off the records (Henderson SB 1398 vs 1406; Bonds R 2254 vs 2227) because
+  BL2E does not store substitutions, so a pinch-runner's steal/run is mis-credited to the player
+  they replaced. Must instead read an *exact* source (`plays.csv` `br*_pre`/`run*`, or `.bl2p`'s
+  `b_sb`/`b_cs`/`b_r`). Replay code retained in `build_stat_files.py` as a validated curiosity,
+  not feeding shipped data.
 - [ ] **S2** — Lahman complement (pre-1910 / gaps / full Negro Leagues), season grain.
 - [ ] **S3** — migrate `script.js` off `.evt` onto the shared dim + `stat_*`; remove the old
   `.evt` data and supersede `build_stat_streams.js`. Keep all source→format converters.
+
+## Design decisions (rationale + open items)
+
+Durable record of *why* this layer is shaped as it is. Numbered for reference.
+
+1. **Normalize (shared dimension + per-stat facts).** The old `.evt` re-embedded a full
+   player name dict in *every* stat file (a 20-year player stored 20×). BL2S factors identity
+   into one `stat_players` file; stat files hold only `(gpid, date, count)`. Star schema:
+   one dimension, many fact files.
+2. **Encoding = per-player varint date-deltas** (the `.evt`-style "B"). *Measured*
+   (`statfile_experiment.py`, full corpus): beats columnar-absolute ~2× and gzipped-CSV ~4×
+   on every stat (e.g. HR 337 KB vs 651 vs 832).
+3. **One file per stat; grouping rejected for size.** *Measured*: grouping correlated stats
+   (hit types) saved only ~3%, and grouping uncorrelated stats (BB/SO/HBP) was ~4% *worse*
+   (zero-padding). gzip + per-player grouping already capture the shared-addressing win.
+   Grouping is reserved only for *fetch-count* convenience (e.g. bundling a rate stat's
+   components into one request) — a delivery choice, not a compression one.
+4. **Date key = u16 days since 1910-04-14.** *Verified* against the corpus: span 1910-04-14 →
+   2025-09-28 = 42,171 days, ~64 yr of u16 headroom (good to ~2089). `(yearOffset<<9 |
+   dayOfYear)` is also exactly 16 bits if calendar structure is ever preferred.
+5. **Common `stat_` filename prefix** so the family sorts contiguously in `data/pbp/` instead
+   of scattering among `b*.bl2p.gz` / `e*.bl2e.gz` / `*.evt.gz`.
+6. **Both binary and CSV.** Binary (gzipped, `gpid`-referenced) is the shipped/app artifact;
+   a gzipped per-stat CSV export (`--csv`) is the analysis/portability form (~2.5× the binary).
+7. **Source strategy: Retrosheet primary, Lahman complement.** Retrosheet (→ BL2S) is the
+   fine-grained, date-keyed, *animatable* layer for 1910–2025 (incl. Negro ~1920–48 / Federal
+   1914–15). **Lahman is NOT dropped** — it stays the authoritative season/career source and
+   backfills coverage Retrosheet lacks (pre-1910, gaps, *complete* Negro Leagues) at season
+   grain (one end-of-season cell, no intra-season motion). [S2]
+8. **All source→format converters are kept** (`convert_csv_lahman*`, `build_bundle`,
+   `convert_retrosheet_pbp`, `convert_retrosheet_events`, `build_bl2e_corpus`, `build_stat_files`)
+   so every layer regenerates from raw sources, even as shipped formats change.
+9. **BL2S supersedes `.evt`** (user decision) rather than coexisting — the app's `.evt` read
+   path migrates to the shared dim + `stat_*`, and the old `.evt` data is removed. [S3]
+10. **Batter stats exact from BL2E; runner stats (SB/CS/R) need an exact non-replay source.**
+    Batter-attributed stats (HR/H/BB/SO/…) derive unambiguously from the BL2E `outcome` column
+    and are *verified exact* (Bonds 762, 2023 HR 5,868). Runner-attributed stats can't be
+    replayed exactly from BL2E (Decision in S1b: substitutions aren't stored → pinch-runner
+    mis-credit, ~0.5–1.5% off). **OPEN — pick the exact source:**
+    - **A. re-read `plays.csv`** (`br*_pre` for SB/CS, `run*` for R): exact, full 1910–2025 +
+      Negro/Federal (matches batter-stat coverage), but re-downloads ~500 MB of season files;
+      optionally re-derive *all* stats from `plays.csv` for one clean exact pass.
+    - **B. use committed `.bl2p`** (`b_sb`/`b_cs`/`b_r`, what `.evt` used → Henderson 1,406 exact):
+      no download, but 1920–2025 AL/NL only → *narrower* than the batter stats.
+    Recommendation: **A** (exactness + coverage consistency). Awaiting confirmation.
 
 ## File layout (little-endian, gzipped; common `stat_` prefix)
 

@@ -53,7 +53,15 @@ OUTCOME_STATS = {
     "BB": {3, 4}, "IBB": {4}, "SO": {2}, "HBP": {5}, "SF": {13}, "SH": {12},
 }
 GIDP_FLAG_BIT = 15                           # FLAG_COLS index of 'gdp'
-ALL_STATS = list(OUTCOME_STATS) + ["RBI", "GIDP", "G"]
+# Runner-attributed stats need the game replay (identities threaded through dispositions):
+#   SB/CS flag bits (FLAG_COLS): sb2=1 sb3=2 sbh=3, cs2=4 cs3=5 csh=6 — credited to the
+#   runner on the ORIGINATING base (1B for sb2/cs2, 2B for sb3/cs3, 3B for sbh/csh).
+#   R = a SCORE disposition (code 6), credited to whoever scored (batter or a runner).
+RUNNER_STATS = ["SB", "CS", "R"]
+SB_BITS = {1: 1, 2: 2, 3: 3}                 # base -> flag bit for a steal of base+1
+CS_BITS = {1: 4, 2: 5, 3: 6}
+D_STAY, D_TO1, D_TO2, D_TO3, D_SCORE = 2, 3, 4, 5, 6
+ALL_STATS = list(OUTCOME_STATS) + ["RBI", "GIDP", "G"] + RUNNER_STATS
 
 
 def varint(n):
@@ -90,40 +98,80 @@ def build_player_dim():
 
 
 def aggregate(stats, retro_to_gpid):
-    """One corpus pass -> agg[stat] = {(gpid,gdate): count}."""
+    """One corpus pass (game-by-game, so the runner replay has clean boundaries)
+    -> agg[stat] = {(gpid,gdate): count}."""
     want_outcome = {s: OUTCOME_STATS[s] for s in stats if s in OUTCOME_STATS}
     want_rbi = "RBI" in stats
     want_gidp = "GIDP" in stats
+    want_sb = "SB" in stats; want_cs = "CS" in stats; want_r = "R" in stats
+    want_runner = want_sb or want_cs or want_r
     agg = {s: defaultdict(int) for s in stats if s != "G"}
     gmask = 1 << GIDP_FLAG_BIT
     for path in CORPUS:
         d = decode(path, lite=True)
         base = datetime.date(d.year, 1, 1).toordinal() - 1
-        ev_date = [0] * d.E
+        idx_gpid = [retro_to_gpid.get(rid, -1) for rid, _ in d.players]
+        oc = d.col["outcome"]; bidx = d.col["batterIdx"]; rbi = d.col["rbi"]
+        flags = d.col["flags"]; inning = d.col["inning"]; half = d.col["batTeam"]
+        dB, d1, d2, d3 = (d.col["dispB"], d.col["disp1"], d.col["disp2"], d.col["disp3"])
         for gi, (day, _v, _h, first, _g) in enumerate(d.games):
             end = d.games[gi + 1][3] if gi + 1 < len(d.games) else d.E
             gdate = base + day - EPOCH
+            occ = [None, None, None, None]       # base 1..3 occupant gpid (None = empty)
+            cur_half = None
             for ev in range(first, end):
-                ev_date[ev] = gdate
-        idx_gpid = [retro_to_gpid.get(rid, -1) for rid, _ in d.players]
-        oc = d.col["outcome"]; bidx = d.col["batterIdx"]
-        rbi = d.col["rbi"]; flags = d.col["flags"]
-        for ev in range(d.E):
-            bi = bidx[ev]
-            g = idx_gpid[bi] if bi != 0xFFFF else -1
-            if g < 0:
-                continue
-            code = oc[ev]
-            key = g * 100000 + ev_date[ev]
-            for s, codeset in want_outcome.items():
-                if code in codeset:
-                    agg[s][key] += 1
-            if want_rbi and rbi[ev]:
-                agg["RBI"][key] += rbi[ev]
-            if want_gidp and (flags[ev] & gmask):
-                agg["GIDP"][key] += 1
-    # G (games/appearances) derived: 1 per (gpid,date) the player had a PA.
-    if "G" in stats and "PA" in agg:
+                bi = bidx[ev]
+                g = idx_gpid[bi] if bi != 0xFFFF else -1
+                # New half-inning clears the bases. (inning, batting-team) is the key —
+                # batTeam flips each half and increments make a fresh inning.
+                hk = (inning[ev], half[ev])
+                if hk != cur_half:
+                    occ = [None, None, None, None]; cur_half = hk
+                r1, r2, r3 = occ[1], occ[2], occ[3]
+                # --- batter-attributed ---
+                if g >= 0:
+                    code = oc[ev]; key = g * 100000 + gdate
+                    for s, cs in want_outcome.items():
+                        if code in cs:
+                            agg[s][key] += 1
+                    if want_rbi and rbi[ev]:
+                        agg["RBI"][key] += rbi[ev]
+                    if want_gidp and (flags[ev] & gmask):
+                        agg["GIDP"][key] += 1
+                # --- runner-attributed (replay) ---
+                if want_runner:
+                    fl = flags[ev]
+                    runners = (r1, r2, r3)
+                    if want_sb:
+                        for b in (1, 2, 3):
+                            r = runners[b - 1]
+                            if r is not None and r >= 0 and (fl & (1 << SB_BITS[b])):
+                                agg["SB"][r * 100000 + gdate] += 1
+                    if want_cs:
+                        for b in (1, 2, 3):
+                            r = runners[b - 1]
+                            if r is not None and r >= 0 and (fl & (1 << CS_BITS[b])):
+                                agg["CS"][r * 100000 + gdate] += 1
+                    if want_r:
+                        if g >= 0 and dB[ev] == D_SCORE:
+                            agg["R"][g * 100000 + gdate] += 1
+                        for r, dp in ((r1, d1[ev]), (r2, d2[ev]), (r3, d3[ev])):
+                            if r is not None and r >= 0 and dp == D_SCORE:
+                                agg["R"][r * 100000 + gdate] += 1
+                    # advance the base state for the next event
+                    nb = [None, None, None, None]
+                    for b, (r, dp) in ((1, (r1, d1[ev])), (2, (r2, d2[ev])), (3, (r3, d3[ev]))):
+                        if r is None:
+                            continue
+                        dest = {D_STAY: b, D_TO1: 1, D_TO2: 2, D_TO3: 3}.get(dp)
+                        if dest:
+                            nb[dest] = r          # OUT / SCORE / ABSENT -> off base
+                    db = dB[ev]
+                    dest = {D_TO1: 1, D_TO2: 2, D_TO3: 3}.get(db)
+                    if dest and g is not None:
+                        nb[dest] = g
+                    occ = nb
+    if "G" in stats and "PA" in agg:             # appearances: 1 per (gpid,date) with a PA
         agg["G"] = {k: 1 for k in agg["PA"]}
     return agg
 
