@@ -265,39 +265,51 @@ function lastNameOf(name) {
     if (parts.length > 1 && /^(Jr\.?|Sr\.?|I{2,}|IV|V)$/.test(last)) last = parts[parts.length - 2];
     return last;
 }
-// Enumerate the on-front players from the CPU oracle (== the GPU skyline; skylineMis is 0). Each
-// label carries the player's position in NDC ([-1,1], +Y up) so a caller can map to its own pixels.
-function frontierLabels() {
+// Draw the labels onto a 2D context of size W×H, FROM GPU-read-back buffers: `onF` (the skyline's
+// per-player flag) and `pos` (the smoothed positions). The CPU no longer knows the frontier — the
+// GPU does — so the only CPU input is whatever we read back for this text overlay. Maps the data
+// position to pixels (NDC is +Y up → invert for the top-down 2D canvas), nudges the text off the dot
+// (to the LEFT near the right edge so it isn't clipped), strokes a dark halo for legibility, and
+// returns the number of labels drawn. Does NOT clear — the live overlay clears first; the PNG
+// capture draws over the rendered image.
+function drawFrontierLabelsFrom(c2d, W, H, onF, pos) {
     const maxX = Math.max(Module._max_hr(), 1), maxY = Math.max(Module._max_sb(), 1);
-    const out = [];
-    for (let i = 0; i < playerCount; i++) if (Module._player_onfront(i)) {
-        out.push({
-            xn: (Module._player_hr(i) / maxX) * 1.9 - 0.95,
-            yn: (Module._player_sb(i) / maxY) * 1.9 - 0.95,
-            text: lastNameOf(Module.UTF8ToString(Module._name_ptr(i))),
-        });
-    }
-    return out;
-}
-// Draw the labels onto a 2D context of size W×H. Maps NDC→pixels (note +Y up → invert for the
-// top-down 2D canvas), nudges the text off the dot (to the LEFT near the right edge so it isn't
-// clipped), and strokes a dark halo so it stays legible over the cloud. Does NOT clear — the live
-// overlay clears first; the PNG capture draws over the rendered image.
-function drawFrontierLabels(c2d, W, H) {
     c2d.save();
     c2d.font = `${Math.max(11, Math.round(H * 0.022))}px -apple-system, system-ui, sans-serif`;
     c2d.textBaseline = "middle";
     c2d.lineWidth = 3; c2d.strokeStyle = "rgba(8,10,18,0.85)"; c2d.fillStyle = "#eef1f7";
-    for (const l of frontierLabels()) {
-        const px = (l.xn * 0.5 + 0.5) * W;
-        const py = (1 - (l.yn * 0.5 + 0.5)) * H;      // +Y up in NDC → flip for the 2D canvas
-        const right = px > W * 0.72;                   // near the right edge → put the text on the left
+    let n = 0;
+    for (let i = 0; i < playerCount; i++) if (onF[i]) {
+        const px = ((pos[2*i] / maxX) * 1.9 - 0.95) * 0.5 + 0.5;        // → [0,1] in x
+        const pyN = (pos[2*i + 1] / maxY) * 1.9 - 0.95;                 // NDC y (+Y up)
+        const X = px * W, Y = (1 - (pyN * 0.5 + 0.5)) * H;             // flip y for the 2D canvas
+        const right = X > W * 0.72;
         c2d.textAlign = right ? "right" : "left";
-        const tx = right ? px - 8 : px + 8;
-        c2d.strokeText(l.text, tx, py);
-        c2d.fillText(l.text, tx, py);
+        const text = lastNameOf(Module.UTF8ToString(Module._name_ptr(i)));
+        c2d.strokeText(text, right ? X - 8 : X + 8, Y);
+        c2d.fillText(text, right ? X - 8 : X + 8, Y);
+        n++;
     }
     c2d.restore();
+    return n;
+}
+
+// Live label refresh: read the GPU onFront + pos back and redraw the overlay. REAL BROWSERS ONLY
+// (gated by canvasOk) — a per-frame GPU→CPU readback under headless is the documented device-loss
+// trigger, and headless has no visible overlay anyway. Single-flight (skip if one is in flight) so
+// fast playback can't queue them up; the labels lag the cloud by a frame or two, which is invisible.
+let labelBusy = false;
+async function updateLiveLabels() {
+    if (labelBusy) return;
+    labelBusy = true;
+    try {
+        const onF = await readbackU32(bOnFront, playerCount);
+        const pos = await readbackF32(bPos, playerCount * 2);
+        labelCtx.clearRect(0, 0, offW, offH);
+        const n = drawFrontierLabelsFrom(labelCtx, offW, offH, onF, pos);
+        $("subLabel").textContent = `${n} on the frontier · career`;
+    } catch (e) { /* a transient readback failure just skips one overlay refresh */ }
+    finally { labelBusy = false; }
 }
 
 // ── per-frame work ──────────────────────────────────────────────────────────────
@@ -363,8 +375,7 @@ function renderAt(cursorDate) {
     device.queue.submit([enc.finish()]);
     if (canvasOk) {
         presentToCanvas();
-        labelCtx.clearRect(0, 0, offW, offH);          // live overlay: redraw the labels each frame
-        drawFrontierLabels(labelCtx, offW, offH);
+        updateLiveLabels();                            // async GPU readback → redraw the overlay (real browsers)
     }
 }
 
@@ -406,6 +417,9 @@ async function captureDataUrl(cursor) {
     setDate(cursor);            // applies events, draws the (possibly mid-glide) frame
     settle();                   // drive springs to rest + rebuild frontier/staircase
     const enc0 = device.createCommandEncoder(); recordRender(enc0, offTex.createView()); device.queue.submit([enc0.finish()]);
+    // read the settled GPU frontier back ONCE (off the render loop) to label the players
+    const lblOnF = await readbackU32(bOnFront, playerCount);
+    const lblPos = await readbackF32(bPos, playerCount * 2);
 
     const bpr = Math.ceil(offW * 4 / 256) * 256;        // 256-byte row alignment
     const staging = device.createBuffer({ size: bpr * offH, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -425,7 +439,7 @@ async function captureDataUrl(cursor) {
     }
     staging.unmap(); staging.destroy();
     c2d.putImageData(img, 0, 0);
-    drawFrontierLabels(c2d, offW, offH);   // label the frontier players over the rendered image
+    drawFrontierLabelsFrom(c2d, offW, offH, lblOnF, lblPos);   // label the frontier players over the image
     return cv.toDataURL("image/png");
 }
 
@@ -438,7 +452,7 @@ function setDate(d) {
     const year = Module._year_of_date(d);
     const dt = new Date(Date.UTC(year, 0, Module._doy_of_date(d)));
     $("dateLabel").textContent = dt.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
-    $("subLabel").textContent = `${OUT.lineVerts ? (OUT.lineVerts - 1) / 2 : 0} on the frontier · career`;
+    // the "N on the frontier" count comes from updateLiveLabels() now (it has the GPU read-back set)
 }
 function tick() {
     if (!playing) return;
@@ -479,6 +493,9 @@ function exposeHooks() {
         stop();
         setDate(numDates - 1);     // apply all events → counters final on the GPU
         settle();                  // pos → target; rebuild skyline + staircase from settled pos
+        // Build the CPU oracle FIRST (replays into g_hr/g_sb/g_onFront) — the live path no longer
+        // maintains it, so the readback comparisons below have something to compare against.
+        const frontierMis = Module._verify_career();
         let counterMis = -1, springMis = -1, skylineMis = -1;
         try {
             const gHr = await readbackU32(bHr, playerCount);
@@ -495,7 +512,6 @@ function exposeHooks() {
                 if ((gOnF[i] ? 1 : 0) !== (h[op + i] ? 1 : 0)) skylineMis++;
             }
         } catch (e) { console.warn("readback skipped:", e.message); }
-        const frontierMis = Module._verify_career();
         return {
             frontierMis, frontierSize: Module._verify_frontier_size(),
             counterMis, springMis, skylineMis,

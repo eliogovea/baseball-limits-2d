@@ -23,9 +23,11 @@ points.wgsl  instanced-quad cloud, vertex-pull from pos[] (+Y up, disc test), er
 line.wgsl    the staircase, drawn via drawIndirect(bIndirect) — vertex count came from the GPU
 ```
 
-The CPU/WASM core (`core.c`, **unchanged** from `poc-webgpu`) only decodes the streams and computes
-the per-frame event slice. Its incremental CPU frontier + `verify_career()` are kept **solely as the
-headless verification oracle** — no longer uploaded to the GPU.
+The CPU/WASM core (`core.c`) now does almost nothing per frame: `step_career` only computes the
+event slice `[lo,count)` and the wrap/scrub-back flag — **the CPU incremental frontier was dropped
+from the live path** (the GPU owns the picture). That frontier survives only inside `verify_career()`,
+which does a self-contained full replay on demand as the headless verification oracle. Even the name
+labels are sourced from a GPU read-back of `onFront`/`pos` (see below), not from any CPU frontier.
 
 ### Why the staircase is fully-GPU here (the key difference from the Vulkan twin)
 
@@ -57,7 +59,7 @@ passes:
 ## Layout
 
 ```
-core.c                  WASM core: STEV decode + per-frame slice + verify oracle (UNCHANGED)
+core.c                  WASM core: STEV decode + per-frame slice; verify_career = self-contained replay oracle
 main.js                 WebGPU device/buffers/pipelines + the frame graph above + verify hooks
 shaders/accumulate.wgsl event slice → atomicAdd into hr/sb     (UNCHANGED)
 shaders/spring.wgsl     NEW: critically-damped glide of pos[]/vel[] toward (hr,sb)

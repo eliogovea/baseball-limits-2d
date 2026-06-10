@@ -311,31 +311,27 @@ int wasm_init(const uint8_t *hr, int hrLen, const uint8_t *sb, int sbLen) {
 }
 
 // ===========================================================================
-// CAREER step — advance the cursor, replay the new window into the shadow,
-// update the frontier + staircase. Handles forward play, wrap, and scrub-back
-// uniformly (any backward move zeroes and replays from 0).
+// CAREER step (SPRING TWIN: slice-only). In the baseline this also replayed the
+// new window into a CPU shadow and maintained the incremental Pareto frontier.
+// The spring twin does the WHOLE picture on the GPU — accumulate → spring → skyline
+// → GPU staircase — so the CPU frontier is GONE from the live path. All this needs
+// to do now is tell the GPU which slice [lo, lo+cnt) of events became due, and flag
+// a reset on wrap / scrub-back (any backward move zeroes the GPU buffers and replays).
+// The CPU incremental frontier survives ONLY in verify_career() (the oracle, run once
+// in the headless hook) and in the unchanged season path.
 // ===========================================================================
 EMSCRIPTEN_KEEPALIVE
 void step_career(uint32_t cursorDate) {
     int zeroGpu = 0;
     if (!g_careerInit || cursorDate < g_lastCursor) {
-        g_applied = 0; g_frN = 0;
-        memset(g_onFront, 0, sizeof(g_onFront));
-        memset(g_hr, 0, sizeof(g_hr)); memset(g_sb, 0, sizeof(g_sb));
-        zeroGpu = 1; g_careerInit = 1;
+        g_applied = 0; zeroGpu = 1; g_careerInit = 1;   // backward move ⇒ JS zeros hr/sb/pos/vel + replays
     }
     uint32_t target = g_applied;
-    while (target < g_evN && g_ev[target].date <= cursorDate) target++;
-    uint32_t lo = g_applied, cnt = target - g_applied;
-    for (uint32_t e = lo; e < target; e++) {
-        uint32_t p = g_ev[e].player;
-        (g_ev[e].stat == 0 ? g_hr : g_sb)[p] += g_ev[e].count;
-        frontier_apply_event(p, g_hr[p], g_sb[p]);
-    }
+    while (target < g_evN && g_ev[target].date <= cursorDate) target++;   // forward scan to the cursor
+    g_out.lo = g_applied; g_out.cnt = target - g_applied; g_out.zeroGpu = (uint32_t)zeroGpu;
     g_applied = target; g_lastCursor = cursorDate;
-    g_out.lo = lo; g_out.cnt = cnt; g_out.zeroGpu = (uint32_t)zeroGpu;
-    g_out.lineVerts = build_staircase_from(g_frX, g_frY, g_frN, g_staircase);
-    g_out.completedDirty = 0; g_out.completedCount = 0; g_out.openCount = (uint32_t)g_n;
+    // No CPU frontier/shadow/staircase anymore — the GPU owns onFront[] and the staircase.
+    g_out.lineVerts = 0; g_out.completedDirty = 0; g_out.completedCount = 0; g_out.openCount = (uint32_t)g_n;
 }
 
 // ---- completed frontier (full upper-right envelope over g_c*) --------------
@@ -473,9 +469,25 @@ void step_season(uint32_t cursorDate) {
 // Invariants (run in C, no GPU needed). Exposed counts let the headless harness
 // assert the T3 gate.
 // ===========================================================================
-// Career: incremental frontier == brute-force O(N^2) frontier (main.c verbatim).
+// Self-contained full replay into the CPU shadow + incremental frontier. The live path no longer
+// maintains these (the GPU does), so the verification oracle rebuilds them from scratch on demand.
+// Leaves g_hr/g_sb/g_onFront/g_fr at the end-of-history state (so the spot-check accessors work).
+static void replay_all(void) {
+    g_frN = 0;
+    memset(g_onFront, 0, sizeof(g_onFront));
+    memset(g_hr, 0, sizeof(g_hr));
+    memset(g_sb, 0, sizeof(g_sb));
+    for (uint32_t e = 0; e < g_evN; e++) {
+        uint32_t p = g_ev[e].player;
+        (g_ev[e].stat == 0 ? g_hr : g_sb)[p] += g_ev[e].count;
+        frontier_apply_event(p, g_hr[p], g_sb[p]);
+    }
+}
+
+// Career: incremental frontier == brute-force O(N^2) frontier (the oracle for the GPU skyline).
 EMSCRIPTEN_KEEPALIVE
 int verify_career(void) {
+    replay_all();                          // rebuild the CPU shadow + frontier (live path doesn't)
     uint32_t playerCount = (uint32_t)g_n;
     uint8_t *dom = calloc(playerCount, 1);
     for (uint32_t i = 0; i < playerCount; i++)
