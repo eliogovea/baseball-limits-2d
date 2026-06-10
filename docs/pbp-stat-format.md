@@ -36,13 +36,11 @@ cell, no intra-season motion). All source→format converters are kept so any la
   SO, HBP, SF, SH, GIDP, G. Built 1910–2025 (~13.9 MB total). Verified: round-trips; career
   HR exact (Bonds 762, Ruth 714, Aaron 755, Mays 660; Henderson 296 = our pipeline's value);
   2023 HR date-filtered = 5,868 (exact).
-- [ ] **S1b** — runner-attributed **SB, CS, R**. ⚠️ **BLOCKED on a source decision** (see
-  Decision 10). The BL2E *replay* approach was built and tested but is **rejected for shipping**:
-  it lands ~0.5–1.5% off the records (Henderson SB 1398 vs 1406; Bonds R 2254 vs 2227) because
-  BL2E does not store substitutions, so a pinch-runner's steal/run is mis-credited to the player
-  they replaced. Must instead read an *exact* source (`plays.csv` `br*_pre`/`run*`, or `.bl2p`'s
-  `b_sb`/`b_cs`/`b_r`). Replay code retained in `build_stat_files.py` as a validated curiosity,
-  not feeding shipped data.
+- [x] **S1b** — runner-attributed **SB, CS, R** — **DONE (option A)**. `build_stat_files.py`
+  now sources ALL stats directly from `plays.csv` (one exact pass); runner stats use the real
+  `br*_pre` (SB/CS) and `run*` (R) identities, so substitutions are handled and records are
+  exact: **Henderson SB 1,406**, Brock 938, Coleman 752. The BL2E replay (which landed ~1,398)
+  was rejected and removed (it lives in git history). Whole layer is now plays.csv-sourced.
 - [ ] **S2** — Lahman complement (pre-1910 / gaps / full Negro Leagues), season grain.
 - [ ] **S3** — migrate `script.js` off `.evt` onto the shared dim + `stat_*`; remove the old
   `.evt` data and supersede `build_stat_streams.js`. Keep all source→format converters.
@@ -90,7 +88,12 @@ Durable record of *why* this layer is shaped as it is. Numbered for reference.
       optionally re-derive *all* stats from `plays.csv` for one clean exact pass.
     - **B. use committed `.bl2p`** (`b_sb`/`b_cs`/`b_r`, what `.evt` used → Henderson 1,406 exact):
       no download, but 1920–2025 AL/NL only → *narrower* than the batter stats.
-    Recommendation: **A** (exactness + coverage consistency). Awaiting confirmation.
+    **RESOLVED: A** — all stats re-derived from `plays.csv` in one exact pass.
+    `build_stat_files.py` downloads each season's `plays.csv`, credits batter stats from the
+    row's own count columns and runner stats from the real `br*_pre`/`run*` identities. Built
+    1910–2025: 17,698 players + 18 stats = 15.3 MB. Verified exact: Bonds 762 HR, Henderson
+    1,406 SB, Brock 938, Coleman 752. (gpid is now first-appearance order, opaque — map via
+    the dimension. This rebuild superseded the earlier BL2E-sourced S1 files in place.)
 
 ## File layout (little-endian, gzipped; common `stat_` prefix)
 

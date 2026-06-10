@@ -29,7 +29,14 @@ Branch: `feat/event-level-pbp`.
   will **overwrite** `stat_players.bl2s.gz` + all `stat_*.bl2s.gz` with a consistent new gpid
   scheme. **All stat files must be rebuilt together** so gpids match the dimension.
 
-## Immediate next steps (resume here)
+## ✅ S1 + S1b DONE — all stats from plays.csv (1910–2025)
+
+Full build complete & verified: 17,698 players + 18 stats (PA AB H 2B 3B HR RBI BB IBB SO
+HBP SF SH GIDP SB CS R G) = 15.3 MB. Records exact — Bonds 762 HR, **Henderson 1,406 SB**,
+Brock 938, Coleman 752; 2023 batting totals == Lahman. Committed (supersedes the S1
+BL2E-sourced files in place; gpid is now first-appearance order). **Remaining: S2, S3.**
+
+## Immediate next steps (resume here) — superseded by the above; kept for reference
 
 1. **Validate the rewritten builder on one season** (no full download):
    ```
