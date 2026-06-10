@@ -23,8 +23,15 @@ layers:
   (`crosscheck_bl2e.py`). Pitches round-trip verbatim. Batting totals: 2023 EXACT vs Lahman;
   1955 sub-1% (Retrosheet-vs-Lahman provenance) yet EXACT vs Retrosheet's own column sums.
   With pitches: 2023 = 53.7 b/event (1.28 MB), 1955 = 32.6 b/event.
-- [ ] **P4** — full corpus build (1903/1910–2025), resumable. *Last built through: none yet.*
-  Needs the combined `plays.zip` or per-season zips; projected ~84 MB committed.
+- [x] **P4** — full corpus built **1910–2025** (116 files, **76.8 MB**, no gaps), via
+  `scripts/build_bl2e_corpus.py` (per-season download → convert → clean; resumable).
+  1903–1909 have no regular-season plays (skip cleanly). *Built into `data/pbp/e<year>.bl2e.gz`
+  — NOT yet committed (size/decision pending).* Direction-aware `crosscheck_bl2e.py` passes all
+  116: modern seasons match Lahman exactly; **BL2E also carries Negro-League (~1920–1948) and
+  Federal-League (1914–15) play-by-play** that the AL/NL Lahman slice doesn't, so those years
+  legitimately run higher. Fidelity itself proven by exact round-trip + exact match to
+  Retrosheet's own plays.csv column sums (1927/1955). Older numeric fields can be blank →
+  tolerant `_int()` in the converter.
 - [ ] **P5** — optional Layer C fielding detail behind `--fielding`.
 
 **Size decision — RESOLVED (keep explicit).** Layer A measures **~33 bits/event** (2023):

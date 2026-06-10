@@ -160,6 +160,11 @@ def _hand(s):
     return HAND.get(s, 3)
 
 
+def _int(s):
+    """Tolerant int parse — older Retrosheet rows leave numeric fields blank."""
+    return int(s) if s else 0
+
+
 def read_season(csv_path, year):
     """Stream the CSV once; return games in (date, gid)-sorted order, each a list
     of its plays in CSV (pn) order. Filters to the year and gametype == 'regular'
@@ -245,9 +250,9 @@ def build_bl2e(ordered_games, year, retro_to_display, include_pitches=True):
             else:
                 home_team = row["batteam"]; vis_team = row["pitteam"]
             db, d1, d2, d3 = dispositions(row)
-            cols["inning"].append(int(row["inning"]))
-            cols["half"].append(int(row["top_bot"]))
-            cols["batTeam"].append(int(row["vis_home"]))
+            cols["inning"].append(_int(row["inning"]))
+            cols["half"].append(_int(row["top_bot"]))
+            cols["batTeam"].append(_int(row["vis_home"]))
             cols["batterIdx"].append(intern(row["batter"]))
             cols["pitcherIdx"].append(intern(row["pitcher"]))
             cols["bathand"].append(_hand(row["bathand"]))

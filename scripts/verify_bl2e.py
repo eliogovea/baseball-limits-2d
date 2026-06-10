@@ -69,9 +69,9 @@ def main():
         for row in g["plays"]:
             db, d1, d2, d3 = dispositions(row)
             expect = {
-                "inning": int(row["inning"]),
-                "half": int(row["top_bot"]),
-                "batTeam": int(row["vis_home"]),
+                "inning": int(row["inning"] or 0),
+                "half": int(row["top_bot"] or 0),
+                "batTeam": int(row["vis_home"] or 0),
                 "bathand": _hand(row["bathand"]),
                 "pithand": _hand(row["pithand"]),
                 "outcome": outcome_code(row),
