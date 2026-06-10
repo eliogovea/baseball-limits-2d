@@ -25,6 +25,11 @@ tiling + dirty-tile** incremental recompute. We evaluated the summary against th
   longer applies, which is exactly what *justifies* recomputing the frontier on the GPU each
   frame **from the smoothed positions** (the summary's correct insight).
 
+> **Skyline complexity / scale-up:** brute-force O(n²) is the right call at n≈11k, but the
+> alternatives — sort + parallel prefix-max for large n, and an "active-set" recompute that
+> exploits monotonicity to rebuild from only `prevFrontier ∪ movedPoints` — and their GPU
+> trade-offs are written up in [`skyline-gpu-approaches.md`](skyline-gpu-approaches.md).
+
 **Decisions (confirmed with the user):**
 - Spring physics + per-frame GPU brute-force skyline (no tiling); frontier from **smoothed
   positions**.
