@@ -151,6 +151,8 @@ Status convention: `- [ ]` open, `- [x] *(shipped <sha>)*` shipped. Items with a
 
 These came out of the methodology validation pilots and aren't user-facing features — they make the methodology itself sharper. See CLAUDE.md §"Working methodology" for the framework.
 
+- [x] **Per-branch GitHub Pages preview deploys** *(shipped 84f3600)* — closes the headless-verification gap for WebGPU work (headless Chrome has no GPU adapter, so `snap.js` can't drive the GPU spring/staircase). `.github/workflows/deploy-pages.yml` serves production + a preview of every branch from one Pages site via an additive `gh-pages` branch (`main` → root, others → `/experimental/<branch>/`), shipping only the runtime web assets. One-time setup + the one-web-POC-per-branch reorg guidance in [`docs/pages-preview-deploys.md`](docs/pages-preview-deploys.md). When adopted, update CLAUDE.md §"Git / deployment" (production moves from main/root to gh-pages/root).
+
 - [ ] **`snap.js --color-scheme` flag** — wire CDP `Emulation.setEmulatedMedia` for `prefers-color-scheme` so the verification floor can exercise dark-mode (and any future `@media` feature query) headlessly. TODO marker is already in `scripts/snap.js` near `setDeviceMetricsOverride`.
 
 - [ ] **Fill in `~/.claude/pricing.json`** — one-time: copy `scripts/methodology_pricing.example.json` to `~/.claude/pricing.json` and fill in current per-million-token rates from anthropic.com/pricing. `methodology_audit.py`'s $-savings columns will become meaningful instead of $0.
