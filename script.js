@@ -318,6 +318,14 @@ let pbpCompletedCache = null;   // { key, points } — completed-season points (
 let pbpFrontierPrepCache = null; // { key, filtered } — completed-season frontier rows, sorted for merge with the open season
 let evtIncFrontier = null;      // { stream, xSign, ySign, engine, comp, applied, lastCursor } — incremental .evt-career Pareto frontier state, replayed across frames (reset on backward seek / model rebuild)
 let pbpRaf = null;              // requestAnimationFrame handle while the cursor is playing
+// Phase-5 spring glide loop: a dedicated rAF that runs the (cheap) GPU present every display
+// refresh so the spring animates smoothly, DECOUPLED from the ~15fps-throttled refreshChart
+// (which still owns the expensive CPU frontier/cards/quadtree). See docs / the plan file.
+let springRaf = null;           // rAF handle for the continuous GPU glide present (null = idle)
+let springLoopUntil = 0;        // performance.now() deadline for the post-playback settle tail
+let springFinalPending = false; // a final interactive (non-lite) refreshChart owed once the settle tail drains
+let lastGpuSpringFrame = false; // did the most recent real refreshChart render the GPU spring? (gates glide)
+const SPRING_SETTLE_MS = 500;   // keep gliding this long after the cursor stops so springs visibly settle
 let pendingCursorYmd = null;    // a t=YYYYMMDD from a deep-link, applied once data is loaded
 // The point-cloud renderer (Canvas2DRenderer) owns the bg/fg canvas layers + the
 // background cache key — see the class near the export/render helpers below.
@@ -1367,6 +1375,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     setupShareButton();
     setupGlossary();
     setupRendererToggle();
+    setupGpustreamToggle();
     applyModeConfig("season");
     setupModeToggle("mode-toggle", () => {
         const mode = getCurrentMode();
@@ -1811,6 +1820,47 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         syncScrubber();
         refreshChart();
     });
+    // ── Phase-5 spring glide loop ───────────────────────────────────────────────
+    // A dedicated rAF that calls the cheap GPU present every display refresh, so the spring
+    // animates at the panel's full rate (60Hz, or 120Hz on ProMotion — vsync-locked, free)
+    // even though refreshChart (the expensive CPU path) only fires ~15fps during playback.
+    // Stays alive while playing OR within a short settle tail so the springs visibly come to
+    // rest after the cursor stops, exactly like the standalone POC.
+    function springLoop(now) {
+        springRaf = null;
+        if (!(pointRenderer instanceof WebGPURenderer) || !pointRenderer.springMode) { finalizeSpringStop(); return; }
+        const alive = !!pbpRaf || now < springLoopUntil;   // playing OR draining the settle tail
+        if (!alive) { finalizeSpringStop(); return; }
+        // Only present when the last real frame actually drew the GPU spring (a CPU-fallback
+        // frame — filters, evt.failed, etc. — parks the loop instead of drawing a stale cloud).
+        if (lastGpuSpringFrame && pointRenderer.evt && !pointRenderer.evt.failed) pointRenderer.presentGlide();
+        springRaf = requestAnimationFrame(springLoop);
+    }
+    function startSpringLoop() {
+        if (!springRaf && pointRenderer instanceof WebGPURenderer && pointRenderer.springMode) {
+            springRaf = requestAnimationFrame(springLoop);
+        }
+    }
+    // hard=true cancels immediately (teardown / filter change); hard=false starts the settle
+    // tail and lets the loop drain itself over SPRING_SETTLE_MS.
+    function stopSpringLoop(hard) {
+        if (hard) {
+            if (springRaf) cancelAnimationFrame(springRaf);
+            springRaf = null;
+            springLoopUntil = 0;
+            springFinalPending = false;        // teardown owns its own refreshChart
+            smoothLite = false;                // teardown ends playback; restore full interactive frames
+        } else {
+            springLoopUntil = (typeof performance !== "undefined" ? performance.now() : Date.now()) + SPRING_SETTLE_MS;
+        }
+    }
+    // Once the settle tail drains (or the loop bails), do the single interactive render we
+    // deferred so the cards/quadtree/hit-test rebuild on the settled positions.
+    function finalizeSpringStop() {
+        if (!springFinalPending) return;
+        springFinalPending = false;
+        if (smoothLite) { smoothLite = false; refreshChart(); }
+    }
     function stopPbpPlay() {
         const wasPlaying = !!pbpRaf;
         if (pbpRaf) { cancelAnimationFrame(pbpRaf); pbpRaf = null; }
@@ -1818,12 +1868,23 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         btn.classList.remove("playing");
         document.getElementById("anim-icon-play").hidden = false;
         document.getElementById("anim-icon-stop").hidden = true;
-        if (wasPlaying && smoothLite) { smoothLite = false; refreshChart(); }   // final interactive render
+        // If a GPU spring was animating, keep gliding through a settle tail and DEFER the
+        // final interactive render until it drains (an immediate non-lite refreshChart would
+        // repopulate the CPU cloud and flip lastGpuSpringFrame off, cutting the settle short).
+        if (wasPlaying && smoothLite && lastGpuSpringFrame &&
+            pointRenderer instanceof WebGPURenderer && pointRenderer.springMode) {
+            springFinalPending = true;
+            stopSpringLoop(false);             // start the tail; springLoop fires finalizeSpringStop when it ends
+            startSpringLoop();                 // (no-op if already running) ensure something drives the tail
+        } else if (wasPlaying && smoothLite) {
+            smoothLite = false; refreshChart();   // non-GPU path: finalize immediately
+        }
     }
     function startPbpPlay() {
         if (!pbpTimeline && !pbpEvt) return;
         stopAnimation();
         smoothLite = true;                         // lighten frames during playback
+        springFinalPending = false;                // a fresh play cancels any pending settle-finalize from a prior stop
         clearTimeout(smoothLiteTimer);
         const perYearMs = 10000;                   // ~10s per covered season at 1× …
         // .evt sweeps only the selected-year window; .bl2p sweeps its whole timeline.
@@ -1856,6 +1917,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             else stopPbpPlay();
         };
         pbpRaf = requestAnimationFrame(tick);
+        startSpringLoop();                     // glide the GPU spring at display refresh, independent of the 15fps data tick
     }
     // Decode + hold the two resident streams, then drive the cursor over all history.
     async function enableEvt(startIdx) {
@@ -1931,6 +1993,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     }
     function disableSmooth() {
         stopPbpPlay();
+        stopSpringLoop(true); lastGpuSpringFrame = false;   // teardown: hard-cancel the glide loop (no settle tail, no stale cloud)
         pbpTimeline = null;
         pbpEvt = null;
         pbpExtentCache = null;
@@ -1969,6 +2032,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     // the span after the group changes, so the flag survives the rebuild).
     function disableSmoothQuiet() {
         stopPbpPlay();
+        stopSpringLoop(true); lastGpuSpringFrame = false;   // teardown: hard-cancel the glide loop
         pbpTimeline = null;
         pbpEvt = null;
         pbpExtentCache = null;
@@ -3934,6 +3998,7 @@ class WebGPURenderer {
             scales.slopeX, scales.interceptX, scales.slopeY, scales.interceptY,
             scales.vpX, scales.vpY, scales.radius, scales.alpha ]));
         e.pending = { count, instanceCount, spring: false };
+        e.lastInstanceCount = instanceCount;   // cached so presentGlide can re-present without a refreshChart
         // ── Phase-5: queue the spring/skyline/staircase uniforms for this frame ──────
         // Only the tiny uniforms cross the bus here (dt/omega + the axis scale). On a
         // wrap/backward-seek we ALSO zero pos/vel so the cloud snaps back to the origin
@@ -4150,6 +4215,33 @@ class WebGPURenderer {
         }
     }
 
+    // Phase-5 GLIDE frame: re-present at display refresh between the throttled refreshChart
+    // calls so the spring animates smoothly. Self-contained — it rebuilds a count==0 pending
+    // (no new events: the GPU counters/targets stay put; the spring just keeps gliding toward
+    // them) with a FRESH dt and the staircase scratch reset, then reuses present()'s existing
+    // compute+draw chain. Never zeroes pos/vel (that would snap the cloud). No-op unless the
+    // last real frame was a successful GPU spring frame.
+    presentGlide() {
+        const e = this.evt;
+        if (!this.springMode || !e || e.failed || !e.spring || !(e.lastInstanceCount > 0)) return;
+        const s = e.spring;
+        const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
+        let dt = this.lastSpringT ? (now - this.lastSpringT) / 1000 : 1 / 60;
+        this.lastSpringT = now;
+        if (!isFinite(dt) || dt <= 0) dt = 1 / 60;
+        dt = Math.min(dt, 0.05);                       // clamp a stall/tab-switch spike
+        // Reset the staircase scratch every frame (a frame with K==0 must draw nothing); the
+        // axis-scale uniforms (uScale, uSpringScale0/1) persist on-GPU from the last real frame.
+        this.device.queue.writeBuffer(s.bCount, 0, new Uint32Array([0]));
+        this.device.queue.writeBuffer(s.bIndirect, 0, new Uint32Array([0, 1, 0, 0]));
+        const uSpring = new ArrayBuffer(16);
+        new Float32Array(uSpring, 0, 2).set([dt, WEBGPU_SPRING_OMEGA]);
+        new Uint32Array(uSpring, 8, 2).set([e.players, 0]);
+        this.device.queue.writeBuffer(s.uSpring, 0, uSpring);
+        e.pending = { count: 0, instanceCount: e.lastInstanceCount, spring: true };
+        this.present();
+    }
+
     // Export: read the offscreen texture back, un-premultiply to straight alpha, return a
     // single composited PNG (the design accepts visual — not byte — equivalence here).
     async exportDataURLs() {
@@ -4206,6 +4298,7 @@ function swapRenderer(next) {
     if (prev && prev !== next) prev.destroy();
     window.__bl2d_renderer = next instanceof WebGPURenderer ? "webgpu" : "canvas2d";
     syncRendererToggle();
+    syncGpustreamToggle();   // reflect spring-streaming state (also after an auto device-loss fallback)
     if (typeof refreshChart === "function") refreshChart();
 }
 function swapToCanvas2D(reason) {
@@ -4287,6 +4380,49 @@ function setupRendererToggle() {
         syncRendererToggle();
     });
     syncRendererToggle();
+}
+
+// Persist the Phase-5 spring-streaming choice in ?gpustream=1 (preserving hash) so it
+// survives a reload and is shareable — WebGPURenderer reads it at construction (springMode).
+function writeGpustreamParam(on) {
+    const url = new URL(location.href);
+    if (on) url.searchParams.set("gpustream", "1"); else url.searchParams.delete("gpustream");
+    history.replaceState(null, "", url.pathname + url.search + location.hash);
+}
+
+// Reflect the spring-streaming state on its toggle. The button only makes sense while a
+// WebGPU renderer is live (gpustream needs renderer=webgpu), so it's hidden under Canvas 2D.
+function syncGpustreamToggle() {
+    const btn = document.getElementById("gpustream-toggle");
+    if (!btn) return;
+    const onGpu = pointRenderer instanceof WebGPURenderer;
+    const on = onGpu && !!pointRenderer.springMode;
+    btn.hidden = !onGpu;                                 // only relevant when the GPU backend is active
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-pressed", String(on));
+    btn.title = on ? "Spring streaming on — click for the hybrid GPU cloud"
+                   : "Full-GPU spring streaming (experimental)";
+}
+
+function setupGpustreamToggle() {
+    const btn = document.getElementById("gpustream-toggle");
+    if (!btn) return;
+    btn.addEventListener("click", async () => {
+        if (!(pointRenderer instanceof WebGPURenderer)) return;   // hidden anyway; guard double-clicks
+        const turningOn = !pointRenderer.springMode;
+        btn.disabled = true;
+        // springMode + the Phase-5 pipelines are fixed at renderer construction, so flip the
+        // URL flag then REBUILD the WebGPU renderer (hop through Canvas 2D so enableWebGPU's
+        // "already WebGPU" early-return doesn't skip the rebuild). The fresh renderer re-reads
+        // ?gpustream at construction.
+        writeGpustreamParam(turningOn);
+        swapToCanvas2D("rebuild for gpustream toggle");
+        await enableWebGPU();
+        btn.disabled = false;
+        syncRendererToggle();
+        syncGpustreamToggle();
+    });
+    syncGpustreamToggle();
 }
 window.__bl2d_chooseRenderer = chooseRenderer;
 window.__bl2d_exportDataURLs = () => pointRenderer.exportDataURLs();   // headless WebGPU readback probe
@@ -5610,11 +5746,18 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // DOM/interaction: cards, the quadtree hit-test, labels). See §"Phase 5".
     const gpuSpring = gpuCloud && pointRenderer.springMode;
     window.__bl2d_gpuSpring = gpuSpring;
+    lastGpuSpringFrame = gpuSpring;   // gate the glide loop: a CPU-fallback frame parks it
 
     // Group-career suppresses the staircase + HV shade: with only a handful of
     // career dots tracing trajectories, the Pareto envelope clutters more than it
     // clarifies — the focus is the trails + heads.
-    if (frontier.length > 0 && !filters.groupCareer) {
+    // Under gpuSpring the GPU owns BOTH the red staircase line (drawIndirect) AND the cloud,
+    // drawn from the spring-animated pos[] that lag the true values during a glide. The HV
+    // shade + SVG line here are built from the CPU frontier's *settled* values, so drawing
+    // them would put the shaded area (and a duplicate line) AHEAD of the gliding red line.
+    // Skip both while the GPU spring animates; a paused/idle frame is a CPU frame where the
+    // line and fill agree, so the shade returns the instant playback stops.
+    if (frontier.length > 0 && !filters.groupCareer && !gpuSpring) {
         const line = staircaseScreen(frontier);
 
         // Hypervolume shading: gradient fill of the dominated region beneath the
@@ -5635,15 +5778,10 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             .attr("d", "M " + xAnti + "," + yAnti + " L " + line.map(p => p.join(",")).join(" L ") + " Z")
             .style("fill", "url(#hv-shade-grad)");
 
-        // Under gpuSpring the GPU draws the red staircase itself (drawIndirect), so skip
-        // the SVG line to avoid double-drawing it. The HV shade (a fill from the CPU
-        // frontier, which still runs for interaction) stays — it's behind the cloud.
-        if (!gpuSpring) {
-            g.append("path")
-                .attr("class", "frontier-staircase")
-                .attr("d", "M " + line.map(p => p.join(",")).join(" L "))
-                .style("stroke", showWorstFrontier ? "#8b5cf6" : null);
-        }
+        g.append("path")
+            .attr("class", "frontier-staircase")
+            .attr("d", "M " + line.map(p => p.join(",")).join(" L "))
+            .style("stroke", showWorstFrontier ? "#8b5cf6" : null);
     }
 
     // Era-vs-era overlay: the comparison frontier (teal) + its dominated region,

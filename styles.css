@@ -183,6 +183,18 @@ a:focus-visible,
     opacity: 0.4;
     cursor: not-allowed;
 }
+/* Phase-5 spring-streaming toggle: a sibling of the GPU button, only shown while
+   WebGPU is active. Its active state uses the frontier red so it reads distinctly
+   from the GPU button's blue. */
+.gpustream-toggle.active {
+    background: var(--mlb-red, #c8102e);
+    border-color: var(--mlb-red, #c8102e);
+    color: #fff;
+}
+.gpustream-toggle:hover:not(:disabled) {
+    color: var(--mlb-red, #c8102e);
+    border-color: var(--mlb-red, #c8102e);
+}
 
 /* Color-theme switcher — compact swatches (each previews its theme's panel +
    accent) so it fits the dense header without wide text labels. */
