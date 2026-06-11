@@ -1,0 +1,7 @@
+dist/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Source data archives — extracted CSVs are committed; the zip isn't.
+data/*.zip

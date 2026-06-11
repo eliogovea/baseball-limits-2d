@@ -1,0 +1,2355 @@
+:root {
+    --mlb-blue: #002d72;
+    --mlb-blue-light: rgba(0, 45, 114, 0.35);
+    --mlb-blue-hover: #001a44;
+    --mlb-red: #c8102e;
+    --frontier-color: #0f172a;
+
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --border: #e3e6ea;
+    --border-strong: #cdd2d8;
+    --text: #1a1f2e;
+    --text-muted: #5a6478;
+
+    --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.06);
+    --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08);
+
+    --radius: 8px;
+    --radius-sm: 6px;
+    --header-h: 56px;
+    --sidebar-w: 300px;
+    --transition: 0.15s ease;
+
+    /* Themeable functional tokens — Classic defaults. applyTheme() (script.js)
+       overwrites these on <html> so the var-based chrome re-skins for free. */
+    --glass-bg: rgba(255, 255, 255, 0.92);
+    --gold: #f59e0b;
+    --league-al: #c8102e;
+    --league-nl: #002d72;
+    --on-primary: #ffffff;
+
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+    height: 100%;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.45;
+    color: var(--text);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+button {
+    font-family: inherit;
+    font-size: inherit;
+    cursor: pointer;
+}
+
+a {
+    color: var(--text);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: color var(--transition), border-color var(--transition);
+}
+a:hover { color: var(--mlb-blue); border-bottom-color: var(--mlb-blue); }
+
+/* Keyboard-focus ring on every interactive control (a11y P0). Many custom
+   controls (.mode-btn, .seg-btn, .franchise-chip, .country-chip, .share-platform,
+   .icon-btn, .help-btn) strip the UA outline with no replacement; this restores a
+   visible focus indicator only for keyboard users (:focus-visible). */
+button:focus-visible,
+a:focus-visible,
+.field:focus-visible,
+[role="button"]:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--mlb-blue) 45%, transparent);
+}
+
+/* Respect reduced-motion: collapse all decorative transitions/animations
+   (modal pop + fade, hover transitions, slider thumb scale) to instant. The
+   loading spinner is re-exempted — it conveys state, not decoration. The
+   user-initiated ▶ frontier animation is opt-in motion and is left intact. */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+    .spinner {
+        animation-duration: 0.8s !important;
+        animation-iteration-count: infinite !important;
+    }
+}
+
+/* -------- Header -------- */
+
+.app-header {
+    height: var(--header-h);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 0 16px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    box-shadow: var(--shadow-sm);
+    position: relative;
+    z-index: 10;
+    flex-shrink: 0;
+}
+.app-header > * { min-width: 0; }
+.brand { flex: 1 1 auto; overflow: hidden; display: flex; align-items: center; gap: 10px; }
+.brand-mark { flex: 0 0 auto; border-radius: 6px; display: block; }
+.brand-text { min-width: 0; }
+.header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: 0 1 auto;
+    min-width: 0;
+}
+.attribution { flex: 0 1 auto; }
+
+.icon-btn {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 1px solid var(--border-strong);
+    background: var(--panel);
+    color: var(--text-muted);
+    padding: 0;
+    text-decoration: none;
+    transition: all var(--transition);
+}
+.icon-btn:hover {
+    color: var(--mlb-blue);
+    border-color: var(--mlb-blue);
+    background: var(--bg);
+}
+.share-btn--copied {
+    color: #1a9e5a !important;
+    border-color: #1a9e5a !important;
+}
+.export-wrap {
+    position: relative;
+    flex: 0 0 auto;
+}
+
+/* Color-theme switcher — compact swatches (each previews its theme's panel +
+   accent) so it fits the dense header without wide text labels. */
+.theme-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex: 0 0 auto;
+}
+.theme-btn {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 1px solid var(--border-strong);
+    padding: 0;
+    cursor: pointer;
+    transition: transform var(--transition), box-shadow var(--transition);
+}
+.theme-btn[data-theme="classic"]   { background: linear-gradient(135deg, #ffffff 50%, #002d72 50%); }
+.theme-btn[data-theme="editorial"] { background: linear-gradient(135deg, #fffdf8 50%, #b23a2e 50%); }
+.theme-btn[data-theme="dark"]      { background: linear-gradient(135deg, #161b22 50%, #58a6ff 50%); }
+.theme-btn:hover { transform: scale(1.12); }
+.theme-btn.active {
+    border-color: var(--mlb-blue);
+    box-shadow: 0 0 0 2px var(--mlb-blue);
+}
+
+/* Night theme: the native <select> caret is a dark SVG baked into the bg image;
+   swap to a light stroke so it stays visible on dark fields. */
+html[data-theme="dark"] select.field {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='none' stroke='%239aa6b2' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+}
+.export-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    background: var(--panel);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,.12);
+    min-width: 148px;
+    z-index: 200;
+    overflow: hidden;
+}
+.export-opt {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    padding: 8px 12px;
+    font-size: 13px;
+    color: var(--text);
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    white-space: nowrap;
+    transition: background var(--transition), color var(--transition);
+}
+.export-opt + .export-opt {
+    border-top: 1px solid var(--border);
+}
+.export-opt:hover:not(:disabled) {
+    background: var(--bg);
+    color: var(--mlb-blue);
+}
+.export-opt:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+.help-btn {
+    flex: 0 0 auto;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 1px solid var(--border-strong);
+    background: var(--panel);
+    color: var(--text-muted);
+    font-weight: 700;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0;
+    transition: all var(--transition);
+}
+.help-btn:hover {
+    color: var(--mlb-blue);
+    border-color: var(--mlb-blue);
+    background: var(--bg);
+}
+
+.brand h1 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--mlb-blue);
+    letter-spacing: -0.01em;
+    line-height: 1.1;
+}
+/* Red's role: reserved for League = AL (legend, league-colored cloud). The
+   "record / highlight" accent is gold (career trail, player chips, logomark
+   dot) — see --gold. The wordmark "2D" keeps red as the brand accent pending a
+   holistic brand decision; if revisited, move it to gold to fully separate the
+   two meanings. */
+.brand-accent {
+    color: var(--mlb-red);
+}
+.brand .tagline {
+    margin: 2px 0 0;
+    font-size: 11px;
+    color: var(--text-muted);
+    display: none;
+}
+
+.attribution {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+.attribution-label {
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+    font-size: 10px;
+    display: none;
+}
+.attribution-sep { color: var(--border-strong); }
+
+/* -------- Story presets (welcome modal) -------- */
+/* A short list of "famous frontier" rows — one per row: title left, stat right.
+   Lives in the welcome modal (reachable anytime via Help). */
+.explainer-stories-lab {
+    margin: 6px 0 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+}
+.explainer .preset-shelf { margin-bottom: 16px; }
+.preset-shelf {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.preset-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    padding: 6px 10px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-strong);
+    background: var(--panel);
+    cursor: pointer;
+    text-align: left;
+    transition: border-color var(--transition), background var(--transition), color var(--transition);
+}
+.preset-row:hover {
+    border-color: var(--mlb-blue);
+    background: color-mix(in srgb, var(--mlb-blue) 5%, var(--panel));
+}
+.preset-row-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.preset-row:hover .preset-row-title { color: var(--mlb-blue); }
+.preset-row-stat {
+    flex: 0 0 auto;
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+/* -------- Main -------- */
+
+.app-main {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+}
+.app-main > * { min-width: 0; min-height: 0; }
+
+/* -------- Chart -------- */
+
+.chart-region {
+    flex: 1 1 auto;
+    position: relative;
+    background: var(--panel);
+    overflow: hidden;
+    min-height: 0;
+    min-width: 0;
+    width: 100%;
+}
+
+#scatter-plot {
+    width: 100%;
+    height: 100%;
+    display: block;
+    max-width: 100%;
+}
+
+.regular-point {
+    fill-opacity: 0.4;
+}
+.special-point {
+    fill: var(--frontier-color);
+    stroke: #ffffff;
+    stroke-width: 1.5;
+}
+.hv-shade {
+    pointer-events: none;
+}
+.frontier-staircase {
+    fill: none;
+    stroke: var(--frontier-color);
+    stroke-width: 2;
+    opacity: 0.55;
+    pointer-events: none;
+}
+/* Era-vs-era comparison overlay (teal — distinct from frontier/league/era hues). */
+.era-b-shade { fill: #0ea5a4; fill-opacity: 0.12; pointer-events: none; }
+.era-b-staircase {
+    fill: none;
+    stroke: #0ea5a4;
+    stroke-width: 2;
+    stroke-dasharray: 6 4;
+    opacity: 0.9;
+    pointer-events: none;
+}
+.era-b-dot { fill: #0ea5a4; stroke: var(--panel); stroke-width: 1.2; pointer-events: none; }
+.era-b-label {
+    font-family: var(--font-sans);
+    font-size: 11px;
+    font-weight: 600;
+    fill: var(--text);
+    paint-order: stroke;
+    stroke: var(--panel);
+    stroke-width: 3px;
+    pointer-events: none;
+}
+
+/* Outgoing frontier during a morph — dashed, fades out (see drawScatterPlot). */
+.frontier-staircase-ghost {
+    fill: none;
+    stroke: var(--frontier-color);
+    stroke-width: 2;
+    stroke-dasharray: 5 4;
+    pointer-events: none;
+}
+
+/* Onion-peeling: deeper Pareto layers behind the live frontier. Non-interactive,
+   fading outward (opacity set per-layer in drawScatterPlot). */
+.depth-staircase {
+    fill: none;
+    stroke: var(--frontier-color);
+    stroke-width: 1.6;
+    pointer-events: none;
+}
+.depth-dot {
+    fill: var(--frontier-color);
+    stroke: var(--panel);
+    stroke-width: 1;
+    pointer-events: none;
+}
+/* Nested dominated-region fills — stack to darken toward the inner layers. */
+.depth-shade {
+    fill: var(--frontier-color);
+    fill-opacity: 0.06;
+    stroke: none;
+    pointer-events: none;
+}
+
+.career-point {
+    fill: var(--gold);
+    stroke: #ffffff;
+    stroke-width: 1.5;
+    pointer-events: none;
+}
+
+.isolation-ring {
+    fill: none;
+    stroke-width: 1.5;
+    stroke-dasharray: 5 4;
+    pointer-events: none;
+}
+.isolation-ring--hover  { opacity: 0.35; }
+.isolation-ring--pinned { opacity: 0.6; stroke-width: 2; }
+.isolation-ring-label {
+    font-family: var(--font-sans, sans-serif);
+    font-size: 10px;
+    font-weight: 600;
+    font-style: italic;
+    opacity: 0.65;
+    pointer-events: none;
+}
+.isolation-ring-spoke {
+    stroke-width: 1;
+    stroke-dasharray: 3 3;
+    opacity: 0.4;
+    pointer-events: none;
+}
+.isolation-ring-neighbour {
+    opacity: 0.75;
+    stroke: #ffffff;
+    stroke-width: 1.5;
+    pointer-events: none;
+}
+
+.regret-line {
+    fill: none;
+    stroke: #5a6478;
+    stroke-width: 1.5;
+    stroke-dasharray: 4 3;
+    pointer-events: none;
+    opacity: 0.6;
+}
+.regret-ring {
+    fill: none;
+    stroke: #5a6478;
+    stroke-width: 1.5;
+    stroke-dasharray: 4 3;
+    pointer-events: none;
+    opacity: 0.35;
+}
+
+.axis text {
+    font-family: var(--font-sans);
+    font-size: 11px;
+    fill: var(--text-muted);
+}
+.axis line, .axis path {
+    stroke: var(--border);
+}
+.axis-title {
+    font-family: var(--font-sans);
+    font-size: 12px;
+    font-weight: 600;
+    fill: var(--text);
+    letter-spacing: 0.02em;
+}
+.axis-title:hover { fill: var(--mlb-blue); }
+.axis-title:hover .axis-caret { fill: var(--mlb-blue); }
+.axis-caret { fill: var(--text-muted); font-weight: 400; }
+
+/* Leader line connecting a dodged label back to its frontier dot. */
+.frontier-leader {
+    stroke: var(--text-muted);
+    stroke-width: 0.75;
+    opacity: 0.4;
+    pointer-events: none;
+}
+
+.frontier-label {
+    font-family: var(--font-sans);
+    font-size: 11px;
+    font-weight: 600;
+    fill: var(--mlb-blue);
+    stroke: #ffffff;
+    stroke-width: 3px;
+    paint-order: stroke;
+    pointer-events: none;
+}
+
+/* Chart overlays */
+
+.legend {
+    /* In-flow key in the sidebar, directly under the Color-by control it
+       explains — keeps it off the chart so it never hides a frontier point. */
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+.legend-row {
+    display: flex;
+    gap: 12px;
+}
+/* `display:flex` above would otherwise beat the UA [hidden] rule, leaving the
+   global-frontier row visible when JS hides it. */
+.legend-row[hidden] { display: none; }
+.legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.legend-note {
+    font-size: 10px;
+    /* Full-opacity muted (≈5.9:1 on white) instead of an opacity hack, so the
+       contrast is deterministic across themes. */
+    color: var(--text-muted);
+}
+/* Era encoding key — a sequential colorbar that matches the cloud ramp, with
+   the year range at its ends. Rendered by renderLegend() when Color-by = Era. */
+.legend-encoding { display: flex; flex-direction: column; gap: 3px; }
+.legend-enc-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.legend-era-bar {
+    display: flex;
+    height: 8px;
+    width: 100%;
+    border-radius: 3px;
+    overflow: hidden;
+}
+.legend-era-bar span { flex: 1; }
+.legend-era-scale {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    font-variant-numeric: tabular-nums;
+}
+.legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+}
+/* Color = league */
+.legend-dot--al { background: var(--league-al); }
+.legend-dot--nl { background: var(--league-nl); }
+/* Frontier markers are larger and white-ringed (size encodes area owned);
+   season dots are small and faded. Neutral fill — the league row above
+   already conveys the colour axis. */
+.legend-dot--frontier {
+    width: 11px;
+    height: 11px;
+    background: var(--text);
+    border: 1.5px solid #ffffff;
+    box-shadow: 0 0 0 1px var(--border);
+}
+.legend-dot--season {
+    width: 7px;
+    height: 7px;
+    background: var(--text-muted);
+    opacity: 0.5;
+}
+/* Dashed swatch for the global reference frontier (shown only while an
+   attribute filter is active). Mirrors the dashed staircase on the chart. */
+.legend-line--global {
+    width: 14px;
+    height: 0;
+    flex-shrink: 0;
+    border-top: 1.5px dashed #8a93a6;
+}
+
+.chart-toolbar {
+    /* Hidden for now — the SVG-based zoom path is laggy on the larger
+       point clouds. Code path stays in place behind this and the JS
+       feature flag so we can switch it back on after a perf rework. */
+    display: none;
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    gap: 4px;
+    z-index: 3;
+}
+.chart-tool {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--glass-bg);
+    color: var(--text-muted);
+    padding: 0;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: all var(--transition);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+}
+.chart-tool:hover:not(:disabled) {
+    color: var(--mlb-blue);
+    border-color: var(--mlb-blue);
+}
+.chart-tool.active {
+    background: var(--mlb-blue);
+    color: var(--on-primary);
+    border-color: var(--mlb-blue);
+}
+.chart-tool.active:hover { color: var(--on-primary); }
+.chart-tool:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* d3.brush styling: tight selection rectangle, subtle handles */
+.brush .selection {
+    fill: var(--mlb-blue);
+    fill-opacity: 0.08;
+    stroke: var(--mlb-blue);
+    stroke-width: 1;
+    stroke-dasharray: 3 2;
+}
+.brush .overlay {
+    cursor: crosshair;
+}
+
+.loading-indicator {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    display: none;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: var(--glass-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    color: var(--text-muted);
+    z-index: 3;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+}
+.loading-indicator.active { display: inline-flex; }
+
+.spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--mlb-blue);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.tooltip {
+    position: fixed;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    font-size: 12px;
+    color: var(--text);
+    box-shadow: var(--shadow-md);
+    pointer-events: none;
+    opacity: 0;
+    max-width: 320px;
+    min-width: 200px;
+    z-index: 20;
+    transition: opacity var(--transition);
+}
+.tooltip[data-visible="true"] { opacity: 1; }
+.tooltip-header {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    padding-bottom: 6px;
+    margin-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+}
+.tooltip-row {
+    padding: 3px 0;
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+}
+.tooltip-row + .tooltip-row { border-top: 1px dashed var(--border); }
+.tooltip-name { font-weight: 600; }
+.tooltip-meta { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.tooltip-more {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+/* ── Share modal ─────────────────────────────────────────────── */
+.share-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.5);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 300;
+    padding: 16px;
+}
+.share-backdrop[hidden] { display: none; }
+.share-preview-spinner[hidden] { display: none; }
+
+.share-modal {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    box-shadow: 0 16px 48px rgba(0,0,0,.22);
+    width: 100%;
+    max-width: 500px;
+    padding: 20px 22px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.share-modal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.share-modal-head h2 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text);
+}
+.share-modal-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 0;
+    flex-shrink: 0;
+    transition: all var(--transition);
+}
+.share-modal-close:hover { color: var(--text); border-color: var(--border-strong); }
+
+.share-preview {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    height: 200px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+}
+.share-preview-spinner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+.share-preview-img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+}
+
+.share-platforms-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--text-muted);
+}
+.share-platforms {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 8px;
+}
+.share-platform {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+    padding: 10px 4px 8px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text-muted);
+    text-decoration: none;
+    font-size: 11px;
+    font-weight: 500;
+    transition: all var(--transition);
+    cursor: pointer;
+}
+.share-platform:hover {
+    border-color: var(--mlb-blue);
+    color: var(--mlb-blue);
+    background: var(--bg);
+}
+.share-divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 0 -2px;
+}
+.share-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+.share-action-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    padding: 9px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border-strong);
+    background: var(--mlb-blue);
+    color: var(--on-primary);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all var(--transition);
+}
+.share-action-btn:hover { opacity: 0.88; }
+.share-action-btn--secondary {
+    background: var(--panel);
+    color: var(--text);
+}
+.share-action-btn--secondary:hover { background: var(--bg); opacity: 1; }
+.share-action-btn--done {
+    background: #1a9e5a !important;
+    border-color: #1a9e5a !important;
+    color: #fff !important;
+}
+.share-action-btn:disabled { opacity: 0.5; cursor: default; }
+
+.share-hint {
+    margin: 0;
+    font-size: 11px;
+    color: var(--text-muted);
+    text-align: center;
+    line-height: 1.5;
+}
+
+@media (max-width: 420px) {
+    .share-platforms { grid-template-columns: repeat(3, 1fr); }
+}
+
+/* ── Explainer modal ─────────────────────────────────────────── */
+.explainer-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    z-index: 100;
+    animation: explainer-fade 0.18s ease-out;
+}
+.explainer-backdrop[hidden] { display: none; }
+@keyframes explainer-fade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+.explainer {
+    background: var(--panel);
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    box-shadow: 0 20px 50px rgba(15, 23, 42, 0.25);
+    max-width: 460px;
+    width: 100%;
+    /* Cap to the viewport and scroll internally so the heading and the
+       dismiss button are always reachable on short phone screens. dvh tracks
+       the visible area as mobile browser chrome shows/hides. */
+    max-height: calc(100vh - 40px);
+    max-height: calc(100dvh - 40px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    /* No bottom padding: the sticky dismiss button sits flush at the bottom so
+       no scrolled text peeks beneath it. */
+    padding: 24px 24px 0;
+    animation: explainer-pop 0.22s cubic-bezier(0.34, 1.4, 0.56, 1);
+}
+@keyframes explainer-pop {
+    from { transform: scale(0.95); opacity: 0; }
+    to   { transform: scale(1); opacity: 1; }
+}
+.explainer h2 {
+    margin: 0 0 14px;
+    font-size: 18px;
+    color: var(--mlb-blue);
+    letter-spacing: -0.01em;
+}
+.explainer p {
+    margin: 0 0 12px;
+    color: var(--text);
+    line-height: 1.55;
+}
+.explainer p:last-of-type {
+    margin-bottom: 18px;
+}
+.explainer-red { color: var(--mlb-red); }
+.explainer-gold { color: var(--gold); }
+/* Action row pinned to the bottom of the (scrollable) modal so the CTAs stay
+   visible on short phones; fade the scrolling text into the panel above it. */
+.explainer-actions {
+    display: flex;
+    gap: 8px;
+    position: sticky;
+    bottom: 0;
+    background: var(--panel);
+    box-shadow: 0 -14px 14px -6px var(--panel);
+    padding-bottom: 0;
+}
+.explainer-dismiss {
+    flex: 1 1 auto;
+    padding: 10px 16px;
+    background: var(--mlb-blue);
+    color: var(--on-primary);
+    border: none;
+    border-radius: var(--radius-sm);
+    font-weight: 600;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background var(--transition);
+}
+.explainer-dismiss:hover {
+    background: var(--mlb-blue-hover);
+}
+.explainer-tour {
+    flex: 0 0 auto;
+    padding: 10px 16px;
+    background: var(--panel);
+    color: var(--mlb-blue);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-weight: 600;
+    font-size: 14px;
+    cursor: pointer;
+    transition: border-color var(--transition), background var(--transition);
+}
+.explainer-tour:hover { background: var(--bg); border-color: var(--mlb-blue); }
+
+/* ── Guided tour overlay ───────────────────────────────────────────── */
+.bl-tour {
+    position: fixed;
+    inset: 0;
+    z-index: 400;
+}
+.bl-tour-ring {
+    position: fixed;
+    border-radius: 10px;
+    box-shadow: 0 0 0 9999px rgba(5, 9, 15, 0.62),
+                0 0 0 2px var(--mlb-blue),
+                0 0 18px 4px color-mix(in srgb, var(--mlb-blue) 40%, transparent);
+    pointer-events: none;
+    transition: left 0.25s ease, top 0.25s ease, width 0.25s ease, height 0.25s ease;
+    animation: bl-tour-pulse 1.8s ease-in-out infinite;
+}
+.bl-tour-ring--still { animation: none; }
+@keyframes bl-tour-pulse {
+    0%, 100% { box-shadow: 0 0 0 9999px rgba(5,9,15,0.62), 0 0 0 2px var(--mlb-blue), 0 0 14px 3px color-mix(in srgb, var(--mlb-blue) 35%, transparent); }
+    50%      { box-shadow: 0 0 0 9999px rgba(5,9,15,0.62), 0 0 0 2px var(--mlb-blue), 0 0 22px 7px color-mix(in srgb, var(--mlb-blue) 55%, transparent); }
+}
+.bl-tour-card {
+    position: fixed;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-md);
+    padding: 13px 14px 11px;
+    z-index: 401;
+}
+.bl-tour-title { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+.bl-tour-body { font-size: 12px; line-height: 1.45; color: var(--text-muted); }
+.bl-tour-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 12px;
+}
+.bl-tour-dots { display: flex; gap: 4px; }
+.bl-tour-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--border-strong); }
+.bl-tour-dot.is-on { background: var(--mlb-blue); }
+.bl-tour-btns { display: flex; gap: 6px; }
+.bl-tour-btns button {
+    padding: 5px 11px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid var(--border-strong);
+    background: var(--panel);
+    color: var(--text-muted);
+    transition: all var(--transition);
+}
+.bl-tour-btns button:hover { color: var(--mlb-blue); border-color: var(--mlb-blue); }
+.bl-tour-next {
+    background: var(--mlb-blue) !important;
+    color: var(--on-primary) !important;
+    border-color: var(--mlb-blue) !important;
+}
+.bl-tour-next:hover { background: var(--mlb-blue-hover) !important; }
+
+/* -------- Controls -------- */
+
+.controls-region {
+    flex: 0 0 auto;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    max-height: 70vh;
+    overflow: hidden;
+}
+
+/* Mobile axis bar — a persistent compact X-vs-Y selector above the drawer so
+   the chart's primary control isn't buried in the collapsed panel. Desktop
+   hides it (the sidebar always shows the full axis row). */
+.mobile-axis-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+}
+.mobile-axis-bar select.field {
+    flex: 1 1 0;
+    min-width: 0;
+    font-weight: 600;
+    border-color: color-mix(in srgb, var(--mlb-blue) 35%, var(--border-strong));
+    background-color: color-mix(in srgb, var(--mlb-blue) 4%, var(--panel));
+}
+.mobile-axis-vs {
+    flex: 0 0 auto;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+}
+
+.controls-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    width: 100%;
+    padding: 12px 16px;
+    background: transparent;
+    border: none;
+    text-align: left;
+    font-weight: 600;
+    color: var(--text);
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.controls-toggle .chevron {
+    transition: transform 0.2s ease;
+    color: var(--text-muted);
+}
+.controls-toggle[aria-expanded="false"] .chevron {
+    transform: rotate(-90deg);
+}
+
+.sr-only {
+    position: absolute; width: 1px; height: 1px;
+    padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+.controls-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding: 0 16px 16px;
+    overflow-y: auto;
+    min-height: 0;
+}
+.controls-panel.collapsed { display: none; }
+
+/* ---- New section-based layout ---- */
+.ctl-section {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 10px 0;
+}
+.ctl-section:first-child { padding-top: 6px; }
+.ctl-section:last-child  { padding-bottom: 4px; }
+
+.ctl-divider {
+    border: 0;
+    border-top: 1px solid var(--border);
+    margin: 0;
+}
+
+.ctl-section__title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin: 0;
+}
+
+.ctl-label {
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+label.ctl-label { cursor: pointer; }
+
+.ctl-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+.ctl-field--inline {
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+}
+.ctl-field--inline .mode-toggle { flex: 1; }
+.ctl-field--inline .seg-group   { flex: 1; }
+.ctl-field--inline select.field { flex: 1 1 0; min-width: 0; }
+.ctl-label--axis { width: 1.2ch; text-align: center; }
+
+.ctl-threshold {
+    width: 44px;
+    text-align: right;
+    flex-shrink: 0;
+    padding-left: 4px;
+    padding-right: 4px;
+}
+.ctl-threshold::-webkit-inner-spin-button,
+.ctl-threshold::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.ctl-threshold { -moz-appearance: textfield; appearance: textfield; }
+
+.ctl-grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+.controls-inputs {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    /* min-height: 0 lives in the desktop block — on mobile we want this
+       wrapper to keep its natural height so the panel scrolls properly. */
+}
+
+.control-group {
+    border: none;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
+}
+.control-group legend {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    width: 100%;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+    padding: 0;
+}
+.threshold-inline {
+    width: 5ch;
+    text-align: right;
+    text-transform: none;
+    letter-spacing: 0;
+    font-size: 13px;
+    padding: 1px 4px;
+}
+.legend-value {
+    font-family: var(--font-sans);
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--mlb-blue);
+    text-transform: none;
+    letter-spacing: 0;
+    font-variant-numeric: tabular-nums;
+}
+
+.field-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.field-label {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 500;
+    min-width: 0;
+}
+.field-label > span {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+.axis-inline-label {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+}
+.field-row > select.field { flex: 1 1 0; min-width: 0; }
+
+.glossary-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    border: 1px solid var(--border-strong);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 9px;
+    font-weight: 700;
+    padding: 0;
+    line-height: 1;
+    text-transform: none;
+    cursor: help;
+    transition: all var(--transition);
+}
+.glossary-btn:hover, .glossary-btn[aria-expanded="true"] {
+    color: var(--mlb-blue);
+    border-color: var(--mlb-blue);
+}
+
+.glossary-popover {
+    position: fixed;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-md);
+    padding: 10px 12px;
+    font-size: 12px;
+    max-width: 280px;
+    z-index: 50;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--transition);
+    text-transform: none;
+    letter-spacing: 0;
+}
+.glossary-popover[data-visible="true"] {
+    opacity: 1;
+    pointer-events: auto;
+}
+.glossary-popover-name {
+    font-weight: 600;
+    color: var(--mlb-blue);
+    margin-bottom: 4px;
+    font-size: 13px;
+}
+.glossary-popover-formula {
+    color: var(--text-muted);
+    line-height: 1.4;
+}
+
+.field {
+    width: 100%;
+    padding: 9px 11px;
+    font-family: var(--font-sans);
+    font-size: 14px;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    transition: border-color var(--transition), box-shadow var(--transition);
+    -webkit-appearance: none;
+    appearance: none;
+}
+.field:hover { border-color: var(--mlb-blue); }
+.field:focus {
+    outline: none;
+    border-color: var(--mlb-blue);
+    box-shadow: 0 0 0 3px rgba(0, 45, 114, 0.12);
+}
+
+select.field {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='none' stroke='%235a6478' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 11px center;
+    background-size: 10px;
+    padding-right: 30px;
+    cursor: pointer;
+}
+
+input[type="number"].field {
+    font-variant-numeric: tabular-nums;
+}
+input[type="number"].field::-webkit-inner-spin-button,
+input[type="number"].field::-webkit-outer-spin-button {
+    opacity: 0;
+}
+
+.slider {
+    width: 100%;
+    height: 24px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    margin: 0;
+    padding: 0;
+}
+.slider:focus { outline: none; }
+.slider::-webkit-slider-runnable-track {
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+}
+.slider::-moz-range-track {
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+}
+.slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--mlb-blue);
+    border: 2px solid #ffffff;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+    cursor: grab;
+    margin-top: -6px;
+    transition: transform var(--transition);
+}
+.slider::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--mlb-blue);
+    border: 2px solid #ffffff;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+    cursor: grab;
+}
+.slider:active::-webkit-slider-thumb { transform: scale(1.1); cursor: grabbing; }
+.slider:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 4px rgba(0, 45, 114, 0.18), 0 1px 3px rgba(0,0,0,0.25);
+}
+
+.filter-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+.filter-row:last-child { margin-bottom: 0; }
+.filter-label {
+    flex: 0 0 auto;
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 500;
+    min-width: 70px;
+}
+.filter-row > select.field {
+    flex: 1;
+    min-width: 0;
+}
+
+.seg-group {
+    flex: 1;
+    display: flex;
+    gap: 2px;
+    background: var(--bg);
+    padding: 2px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    min-width: 0;
+}
+.seg-btn {
+    flex: 1;
+    padding: 5px 6px;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    font-family: inherit;
+    font-weight: 500;
+    font-size: 12px;
+    color: var(--text-muted);
+    transition: all var(--transition);
+    min-width: 0;
+}
+.seg-btn:hover { color: var(--mlb-blue); }
+.seg-btn.active {
+    background: var(--mlb-blue);
+    color: var(--on-primary);
+    box-shadow: 0 1px 1px rgba(0, 45, 114, 0.18);
+}
+.seg-btn.active:hover { color: var(--on-primary); }
+
+.mode-toggle {
+    display: flex;
+    gap: 3px;
+    background: var(--bg);
+    padding: 3px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+}
+.mode-btn {
+    flex: 1;
+    padding: 7px 8px;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    font-family: inherit;
+    font-weight: 500;
+    font-size: 13px;
+    color: var(--text-muted);
+    transition: all var(--transition);
+}
+.mode-btn:hover { color: var(--mlb-blue); }
+.mode-btn.active {
+    background: var(--mlb-blue);
+    color: var(--on-primary);
+    box-shadow: 0 1px 2px rgba(0, 45, 114, 0.2);
+}
+.mode-btn.active:hover { color: var(--on-primary); }
+
+.preset-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 10px;
+}
+.preset {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 4px;
+    font-size: 12px;
+    font-weight: 500;
+    background: var(--panel);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    transition: all var(--transition);
+    font-variant-numeric: tabular-nums;
+}
+.preset:hover {
+    border-color: var(--mlb-blue);
+    color: var(--mlb-blue);
+}
+.preset.active {
+    background: var(--mlb-blue);
+    border-color: var(--mlb-blue);
+    color: var(--on-primary);
+}
+
+.control-hint {
+    margin: 6px 0 0;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+.control-hint[hidden] { display: none; }
+
+/* Year era presets wrap gracefully at narrow widths */
+.year-preset-row { flex-wrap: wrap; }
+.year-preset-row .preset { flex: 0 1 auto; }
+.year-preset-row--utility { margin-bottom: 4px; }
+.preset--utility { color: var(--text); font-weight: 600; }
+
+/* Mobile frontier labels — abbreviated, below each dot */
+.frontier-label--mobile { font-size: 9px; }
+
+/* Axes legend with Best/Worst toggle inline */
+/* Best/Worst toggle sits inside .field-row — override text-transform inherited from legend */
+.field-row .mode-toggle { text-transform: none; flex: 0 0 auto; }
+
+/* Player highlight hint row */
+.player-search-row { position: relative; }
+
+.player-suggestions {
+    position: absolute;
+    bottom: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    background: var(--panel);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-md);
+    z-index: 60;
+    overflow: hidden;
+}
+.player-suggestions[hidden] { display: none; }
+
+.player-suggestion-item {
+    padding: 7px 10px;
+    font-size: 13px;
+    color: var(--text);
+    cursor: pointer;
+    transition: background var(--transition), color var(--transition);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.player-suggestion-item:hover,
+.player-suggestion-item--active {
+    background: var(--bg);
+    color: var(--mlb-blue);
+}
+.player-suggestion-item--added {
+    color: var(--text-muted);
+    cursor: default;
+}
+.player-suggestion-item--added::after {
+    content: " ✓";
+    font-size: 11px;
+}
+.player-suggestion-item mark {
+    background: none;
+    font-weight: 700;
+    color: inherit;
+}
+
+.player-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: 6px;
+}
+.player-chips[hidden] { display: none; }
+
+.player-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 6px 3px 7px;
+    border-radius: 20px;
+    border: 1.5px solid var(--chip-color, var(--gold));
+    background: color-mix(in srgb, var(--chip-color, var(--gold)) 12%, var(--panel));
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+    max-width: 100%;
+}
+.player-chip-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--chip-color, var(--gold));
+    flex-shrink: 0;
+}
+.player-chip-name {
+    max-width: 130px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.player-chip-remove {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--chip-color, var(--gold));
+    font-size: 13px;
+    line-height: 1;
+    padding: 0 1px;
+    opacity: 0.65;
+    flex-shrink: 0;
+}
+.player-chip-remove:hover { opacity: 1; }
+
+/* ── Frontier leaderboard ──────────────────────────────────────────── */
+.frontier-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    min-height: 0;
+}
+.frontier-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex: 0 0 auto;
+}
+.frontier-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+}
+.frontier-count {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+.frontier-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow-y: auto;
+    min-height: 0;
+}
+.frontier-card {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 7px;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: background var(--transition), border-color var(--transition);
+}
+.frontier-card:hover { background: var(--bg); }
+.frontier-card:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--mlb-blue) 45%, transparent);
+}
+.frontier-card--pinned {
+    background: color-mix(in srgb, var(--gold) 14%, var(--panel));
+    border-color: color-mix(in srgb, var(--gold) 55%, var(--panel));
+}
+.frontier-rank {
+    flex: 0 0 auto;
+    width: 16px;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+.frontier-card--pinned .frontier-rank { color: var(--gold); }
+.frontier-card-main { flex: 1 1 auto; min-width: 0; }
+.frontier-card-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.frontier-card-sub {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.frontier-card-hv { color: var(--mlb-blue); font-weight: 600; }
+.frontier-spark { flex: 0 0 auto; }
+.frontier-spark polyline {
+    fill: none;
+    stroke: var(--text-muted);
+    stroke-width: 1.4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 0.7;
+}
+.frontier-spark-dot { fill: var(--gold); }
+.frontier-spark-empty { flex: 0 0 52px; }
+.frontier-empty { font-size: 11px; color: var(--text-muted); padding: 6px 4px; }
+
+/* ── Player spotlight card ─────────────────────────────────────────── */
+/* Non-interactive overlay layer; the cards inside catch pointer events. */
+.player-spotlight {
+    position: absolute;
+    inset: 0;
+    z-index: 6;
+    pointer-events: none;
+}
+.player-spotlight[hidden] { display: none; }
+.ps-card {
+    position: absolute;
+    width: 240px;
+    max-width: calc(100% - 24px);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-md);
+    padding: 12px 12px 10px;
+    pointer-events: auto;
+}
+.ps-close {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    transition: color var(--transition), border-color var(--transition);
+}
+.ps-close:hover { color: var(--text); border-color: var(--border-strong); }
+.ps-head { display: flex; align-items: center; gap: 10px; padding-right: 22px; }
+.ps-mono {
+    flex: 0 0 auto;
+    width: 40px;
+    height: 40px;
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--accent, var(--gold)) 18%, var(--panel));
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 14px;
+    color: var(--accent, var(--gold));
+}
+.ps-id { min-width: 0; }
+.ps-name {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.ps-sub {
+    font-size: 10px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.ps-tiles { display: flex; gap: 8px; margin: 10px 0; }
+.ps-tile { flex: 1; background: var(--bg); border-radius: 7px; padding: 6px 9px; }
+.ps-tile-num { font-size: 16px; font-weight: 800; color: var(--text); font-variant-numeric: tabular-nums; }
+.ps-tile:first-child .ps-tile-num { color: var(--accent, var(--gold)); }
+.ps-tile-lab {
+    font-size: 8px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+}
+.ps-spark-lab {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin-bottom: 2px;
+}
+.ps-spark { margin-bottom: 8px; }
+/* Two stacked career sparklines (X stat, Y stat) sharing one year timeline. */
+.ps-dual { margin-bottom: 8px; }
+.ps-dual-row { display: flex; align-items: center; gap: 6px; }
+.ps-dual-row + .ps-dual-row { margin-top: 2px; }
+.ps-dual-tag {
+    flex: 0 0 28px;
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-muted);
+    text-align: right;
+}
+.ps-dual-years {
+    display: flex;
+    justify-content: space-between;
+    padding-left: 34px;
+    margin-top: 1px;
+    font-size: 9px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+.ps-mini { display: block; flex: 1 1 0; min-width: 0; }
+.ps-mini-path {
+    fill: none;
+    stroke: var(--accent, var(--gold));
+    stroke-width: 1.4;
+    opacity: 0.55;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+}
+.ps-mini-mark {
+    stroke: var(--accent, var(--gold));
+    stroke-width: 1.4;
+    opacity: 0.55;
+    vector-effect: non-scaling-stroke;
+}
+.ps-spark polyline { fill: none; stroke: var(--accent, var(--gold)); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; opacity: 1; }
+.ps-spark .frontier-spark-dot { fill: var(--accent, var(--gold)); }
+.ps-season { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }
+.ps-season-yr { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.ps-season-val { font-size: 11px; color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* ── On-chart axis stat picker menu ─────────────────────────────── */
+.axis-stat-menu {
+    position: absolute;
+    background: var(--panel);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-md);
+    z-index: 70;
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 4px 0;
+    min-width: 96px;
+}
+.axis-stat-menu[hidden] { display: none; }
+.axis-stat-item {
+    padding: 6px 14px;
+    font-family: var(--font-sans);
+    font-size: 13px;
+    color: var(--text);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--transition), color var(--transition);
+}
+.axis-stat-item:hover,
+.axis-stat-item--active {
+    background: var(--bg);
+    color: var(--mlb-blue);
+}
+.axis-stat-item--active { font-weight: 700; }
+
+/* ── Country picker ─────────────────────────────────────────────── */
+#country-row { margin-top: 2px; }
+
+.country-panel { padding: 4px 0 2px; }
+
+.country-chip--all {
+    display: block;
+    width: 100%;
+    padding: 5px 8px;
+    margin-bottom: 5px;
+    font-size: 12px;
+    font-weight: 500;
+    text-align: center;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all var(--transition);
+}
+.country-chip--all:hover { border-color: var(--mlb-blue); color: var(--mlb-blue); }
+.country-chip--all.country-chip--selected {
+    background: var(--mlb-blue);
+    border-color: var(--mlb-blue);
+    color: var(--on-primary);
+}
+
+.country-chip-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+}
+
+.country-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 3px 6px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: var(--bg);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text);
+    cursor: pointer;
+    transition: border-color var(--transition), background var(--transition);
+    white-space: nowrap;
+    line-height: 1.3;
+}
+.country-chip:hover { border-color: var(--mlb-blue); }
+.country-chip--selected {
+    border-color: var(--mlb-blue);
+    background: rgba(0, 45, 114, 0.07);
+    color: var(--mlb-blue);
+    font-weight: 600;
+}
+/* Flag-only chips: compact, just the flag emoji. */
+.country-chip--flag { padding: 3px 5px; }
+.country-flag { font-size: 16px; line-height: 1; }
+.country-code { font-size: 10px; font-weight: 600; letter-spacing: 0.02em; }
+
+/* ── Franchise picker ────────────────────────────────────────────── */
+#franchise-row { position: relative; }
+
+.franchise-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    width: 100%;
+    text-align: left;
+    background: var(--panel);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 9px 11px;
+    font-size: 14px;
+    color: var(--text);
+    cursor: pointer;
+    transition: border-color var(--transition), box-shadow var(--transition);
+    white-space: nowrap;
+    overflow: hidden;
+}
+.franchise-trigger:hover { border-color: var(--mlb-blue); }
+.franchise-trigger[aria-expanded="true"] {
+    border-color: var(--mlb-blue);
+    box-shadow: 0 0 0 3px rgba(0, 45, 114, 0.12);
+}
+.franchise-trigger-label {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+.franchise-chevron {
+    flex: 0 0 auto;
+    font-size: 10px;
+    color: var(--text-muted);
+    transition: transform var(--transition);
+}
+.franchise-trigger[aria-expanded="true"] .franchise-chevron { transform: rotate(180deg); }
+
+/* Mobile: in-flow so sidebar scroll isn't clipped */
+.franchise-panel {
+    margin-top: 4px;
+    background: var(--panel);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-md);
+    padding: 8px;
+}
+.franchise-panel[hidden] { display: none; }
+
+.franchise-league-row {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 6px;
+}
+.franchise-league-row .seg-group { width: 100%; }
+.franchise-league-row .seg-btn { flex: 1; }
+
+
+.franchise-division-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+}
+.franchise-division-cell { display: flex; flex-direction: column; gap: 2px; transition: opacity 0.15s; }
+.franchise-division-cell--dimmed { opacity: 0.25; pointer-events: none; }
+
+.franchise-division-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    padding: 2px 2px 3px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 2px;
+}
+.franchise-chips-row { display: flex; flex-direction: column; gap: 2px; }
+
+.franchise-chip {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 5px;
+    border-radius: 4px;
+    border: 1px solid transparent;
+    background: transparent;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+    cursor: pointer;
+    transition: background var(--transition), border-color var(--transition);
+    text-align: left;
+    white-space: nowrap;
+    line-height: 1.2;
+}
+.franchise-chip:hover { background: var(--bg); border-color: var(--border); }
+.franchise-chip--selected { background: var(--bg); border-color: var(--mlb-blue); color: var(--mlb-blue); }
+.franchise-chip--selected .franchise-swatch { box-shadow: 0 0 0 2px var(--mlb-blue); }
+
+.franchise-swatch {
+    flex: 0 0 10px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 1px solid rgba(0,0,0,0.15);
+}
+.franchise-abbr { flex: 1 1 auto; }
+
+.hv-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text);
+    cursor: pointer;
+    user-select: none;
+}
+.hv-toggle input[type="checkbox"] { margin: 0; }
+.tooltip-subheader {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    padding-bottom: 4px;
+    border-bottom: 1px dashed var(--border);
+    margin-bottom: 4px;
+}
+.hv-contrib-rect {
+    fill: var(--frontier-color);
+    fill-opacity: 0.18;
+    stroke: var(--frontier-color);
+    stroke-width: 1.2;
+    stroke-dasharray: 4 3;
+    pointer-events: none;
+}
+.hv-contrib-poly {
+    fill: var(--frontier-color);
+    fill-opacity: 0.22;
+    stroke: none;
+    pointer-events: none;
+}
+.hv-contrib-poly.hv-contrib-overlay--pinned {
+    fill-opacity: 0.32;
+    stroke: var(--frontier-color);
+    stroke-width: 1;
+    stroke-opacity: 0.45;
+}
+.hv-alt-frontier {
+    stroke: var(--frontier-color);
+    stroke-width: 1.5;
+    stroke-dasharray: 6 4;
+    stroke-opacity: 0.7;
+    fill: none;
+    pointer-events: none;
+}
+.hv-with-frontier {
+    stroke: var(--frontier-color);
+    stroke-width: 2;
+    stroke-opacity: 0.8;
+    fill: none;
+    pointer-events: none;
+}
+.hv-contrib-label {
+    fill: var(--frontier-color);
+    font-size: 14px;
+    font-weight: 700;
+    pointer-events: none;
+    paint-order: stroke;
+    stroke: var(--panel);
+    stroke-width: 4px;
+    stroke-linejoin: round;
+}
+
+/* -------- Responsive: tablet and up -------- */
+
+@media (min-width: 768px) {
+    :root {
+        --header-h: 64px;
+    }
+
+    .brand h1 { font-size: 18px; }
+    .brand .tagline { display: block; }
+    .attribution { font-size: 13px; gap: 10px; }
+    .attribution-label { display: inline; }
+
+    .app-main {
+        flex-direction: row;
+    }
+
+    .chart-region {
+        order: 1;
+    }
+    .controls-region {
+        order: 2;
+        width: var(--sidebar-w);
+        flex: 0 0 var(--sidebar-w);
+        max-height: none;
+        border-top: none;
+        border-left: 1px solid var(--border);
+        overflow: hidden;          /* panel handles vertical layout below */
+    }
+    .controls-toggle {
+        display: none;
+    }
+    /* Desktop sidebar always shows the full axis row — the mobile bar is redundant. */
+    .mobile-axis-bar {
+        display: none;
+    }
+    .controls-panel {
+        padding: 16px 16px 12px;
+        gap: 0;
+        overflow: hidden;          /* the two children scroll independently */
+    }
+    .controls-panel.collapsed { display: flex; }
+    /* Inputs take the available space and scroll on their own, so the frontier
+       leaderboard below stays visible without scrolling past every control. */
+    .controls-inputs { gap: 10px; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+
+    /* Compact new section layout on desktop */
+    .ctl-section { gap: 5px; padding: 6px 0; }
+    .ctl-section__title { font-size: 10px; }
+    .ctl-label { font-size: 10px; }
+    .ctl-field { gap: 3px; }
+    .ctl-grid-2 { gap: 8px; }
+    .frontier-section {
+        flex: 1 1 200px;           /* shares panel height with the inputs (both grow) */
+        min-height: 150px;         /* ~4 rows even when the inputs are tall */
+        max-height: 50%;
+        overflow: hidden;
+    }
+    .frontier-cards {
+        flex: 1 1 0;
+        min-height: 0;
+    }
+
+    /* --- Compact controls (desktop) so the inputs fit without scrolling --- */
+    .control-group legend { margin-bottom: 4px; font-size: 10px; }
+    .control-hint { font-size: 10px; margin-top: 4px; }
+    .field-row { gap: 8px; }
+    .field-label { gap: 3px; }
+    .field { padding: 6px 9px; font-size: 13px; }
+    select.field { padding-right: 26px; background-position: right 9px center; }
+    .mode-toggle { padding: 2px; gap: 2px; }
+    .mode-btn { padding: 5px 6px; font-size: 12px; }
+    .franchise-chip { padding: 3px 4px; font-size: 10px; }
+    .franchise-division-label { font-size: 10px; }
+    .mode-toggle.compact .mode-btn { padding: 4px 4px; font-size: 11px; }
+    .filter-row { gap: 8px; margin-bottom: 6px; }
+    .filter-label { min-width: 56px; font-size: 10px; }
+    .seg-btn { padding: 4px 5px; font-size: 11px; }
+    .slider { height: 20px; }
+    .preset-row { gap: 4px; margin-top: 6px; }
+    .preset { padding: 4px 4px; font-size: 11px; }
+
+    /* The preset row's button labels (502, 162, etc.) already convey what
+       the threshold hint says in prose. Drop the prose to recover a row. */
+    #threshold-hint { display: none; }
+
+    /* Stats + Mode in one row at the top of the sidebar */
+    .quick-toggles {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+    }
+    .toggle-cell { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+    .toggle-cell-label {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-muted);
+    }
+
+}
+
+.year-range {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.year-range .field { flex: 1 1 0; min-width: 0; text-align: center; }
+.year-range-sep { flex: 0 0 auto; color: var(--text-muted); font-weight: 600; }
+
+/* Year range row — each year fills its half so it lines up under the axis
+   select above it (start under X, end under Y). Native spinners suppressed. */
+.ctl-year-row { gap: 10px; }
+#s-year-select, #e-year-select,
+#sb-year-select, #eb-year-select {
+    flex: 1 1 0;
+    min-width: 0;
+    text-align: center;
+    -moz-appearance: textfield;
+    -webkit-appearance: none;
+    appearance: none;
+}
+#s-year-select::-webkit-inner-spin-button,
+#s-year-select::-webkit-outer-spin-button,
+#e-year-select::-webkit-inner-spin-button,
+#e-year-select::-webkit-outer-spin-button,
+#sb-year-select::-webkit-inner-spin-button,
+#sb-year-select::-webkit-outer-spin-button,
+#eb-year-select::-webkit-inner-spin-button,
+#eb-year-select::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+
+/* Contextual threshold row (bottom): label + dropdown filling the rest. */
+.ctl-pa-row { gap: 8px; }
+.ctl-pa-row .ctl-label { flex: 0 0 auto; white-space: nowrap; }
+/* Two-class selector beats `.field { width: 100% }` (defined later in the file). */
+.ctl-pa-row .ctl-threshold { flex: 1 1 auto; width: auto; text-align: left; }
+/* `.ctl-section`/`.ctl-field` display:flex would otherwise beat the UA `[hidden]`
+   rule — the threshold row is now an inline .ctl-field inside the Filter band. */
+.ctl-section[hidden],
+.ctl-field[hidden] { display: none; }
+
+/* Available-but-off control (e.g. the comparison-era range before it's enabled),
+   mirroring the dimmed-franchise treatment. */
+.ctl-disabled { opacity: 0.4; pointer-events: none; }
+/* Comparison-era range: dim the year inputs until the center toggle turns it on
+   (the toggle itself stays interactive). */
+#era-b-row .field:disabled { opacity: 0.4; cursor: pointer; }
+.era-compare-btn.active {
+    border-color: var(--mlb-blue);
+    color: var(--mlb-blue);
+    background: color-mix(in srgb, var(--mlb-blue) 9%, transparent);
+}
+
+/* Leading icon that stands in for a text label on a control row. Fixed width so
+   icon-led rows (Color, Layers) keep their seg-groups vertically aligned. */
+.ctl-icon {
+    flex: 0 0 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+}
+
+/* Axis selectors drive the whole chart, so give them subtle primary emphasis
+   over the other controls (theme-safe via color-mix). */
+.ctl-axis-pair .field {
+    font-weight: 600;
+    border-color: color-mix(in srgb, var(--mlb-blue) 35%, var(--border-strong));
+    background-color: color-mix(in srgb, var(--mlb-blue) 4%, var(--panel));
+}
+
+.anim-play-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    flex-shrink: 0;
+    background: none;
+    border: 1.5px solid var(--border);
+    border-radius: 50%;
+    cursor: pointer;
+    color: var(--text-muted);
+    transition: border-color 150ms, color 150ms, background 150ms;
+}
+.anim-play-btn:hover {
+    border-color: var(--mlb-blue);
+    color: var(--mlb-blue);
+}
+.anim-play-btn.playing {
+    border-color: var(--mlb-red);
+    color: var(--mlb-red);
+    background: color-mix(in srgb, var(--mlb-red) 8%, transparent);
+}
+
+@media (min-width: 1200px) {
+    :root { --sidebar-w: 320px; }
+    .controls-panel { padding: 18px; }
+}
+
+/* -------- Small phone tweaks -------- */
+
+@media (max-width: 480px) {
+    .app-header { padding: 0 12px; }
+    .brand h1 { font-size: 15px; }
+    .attribution { font-size: 11px; gap: 6px; }
+    .tooltip { max-width: 260px; }
+
+    /* Tighten the welcome modal so it needs little or no scrolling on phones. */
+    .explainer-backdrop { padding: 12px; }
+    .explainer { padding: 18px 18px 0; max-height: calc(100dvh - 24px); }
+    .explainer h2 { font-size: 16px; margin-bottom: 10px; }
+    .explainer p { margin-bottom: 9px; line-height: 1.45; font-size: 14px; }
+    .explainer p:last-of-type { margin-bottom: 14px; }
+}
