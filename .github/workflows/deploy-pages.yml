@@ -1,0 +1,128 @@
+name: Deploy Pages (main + branch previews)
+
+# Serves the live site AND per-branch previews from ONE GitHub Pages site, using a
+# persistent `gh-pages` branch as an additive store:
+#
+#   main              → https://<user>.github.io/<repo>/                (site root)
+#   any other branch  → https://<user>.github.io/<repo>/experimental/<branch>/
+#
+# Why a gh-pages branch (not the "GitHub Actions" Pages source): the official Pages
+# deploy replaces the WHOLE site each run, so it can't keep main + N previews side by
+# side. Writing into a gh-pages branch with keep_files:true is purely additive — a push
+# to one branch only touches its own folder and never disturbs the others or production.
+#
+# ── ONE-TIME SETUP (repo admin) ──────────────────────────────────────────────────────
+#   Settings → Pages → Build and deployment → Source: "Deploy from a branch"
+#                       Branch: gh-pages   Folder: / (root)
+#   (The first run of this workflow creates the gh-pages branch.)
+#
+# ── GOTCHA: on:push runs the workflow file FROM the pushed branch ─────────────────────
+#   A branch only deploys itself if THIS file exists on it. Add it to main, and every
+#   branch cut from main inherits it; merge/rebase it into pre-existing branches once.
+#
+# ── ASSET POLICY ─────────────────────────────────────────────────────────────────────
+#   Only runtime web assets ship (see the rsync excludes below): the HTML/CSS/JS, vendor
+#   d3, icons, and the data the app actually fetches (the *_limits_*/people CSVs and the
+#   .bl2p.gz/.evt.gz play-by-play streams). Build scripts, docs, the raw Lahman source
+#   CSVs + zip, and the unused .bl2e.gz/.bl2s.gz formats are excluded. A branch with no
+#   index.html at its root (e.g. a native POC) is skipped, not deployed empty.
+
+on:
+  push:
+    branches: ['**']        # main → root; every other branch → experimental/<branch>
+  workflow_dispatch:        # manual "Run workflow" for any branch on demand
+  delete:                   # remove a preview folder when its branch is deleted
+
+permissions:
+  contents: write           # push to the gh-pages branch via GITHUB_TOKEN
+
+concurrency:
+  group: pages-deploy       # serialize: additive commits to gh-pages must not race
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event_name != 'delete'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve target folder for this branch
+        id: target
+        run: |
+          BR="${GITHUB_REF_NAME}"
+          if [ "$BR" = "main" ]; then
+            echo "folder=" >> "$GITHUB_OUTPUT"          # empty = gh-pages root
+          else
+            # slashes → dashes, strip anything not URL/path-safe (feat/x → feat-x)
+            SLUG="$(printf '%s' "$BR" | tr '/' '-' | tr -cd 'a-zA-Z0-9._-')"
+            echo "folder=experimental/$SLUG" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Assemble site (runtime web assets only)
+        run: |
+          mkdir _site
+          rsync -a --prune-empty-dirs \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude '_site' \
+            --exclude 'scripts/' \
+            --exclude 'docs/' \
+            --exclude 'dist/' \
+            --exclude 'node_modules/' \
+            --exclude '*.md' \
+            --exclude 'data/*.zip' \
+            --exclude 'data/batting_lahman_*.csv' \
+            --exclude 'data/pitching_lahman_*.csv' \
+            --exclude 'data/halloffame_lahman_*.csv' \
+            --exclude 'data/pbp/*.bl2e.gz' \
+            --exclude 'data/pbp/*.bl2s.gz' \
+            ./ _site/
+          # GitHub Pages must not run Jekyll over our underscore-free static tree.
+          touch _site/.nojekyll
+
+      - name: Skip branches with no web app at root
+        id: guard
+        run: |
+          if [ -f _site/index.html ]; then
+            echo "deploy=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=no" >> "$GITHUB_OUTPUT"
+            echo "::notice::No index.html at root of ${GITHUB_REF_NAME} — skipping preview."
+          fi
+
+      - name: Deploy to gh-pages
+        if: steps.guard.outputs.deploy == 'yes'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./_site
+          destination_dir: ${{ steps.target.outputs.folder }}
+          keep_files: true    # additive: never wipe other branches' folders or production
+          commit_message: "deploy ${{ github.ref_name }} → /${{ steps.target.outputs.folder }} @ ${{ github.sha }}"
+
+  # Remove a branch's preview folder from gh-pages when the branch is deleted, so dead
+  # previews don't accumulate. (main is never deleted, so it's never touched here.)
+  cleanup:
+    if: github.event_name == 'delete' && github.event.ref_type == 'branch' && github.event.ref != 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 0
+        continue-on-error: true   # gh-pages may not exist yet on a fresh repo
+      - name: Remove preview folder
+        run: |
+          git rev-parse --verify HEAD >/dev/null 2>&1 || { echo "gh-pages absent — nothing to clean"; exit 0; }
+          SLUG="$(printf '%s' '${{ github.event.ref }}' | tr '/' '-' | tr -cd 'a-zA-Z0-9._-')"
+          if [ -d "experimental/$SLUG" ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git rm -r --quiet "experimental/$SLUG"
+            git commit -m "cleanup preview for deleted branch $SLUG"
+            git push
+          else
+            echo "no preview folder experimental/$SLUG — nothing to clean"
+          fi
