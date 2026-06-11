@@ -1719,7 +1719,20 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         document.getElementById("anim-icon-play").hidden = false;
         document.getElementById("anim-icon-stop").hidden = true;
     }
+    // On mobile the play controls live inside the Filters drawer; collapsing it when
+    // playback starts hands the chart the full height (the on-chart pbp scrubber stays
+    // pinned over the chart for feedback, and the Controls toggle reopens it to pause).
+    // No-op on desktop, where `.controls-panel.collapsed` keeps display:flex and the
+    // toggle is hidden.
+    function collapseControlsForPlay() {
+        const panel = document.getElementById("controls-panel");
+        const toggle = document.getElementById("controls-toggle");
+        if (!panel || !toggle) return;
+        panel.classList.add("collapsed");
+        toggle.setAttribute("aria-expanded", "false");
+    }
     function startAnimation() {
+        collapseControlsForPlay();
         const sInput = document.getElementById("s-year-select");
         const eInput = document.getElementById("e-year-select");
         const maxYear = parseInt(eInput.max);
@@ -1883,6 +1896,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     function startPbpPlay() {
         if (!pbpTimeline && !pbpEvt) return;
         stopAnimation();
+        collapseControlsForPlay();                 // mobile: give the chart full height during playback
         smoothLite = true;                         // lighten frames during playback
         springFinalPending = false;                // a fresh play cancels any pending settle-finalize from a prior stop
         clearTimeout(smoothLiteTimer);
