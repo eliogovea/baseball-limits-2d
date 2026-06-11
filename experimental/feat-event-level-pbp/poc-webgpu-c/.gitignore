@@ -1,0 +1,6 @@
+# Build artifacts (emcc + emdawnwebgpu). The port is downloaded at build time,
+# so a rebuild is needed anyway; app.data also duplicates ../data/pbp. Run `make`.
+app.html
+app.js
+app.wasm
+app.data

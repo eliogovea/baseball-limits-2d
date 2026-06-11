@@ -1,0 +1,11 @@
+dist/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Source data archives — extracted CSVs are committed; the zip isn't.
+data/*.zip
+
+# Sub-season play-by-play: the committed artifact is the gzipped BL2P file;
+# the uncompressed intermediate is regenerable and not tracked.
+data/pbp/*.bl2p
