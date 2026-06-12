@@ -39,6 +39,7 @@ HTML_PATH = ROOT / "index.html"
 CSS_PATH = ROOT / "styles.css"
 JS_PATH = ROOT / "script.js"
 TOUR_PATH = ROOT / "tour.js"
+GRAPH_PATH = ROOT / "webgpu-graph.js"   # G-track scene renderer (loads after script.js)
 D3_PATH = ROOT / "vendor" / "d3.v7.min.js"
 PEOPLE_PATH = ROOT / "data" / "people_lahman_1871-2025.csv"
 OUT_DIR = ROOT / "dist"
@@ -481,6 +482,7 @@ def build_bundle():
     css = CSS_PATH.read_text(encoding="utf-8")
     js = JS_PATH.read_text(encoding="utf-8")
     tour_js = TOUR_PATH.read_text(encoding="utf-8")
+    graph_js = GRAPH_PATH.read_text(encoding="utf-8")
     if not D3_PATH.exists():
         sys.exit(f"missing {D3_PATH.relative_to(ROOT)} — run: "
                  f"curl -sL https://d3js.org/d3.v7.min.js -o vendor/d3.v7.min.js")
@@ -515,6 +517,10 @@ def build_bundle():
     html = html.replace(
         '<script src="script.js" defer></script>',
         f"<script defer>\n{combined_js}\n</script>",
+    )
+    html = html.replace(
+        '<script src="webgpu-graph.js" defer></script>',
+        f"<script defer>\n{graph_js}\n</script>",
     )
     html = html.replace(
         '<script src="tour.js" defer></script>',

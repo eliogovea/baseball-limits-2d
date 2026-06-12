@@ -394,7 +394,7 @@ project's verbose pedagogical comments (the `script.js:3357–3575` standard).
 
 ## Per-phase detail
 
-### [ ] G0 — Retained-scene dot renderer for static modes
+### [x] G0 — Retained-scene dot renderer for static modes
 
 - **Files:** new `webgpu-graph.js` (`GraphRenderer`); `index.html` (script tag
   after `script.js`); `scripts/build_bundle.py` (tour.js-style inline swap);
@@ -585,7 +585,7 @@ If picking this up cold:
 
 | Phase | What | Status | Notes / commit |
 |---|---|---|---|
-| G0 | retained-scene dots + coord model + bundler split | ☐ not started | data-space pos + uScene; new `webgpu-graph.js` |
+| G0 | retained-scene dots + coord model + bundler split | ✅ done | `webgpu-graph.js` + 4 optional-chained hooks in script.js. Gate green on the bundle: dotCount==N (1907), posMis 0, uploads stays 1 across an identity-preserving redraw, 2 after a year-range change; `verifySpring` regression green (springMis/skylineMis 0). **Finding:** smooth is the default view on this branch (every axis pair is .evt-covered), so multi-file static frames only occur when the .evt fetch fails — the `file://` bundle is the G0 verification vehicle. Routing the evtSeason *completed-seasons bg layer* through the scene is the natural reach-extension; decide in G1. |
 | G1 | GPU sign-aware frontier + readback contract | ☐ not started | sign folded into skyline; double-buffered readback feeds cards |
 | G2 | staircase + HV shade + HV contributions | ☐ not started | `hvContrib` neighbor-merge; frag-shader gradient |
 | G3 | GPU text (atlas, axes, labels) | ☐ not started | pre-rasterized two-tier atlas; layout stays CPU |

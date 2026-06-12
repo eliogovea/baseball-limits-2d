@@ -3605,6 +3605,12 @@ class WebGPURenderer {
         // the default. See docs/webgpu-main-app-integration-design.md §"Phase 5".
         this.springMode = new URLSearchParams(location.search).has("gpustream");
         this.lastSpringT = 0;   // wall-clock of the previous spring frame (for dt)
+        // G-track (webgpu-graph.js): ?gpugraph=1 opts the STATIC chart into the
+        // retained-scene GPU path (docs/webgpu-graph-render-design.md §G0). The
+        // scene state itself lives in this.graph, owned entirely by webgpu-graph.js
+        // — script.js only carries this flag + the optional-chained hooks below.
+        this.graphMode = new URLSearchParams(location.search).has("gpugraph");
+        this.graph = null;
     }
     get dpr() { return this.layers?.dpr || 1; }
     get bgCanvas() { return this.canvas; }   // truthy → drawScatterPlot's fg-gated blocks run
@@ -3847,6 +3853,7 @@ class WebGPURenderer {
     clear() {
         this.count.bg = this.count.fg = this.count.frontier = this.count.trail = 0;
         this.bgCacheKey = null;
+        this._clearGraphScene?.();   // G-track: an empty-filter frame must drop the scene too
         this.present();
     }
 
@@ -4187,6 +4194,10 @@ class WebGPURenderer {
             view: this.offTex.createView(), clearValue: this.clearValue, loadOp: "clear", storeOp: "store" }] });
         const drawPts = (name) => { if (this.count[name] > 0) { rp.setBindGroup(0, this._bindGroup(this.buf[name])); rp.draw(6, this.count[name]); } };
         rp.setPipeline(this.pPoints); drawPts("bg");
+        // G-track hook (webgpu-graph.js): the retained-scene cloud draws at the
+        // background layer. Optional-chained no-op when the file isn't loaded or
+        // the scene is empty (every non-?gpugraph frame).
+        this._drawGraphScene?.(rp);
         // The cloud sits at the background layer (behind trails, heads, frontier dots).
         // Phase-5 spring path: vertex-pull the SMOOTHED pos[] (pass 0 = non-front cloud);
         // the frontier dots (pass 1) + the GPU staircase are drawn LAST, on top. Phase-4
@@ -4292,6 +4303,7 @@ class WebGPURenderer {
         this.offTex?.destroy(); this.offTex = null; this.offW = this.offH = 0;
         for (const k of Object.keys(this.buf)) { this.buf[k]?.destroy(); this.buf[k] = null; this.count[k] = 0; }
         this._destroyEvt();
+        this._destroyGraph?.();   // G-track scene buffers (webgpu-graph.js)
         this.layers = null; this.bgCacheKey = null;
     }
 }
@@ -5762,6 +5774,21 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     window.__bl2d_gpuSpring = gpuSpring;
     lastGpuSpringFrame = gpuSpring;   // gate the glide loop: a CPU-fallback frame parks it
 
+    // ── G-track gate (?renderer=webgpu&gpugraph=1; webgpu-graph.js) ─────────────
+    // Phase G0: the STATIC background cloud renders from a retained data-space GPU
+    // scene (docs/webgpu-graph-render-design.md). Static views only — the playback
+    // paths (.evt / .bl2p smooth / group-career) keep their existing engines, so
+    // this gate and gpuCloud are mutually exclusive (gpuCloud requires filters.evt).
+    // The uploadScene typeof check makes the gate falsy if webgpu-graph.js didn't
+    // load (e.g. an old bundle) — the Phase-3 instanced path then runs unchanged.
+    const gpuGraph = !!(
+        pointRenderer instanceof WebGPURenderer &&
+        pointRenderer.graphMode &&
+        typeof pointRenderer.uploadScene === "function" &&
+        !filters.evt && !filters.smooth && !filters.groupCareer
+    );
+    window.__bl2d_gpuGraph = gpuGraph;
+
     // Group-career suppresses the staircase + HV shade: with only a handful of
     // career dots tracing trajectories, the Pareto envelope clutters more than it
     // clarifies — the focus is the trails + heads.
@@ -5939,14 +5966,43 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         width, height, pointRenderer.dpr,
         backgroundPoints.length,
     ].join("|");
-    if (pointRenderer.bgCacheKey !== bgKey) {
-        pointRenderer.drawBackground(backgroundPoints, {
-            margin, xScale, yScale,
-            radius: pointRadius,
+    if (gpuGraph) {
+        // G0 retained scene: the background cloud lives on the GPU in DATA space.
+        // sceneKey is bgKey MINUS everything scale-shaped (domains, width/height,
+        // dpr) — identical key ⇒ uploadScene skips the upload entirely and this
+        // refresh only writes the 64-byte uScene mapping. Zoom/resize for free.
+        const sceneKey = [
+            "g0", filters.smooth ? "smooth" : "static",
+            document.documentElement.dataset.theme || "",
+            sYear, eYear, mode, datasetKey, minPa, league, bats, country, franchise,
+            xDim, yDim, colorBy, cloudOpacity, pointRadius,
+            backgroundPoints.length,
+        ].join("|");
+        pointRenderer.uploadScene(backgroundPoints, {
+            key: sceneKey,
             fillFor: d => colorOf(d, colorBy, getMeta),
             alpha: cloudOpacity,
+            radius: pointRadius,
         });
-        pointRenderer.bgCacheKey = bgKey;
+        pointRenderer.writeSceneScale(xScale, yScale, margin, width, height);
+        // The pixel-space bg instances must not double-draw under the scene, and
+        // a later non-graph frame must rebuild them (sentinel ≠ any real bgKey).
+        pointRenderer.count.bg = 0;
+        pointRenderer.bgCacheKey = "gpugraph";
+        window.__bl2d_gpuGraphN = backgroundPoints.length;
+    } else {
+        // Leaving the scene path (mode/filter flip): drop the scene so present()
+        // stops drawing it. No-op on Canvas 2D and on every ordinary frame.
+        pointRenderer._clearGraphScene?.();
+        if (pointRenderer.bgCacheKey !== bgKey) {
+            pointRenderer.drawBackground(backgroundPoints, {
+                margin, xScale, yScale,
+                radius: pointRadius,
+                fillFor: d => colorOf(d, colorBy, getMeta),
+                alpha: cloudOpacity,
+            });
+            pointRenderer.bgCacheKey = bgKey;
+        }
     }
 
     // Career-highlight layer: dots only (no connecting line — the
