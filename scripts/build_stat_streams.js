@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Build per-stat event streams (the "STEV" format) for full-history animation of a
-// single counting stat — see docs/pbp-data-experiments.md §5.
+// single counting stat — see docs/pbp-data-experiments.md (git history) §5.
 //
 // Reads the committed data/pbp/b*.bl2p.gz corpus and, for each requested stat,
 // extracts every player's sparse event timeline (the game-dates where the stat
@@ -10,7 +10,7 @@
 //
 //   node scripts/build_stat_streams.js [HR SB ...]
 //
-// No deps; uses Node's built-in zlib. Format is documented in docs/pbp-evt-format.md.
+// No deps; uses Node's built-in zlib. Format is documented in docs/data-formats.md §Deprecated.
 
 const fs = require("fs");
 const zlib = require("zlib");

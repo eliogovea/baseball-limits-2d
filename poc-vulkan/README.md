@@ -27,7 +27,7 @@ data/pbp/sb.evt.gz ┘  {player, stat, count} resident on the GPU
 ```
 
 - **Real data, all of history.** Decodes the committed `hr.evt.gz` + `sb.evt.gz`
-  (the STEV `.evt` format, spec in [`docs/pbp-evt-format.md`](../docs/pbp-evt-format.md)):
+  (the STEV `.evt` format, spec in [`docs/data-formats.md`](../docs/data-formats.md) §Deprecated (full spec: `pbp-evt-format.md`, git history)):
   gzip → header → per-player varint event blocks. The per-event increments from both
   files are merged into one list, **sorted by game-date**, and unioned by player name
   (~11,131 batters, 520,200 events, 1871–2025).

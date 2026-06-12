@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Event-level PBP packing experiment (see docs/pbp-data-experiments.md §3).
+// Event-level PBP packing experiment (see docs/pbp-data-experiments.md (git history) §3).
 //
 // Parses real Retrosheet event files (`play,` records) and measures how small a
 // true event-level play-by-play corpus could be: outcome entropy, pitch entropy,

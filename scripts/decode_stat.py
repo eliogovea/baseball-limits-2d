@@ -1,4 +1,4 @@
-"""Decoder for the BL2S normalized stat layer (see docs/pbp-stat-format.md).
+"""Decoder for the BL2S normalized stat layer (see docs/data-formats.md §BL2S).
 
 Two file kinds, both magic 'BL2S':
   - PLAYERS (kind 0): the shared dimension — gpid -> retroID, display name, birthYear, bats.

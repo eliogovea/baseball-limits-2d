@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Single-stat event-stream experiment (see docs/pbp-data-experiments.md §5).
+// Single-stat event-stream experiment (see docs/pbp-data-experiments.md (git history) §5).
 //
 // For a counting stat that's plotted on the chart (default HR and SB), extract the
 // per-player event stream from the committed data/pbp/b*.bl2p.gz corpus and measure

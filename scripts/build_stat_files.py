@@ -5,7 +5,7 @@ Emits into data/pbp/ (common 'stat_' prefix so the family clusters in listings):
   stat_<name>.bl2s.gz     one file per counting stat, per-player date-keyed timeline
 
 SOURCE = plays.csv (per season, downloaded like build_bl2e_corpus). This is the EXACT
-per-player source — see docs/pbp-stat-format.md Decision 10. Batter stats come from the
+per-player source — see docs/data-formats.md §BL2S Decision 10. Batter stats come from the
 row's own count columns; runner stats use Retrosheet's real identities, so substitutions
 (pinch-runners) are handled and records are exact (Henderson SB = 1406, not the ~1398 a
 BL2E replay produced because BL2E doesn't store substitutions):

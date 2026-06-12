@@ -8,8 +8,8 @@ WHERE THIS SITS in the data hierarchy (coarsest -> finest):
   - **BL2E (this file)**       : one row per PLAY / EVENT            (true play-by-play)
 
 So a player who hits two HR in one game is TWO rows here (vs one in BL2P). The corpus
-is ~16.5M events (1903/1910-2025). See docs/pbp-event-format.md for the full byte layout
-and docs/pbp-data-experiments.md §3 for the sizing that motivated this format.
+is ~16.5M events (1903/1910-2025). See docs/data-formats.md §BL2E for the full byte layout
+and docs/pbp-data-experiments.md (git history) §3 for the sizing that motivated this format.
 
 SOURCE. Retrosheet's *parsed* play-by-play CSV (https://retrosheet.org/downloads/plays.html),
 per-season `<year>plays.csv` (or the combined plays.csv). Every field is pre-expanded —
@@ -245,7 +245,7 @@ def build_bl2e(ordered_games, year, retro_to_display, include_pitches=True,
             i = len(team_index); team_index[t] = i
         return i
 
-    # --- Columnar per-event value lists (payload order; see docs/pbp-event-format.md).
+    # --- Columnar per-event value lists (payload order; see docs/data-formats.md §BL2E).
     cols = {name: [] for name in (
         "inning", "half", "batTeam", "batterIdx", "pitcherIdx", "bathand", "pithand",
         "outcome", "outsPre", "outsPost", "runs", "rbi",

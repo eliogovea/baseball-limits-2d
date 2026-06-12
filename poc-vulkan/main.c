@@ -14,7 +14,7 @@
 //          buffers (no CPU readback), era-coloured by debut year.
 //
 // Data is the committed real corpus (data/pbp/hr.evt.gz + sb.evt.gz, the STEV
-// ".evt" format in docs/pbp-evt-format.md) for ~11k batters, 1871-2025.
+// ".evt" format in docs/data-formats.md §Deprecated) for ~11k batters, 1871-2025.
 //
 // Headless verification (this env has no Screen Recording permission, so the
 // live window can't be screenshotted): BL2D_SNAPSHOT=1 applies all events once,

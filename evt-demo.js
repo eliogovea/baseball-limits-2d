@@ -1,7 +1,7 @@
 // Standalone full-history HR×SB animation driven by the .evt (STEV) stat streams.
 // Dependency-free: decodes data/pbp/{hr,sb}.evt.gz, holds every player's cumulative
 // timeline resident (~2 MB), and animates the cloud + Pareto frontier across all of
-// MLB history. See docs/pbp-evt-format.md and docs/pbp-data-experiments.md §5.
+// MLB history. See docs/data-formats.md §Deprecated and docs/pbp-data-experiments.md §5.
 
 const $ = (id) => document.getElementById(id);
 

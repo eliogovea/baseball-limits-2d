@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// PBP dataset size + memory experiment (see docs/pbp-data-experiments.md §1–§2).
+// PBP dataset size + memory experiment (see docs/pbp-data-experiments.md (git history) §1–§2).
 //
 // Reads the committed data/pbp/b*.bl2p.gz corpus and reports:
 //   • record/event counts (player-game records, plate appearances, stat totals)

@@ -1,6 +1,6 @@
 // poc-webgpu-spring — the browser WebGPU twin of poc-vulkan-spring (and the spring
 // evolution of poc-webgpu). It is CAREER-ONLY by design (season mode is out of scope
-// for this POC — see ../docs/gpu-spring-skyline-design.md).
+// for this POC — see ../docs/rendering.md (orig: gpu-spring-skyline-design.md, git history)).
 //
 // What moved onto the GPU vs the baseline poc-webgpu:
 //   • spring.wgsl   — per-player critically-damped motion: pos[] glides toward (hr,sb).

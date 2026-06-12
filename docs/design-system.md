@@ -4,7 +4,7 @@
 
 This folder lets a design agent (or a human) produce on-brand Baseball Limits 2D screens, components, and assets without re-deriving the tokens each time. It was built by reading the production source, not by guessing from screenshots.
 
-> **Provenance.** Distilled from a Claude Design review of this repo (see [`docs/claude-design-review-brief.md`](claude-design-review-brief.md)) and preserved as a living style guide. The review's recommendations shipped in commit `e9eec27` (theme system, CVD-safe era encoding, a11y, brand), so the **tokens below describe the shipped Classic theme**; the Editorial / Night variants live in the `THEMES` table in `script.js`. Asset-path references elsewhere in this doc point at the original export layout — in this repo the chosen mark + favicons are in `icons/` and the other logo concepts are in `icons/alternates/`.
+> **Provenance.** Distilled from a Claude Design review of this repo (brief: `docs/claude-design-review-brief.md` (git history), git history) and preserved as a living style guide. The review's recommendations shipped in commit `e9eec27` (theme system, CVD-safe era encoding, a11y, brand), so the **tokens below describe the shipped Classic theme**; the Editorial / Night variants live in the `THEMES` table in `script.js`. Asset-path references elsewhere in this doc point at the original export layout — in this repo the chosen mark + favicons are in `icons/` and the other logo concepts are in `icons/alternates/`.
 
 ---
 
@@ -159,7 +159,7 @@ The original export carried CSS/JSX kits, specimen previews, and the rendered re
 | `script.js` → `THEMES` | The Classic / Editorial / Night token sets + per-theme era ramps; `applyTheme()` writes them to `<html>`. |
 | `icons/` | The chosen apex logomark + favicon / app-icon set + `manifest.webmanifest` (linked from `index.html`). |
 | `icons/alternates/` | The unchosen logo concepts (apex red/mono, frontier, stepline, scatter, monogram) — kept so the brand direction can change without re-deriving. |
-| `docs/claude-design-review-brief.md` | The brief used to drive the Claude Design review. |
+| `docs/claude-design-review-brief.md` (git history) | The brief used to drive the Claude Design review. |
 
 For tokens and decisions, `styles.css` + `script.js` in this repo are the source of truth; this document is the narrative style guide (voice, visual foundations, iconography rules) behind them.
 

@@ -3,7 +3,7 @@
 The browser **WebGPU twin** of [`../poc-vulkan-spring`](../poc-vulkan-spring), and the spring
 evolution of [`../poc-webgpu`](../poc-webgpu). Same MLB **(HR, SB)** history sweep, but the motion
 and the frontier are now computed on the GPU — and, unlike the Vulkan twin, **the frontier staircase
-is built entirely on the GPU too**. Full design: [`../docs/gpu-spring-skyline-design.md`](../docs/gpu-spring-skyline-design.md).
+is built entirely on the GPU too**. Full design: [`../docs/rendering.md`](../docs/rendering.md) (original full design: `docs/gpu-spring-skyline-design.md`, git history).
 
 **Career-only** by design (the baseline `poc-webgpu`'s season mode is out of scope here).
 

@@ -14,7 +14,7 @@ two things move onto the GPU and become smooth:
 
 The CPU is left with just: advance the clock, compute the per-frame event slice, submit, and
 assemble the (tiny) frontier staircase line from the GPU's output. Full design + rationale:
-[`../docs/gpu-spring-skyline-design.md`](../docs/gpu-spring-skyline-design.md).
+[`../docs/rendering.md`](../docs/rendering.md) (original full design: `docs/gpu-spring-skyline-design.md`, git history).
 
 ## The GPU frame graph
 

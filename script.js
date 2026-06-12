@@ -1013,7 +1013,7 @@ function pbpBuildGroupCareer(tl, resolved, xDim, yDim, filt, datasetKey) {
 
 // ── .evt full-history mode (single counting-stat pair) ──────────────────────
 // When both chart axes are counting stats with committed event streams, decode the
-// two resident .evt files (docs/pbp-evt-format.md) and animate every player's
+// two resident .evt files (docs/data-formats.md §Deprecated) and animate every player's
 // cumulative-as-of-date career across ALL history — no per-season .bl2p streaming,
 // no lazy load / release. Rate stats stay on .bl2p (they're not sparse events).
 // Resolve a chart dimension to {deps, fn, rate}: a raw streamed column, or a derived
@@ -2917,7 +2917,7 @@ function buildExportSvgString(dataUrls) {
     return svgStr.replace(/(<svg[^>]*>)/, `$1<style>svg{background:${bg};}</style>`);
 }
 
-// PointRenderer seam (docs/webgpu-main-app-integration-design.md §A): the high-
+// PointRenderer seam (docs/rendering.md §A): the high-
 // cardinality point cloud is drawn through this object so a future WebGPU backend
 // can slot in behind the same method surface. Canvas2DRenderer is the only
 // implementation (the default + the offline bundle's only renderer). It owns the two
@@ -3331,7 +3331,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
 // drawn entirely on the GPU (compact→rank-sort→emit→drawIndirect). The CPU keeps
 // the cheap incremental frontier ONLY to feed DOM/interaction (cards, quadtree,
 // labels); it no longer drives the GPU picture. Full design + the "why two engines,
-// not a hybrid" rationale: docs/webgpu-main-app-integration-design.md §"Phase 5".
+// not a hybrid" rationale: docs/rendering.md §"Phase 5".
 //
 // The frame graph (one command encoder; separate compute passes serialize):
 //   accumulate (Phase-4, reused) → spring → skyline → reset/compact/ranksort/emit
@@ -3579,7 +3579,7 @@ fn fs() -> @location(0) vec4<f32> {
 // same PointRenderer surface as Canvas2DRenderer but accumulates each draw* call into a
 // resident GPU instance buffer and submits ONE render pass in present(). One <canvas> +
 // one offscreen texture; the frontier staircase, axes, labels all stay SVG. See
-// docs/webgpu-main-app-integration-design.md §"Phase 3".
+// docs/rendering.md §"Phase 3".
 class WebGPURenderer {
     constructor(device, adapter) {
         this.device = device;
@@ -3602,11 +3602,11 @@ class WebGPURenderer {
         // Phase-5 gpuStreaming engine: ?renderer=webgpu&gpustream=1 turns the hybrid
         // Phase-4 cloud into the FULL-GPU pipeline (spring + skyline + GPU staircase).
         // Without the flag this stays the shipped Phase-4 hybrid. Explicit, opt-in, never
-        // the default. See docs/webgpu-main-app-integration-design.md §"Phase 5".
+        // the default. See docs/rendering.md §"Phase 5".
         this.springMode = new URLSearchParams(location.search).has("gpustream");
         this.lastSpringT = 0;   // wall-clock of the previous spring frame (for dt)
         // G-track (webgpu-graph.js): ?gpugraph=1 opts the STATIC chart into the
-        // retained-scene GPU path (docs/webgpu-graph-render-design.md §G0). The
+        // retained-scene GPU path (docs/rendering.md §G0). The
         // scene state itself lives in this.graph, owned entirely by webgpu-graph.js
         // — script.js only carries this flag + the optional-chained hooks below.
         this.graphMode = new URLSearchParams(location.search).has("gpugraph");
@@ -4313,7 +4313,7 @@ class WebGPURenderer {
 let pointRenderer = new Canvas2DRenderer();
 window.__bl2d_renderer = "canvas2d";
 
-// Renderer selection ladder (docs/webgpu-main-app-integration-design.md §"Phase 3 …
+// Renderer selection ladder (docs/rendering.md §"Phase 3 …
 // selection ladder"). The app always renders Canvas 2D first; this only swaps to WebGPU
 // when ?renderer=webgpu AND every capability rung passes. Never blocks first paint;
 // falls back to Canvas 2D on any failure or device loss.
@@ -5308,7 +5308,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     }
 
     // .evt CAREER frontier maintained incrementally instead of swept full each frame
-    // (docs/webgpu-main-app-integration-design.md §C; JS port of poc-webgpu/core.c
+    // (docs/rendering.md §C; JS port of poc-webgpu/core.c
     // step_career). The cursor advances a small event window per frame, so only the
     // touched players move the frontier — O(window + frontier) vs the O(N log N) sweep.
     // Returns null (→ fall through to the full sweep) unless the gate holds:
@@ -5776,7 +5776,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
 
     // ── G-track gate (?renderer=webgpu&gpugraph=1; webgpu-graph.js) ─────────────
     // Phase G0: the STATIC background cloud renders from a retained data-space GPU
-    // scene (docs/webgpu-graph-render-design.md). Static views only — the playback
+    // scene (docs/rendering.md). Static views only — the playback
     // paths (.evt / .bl2p smooth / group-career) keep their existing engines, so
     // this gate and gpuCloud are mutually exclusive (gpuCloud requires filters.evt).
     // The uploadScene typeof check makes the gate falsy if webgpu-graph.js didn't

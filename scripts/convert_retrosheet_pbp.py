@@ -286,7 +286,7 @@ def convert(csv_path, year, out_dir, dataset_name, retro_to_display):
             "pitching conversion is not yet complete: W/L/SV/SHO need derivation "
             "from the wp/lp/save decision fields and CG+runs (GIDP is absent from "
             "pitching.csv). See the PITCHING_COLUMNS note above and "
-            "docs/pbp-next-steps.md before generating a pitching corpus."
+            "docs/ROADMAP.md §Backlog before generating a pitching corpus."
         )
 
     by_player, n_rows = read_season(csv_path, year, columns)

@@ -1,6 +1,6 @@
 # poc-webgpu-c — the "full WASM" POC (all-C WebGPU twin of poc-vulkan)
 
-**Option 2** from [`docs/poc-webgpu-design.md`](../docs/poc-webgpu-design.md): the
+**Option 2** from [`docs/rendering.md`](../docs/rendering.md) (original POC design: `poc-webgpu-design.md`, git history): the
 **whole app, including the WebGPU orchestration, written in C** against
 `<webgpu/webgpu.h>` and compiled to WASM via emcc + the **emdawnwebgpu** port.
 The all-C counterpart to [`poc-webgpu/`](../poc-webgpu) (which keeps WebGPU in JS).

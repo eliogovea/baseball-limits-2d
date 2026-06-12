@@ -7,7 +7,7 @@
 // those integer counters (so a dot TELEPORTS one notch when a counter ticks),
 // and the Pareto frontier ("the limits") was maintained INCREMENTALLY ON THE CPU.
 //
-// What this twin changes (see ../docs/gpu-spring-skyline-design.md):
+// What this twin changes (see ../docs/rendering.md (orig: gpu-spring-skyline-design.md, git history)):
 //   GPU  : accumulate.comp — UNCHANGED. hr[]/sb[] are still the atomicAdd target,
 //          but they are now the spring DESTINATION, not the drawn position.
 //   GPU  : spring.comp (NEW) — each frame, integrate a critically-damped spring
@@ -25,7 +25,7 @@
 //          slice, submits, and assembles the (tiny) frontier staircase line.
 //
 // Data is the committed real corpus (../data/pbp/hr.evt.gz + sb.evt.gz, the STEV
-// ".evt" format in docs/pbp-evt-format.md) for ~11k batters, 1871-2025.
+// ".evt" format in docs/data-formats.md §Deprecated) for ~11k batters, 1871-2025.
 //
 // Headless verification (this env has no Screen Recording permission, so the
 // live window can't be screenshotted): BL2D_SNAPSHOT=1 applies all events once,
@@ -293,7 +293,7 @@ static int fpoint_by_x(const void *a, const void *b) {
 // than a GPU compaction+sort+indirect-draw. The frontier is tiny (tens of points), so the O(K log K)
 // sort is nothing. (The WebGPU twin CANNOT do this cheaply — its GPU→CPU readback is async and the
 // documented headless device-loss trigger — so it builds the staircase fully on the GPU instead.
-// See ../docs/gpu-spring-skyline-design.md.)
+// See ../docs/rendering.md (orig: gpu-spring-skyline-design.md, git history).)
 static uint32_t build_staircase_gpu(float *out, const float *pos,
                                     const uint32_t *onFront, uint32_t playerCount) {
     static FPoint fr[MAX_FRONT];

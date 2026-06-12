@@ -1,4 +1,4 @@
-"""Decode a BL2E event-level season file (see docs/pbp-event-format.md).
+"""Decode a BL2E event-level season file (see docs/data-formats.md §BL2E).
 
 Reference reader for the format `convert_retrosheet_events.py` writes — used by the
 verification harness (`verify_bl2e.py`) and as the spec-by-example for the eventual JS

@@ -1,6 +1,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // webgpu-graph.js — the G-track: full-GPU rendering of the STATIC chart.
-// Phase G0: a retained-scene dot renderer (docs/webgpu-graph-render-design.md).
+// Phase G0: a retained-scene dot renderer (docs/rendering.md).
 //
 // WHY A SECOND FILE. script.js already carries the streaming WebGPU engine
 // (Phases 1–5: accumulate → spring → skyline → staircase) and is ~6,900 lines.

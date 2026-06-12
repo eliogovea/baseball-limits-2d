@@ -1,4 +1,4 @@
-"""Verification harness for BL2E event-level files (docs/pbp-event-format.md, phase P2).
+"""Verification harness for BL2E event-level files (docs/data-formats.md §BL2E, phase P2).
 
 Runs three checks against a built `e<year>.bl2e.gz` and its source Retrosheet plays CSV:
 
