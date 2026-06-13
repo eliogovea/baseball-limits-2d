@@ -229,6 +229,69 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 }`;
 
+// ── G4: depth layers (Pareto onion-peeling) ──────────────────────────────────
+// Iterative skyline peeling on the GPU (docs/rendering.md §"G-track design":
+// "depth layers = iterative skyline peeling (≤5, dirty-frames only)"). Layer 0 is
+// the live frontier (already produced by the G1 skyline); each subsequent layer is
+// the frontier of the cloud with all shallower layers removed. The CPU oracle is
+// `paretoLayers`/`__bl2d_depthLayers` (script.js) — same peel, same sign rules.
+//
+// Mechanism: `peeled[]` marks already-claimed points, `layerOf[]` records each
+// point's layer index (BIG = deeper than the requested depth, or never on any
+// layer within it). One peel iteration = peelSky (this layer's frontier over the
+// non-peeled set, into onTmp) → peelMark (fold onTmp into layerOf + peeled). The
+// two-pass split is a read-after-write guard: every thread's dominance test in a
+// pass must see the SAME peeled[] snapshot, so the mark can't run inline. The CPU
+// encodes `peelInit` then `depth` (peelSky, peelMark) pairs in one serialized
+// encoder. Pure parallel re-sweep — the verify gate is the per-layer point count.
+const WEBGPU_GRAPH_MAX_DEPTH = 5;            // matches the CPU peelDepth clamp [1,5]
+const WEBGPU_DEPTH_BIG = 0xffffffff;
+const WEBGPU_DEPTH_WGSL = `
+const BIG : u32 = ${WEBGPU_DEPTH_BIG}u;
+struct Dp { n: u32, xSign: f32, ySign: f32, layer: u32 };
+@group(0) @binding(0) var<uniform>             U:       Dp;
+@group(0) @binding(1) var<storage, read>       pos:     array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read_write> peeled:  array<u32>;
+@group(0) @binding(3) var<storage, read_write> layerOf: array<u32>;
+@group(0) @binding(4) var<storage, read_write> onTmp:   array<u32>;
+
+@compute @workgroup_size(64)
+fn peelInit(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= U.n) { return; }
+  peeled[i] = 0u;
+  layerOf[i] = BIG;
+  onTmp[i] = 0u;
+}
+
+// This layer's frontier: not yet peeled, and not strictly dominated (in SIGNED
+// space) by any other NON-peeled point. Identical compare to the WEBGPU_SCENESKYLINE
+// skyline pass, with the peel mask gating both the candidate and the dominators.
+@compute @workgroup_size(64)
+fn peelSky(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= U.n) { return; }
+  if (peeled[i] != 0u) { onTmp[i] = 0u; return; }
+  let sgn = vec2<f32>(U.xSign, U.ySign);
+  let pi = pos[i] * sgn;
+  var dom = 0u;
+  for (var j = 0u; j < U.n; j = j + 1u) {
+    if (peeled[j] != 0u) { continue; }
+    let pj = pos[j] * sgn;
+    if (pj.x >= pi.x && pj.y >= pi.y && (pj.x > pi.x || pj.y > pi.y)) { dom = 1u; break; }
+  }
+  onTmp[i] = select(1u, 0u, dom == 1u);
+}
+
+// Fold this layer's frontier (onTmp) into the running result: tag the layer index
+// and remove the points from the next iteration's pool.
+@compute @workgroup_size(64)
+fn peelMark(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= U.n) { return; }
+  if (onTmp[i] != 0u) { layerOf[i] = U.layer; peeled[i] = 1u; }
+}`;
+
 // ── G2: staircase, hypervolume contributions, shade ──────────────────────────
 // Frontier-dot radius range — the on-screen size encodes a point's HV contribution,
 // matching the CPU's radiusFor (script.js: FRONTIER_R_MIN/MAX + sqrt(contrib/max)).
@@ -656,6 +719,23 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
         this.pSceneCompact = dev.createComputePipeline({
             layout: skyLayout, compute: { module: skyMod, entryPoint: "compact" } });
 
+        // ── G4 compute: depth-layer peeling (peelInit/peelSky/peelMark) ──
+        this.depthBgl = dev.createBindGroupLayout({ entries: [
+            // Dynamic offset: one uDepth buffer holds a 256-aligned slot per peel layer
+            // (a shared uniform written between passes in one encoder would lose all but
+            // the last value — every pass in a submit reads the final queue write).
+            { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform", hasDynamicOffset: true } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+            { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+            { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+            { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        ] });
+        const depthMod = dev.createShaderModule({ code: WEBGPU_DEPTH_WGSL });
+        const depthLayout = dev.createPipelineLayout({ bindGroupLayouts: [this.depthBgl] });
+        this.pDepthInit = dev.createComputePipeline({ layout: depthLayout, compute: { module: depthMod, entryPoint: "peelInit" } });
+        this.pDepthSky  = dev.createComputePipeline({ layout: depthLayout, compute: { module: depthMod, entryPoint: "peelSky" } });
+        this.pDepthMark = dev.createComputePipeline({ layout: depthLayout, compute: { module: depthMod, entryPoint: "peelMark" } });
+
         // ── G2 compute: staircase (ranksort/emit) + HV (total/contrib/max/radius) ──
         const un = (b) => ({ binding: b, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } });
         const ro = (b) => ({ binding: b, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } });
@@ -894,6 +974,12 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             // draw; glyphStrings/glyphCharset feed the verify hook.
             bGlyph: null, glyphCount: 0, glyphBindGroup: null,
             glyphTexRef: null, glyphStrings: null, glyphCharset: null,
+            // G4: depth-layer peeling. bPeeled/bLayerOf/bOnTmp are cloud-sized scratch
+            // (layerOf[i] = a point's onion-peel layer, BIG if deeper than `depth`);
+            // uDepth the per-iteration uniform; depth the requested peel count (1 = the
+            // frontier only = no peeling). depthBindGroup binds them all.
+            bPeeled: null, bLayerOf: null, bOnTmp: null, uDepth: null,
+            depthBindGroup: null, depth: 1,
         });
         if (!g.uScene) {
             g.uScene = this.device.createBuffer({
@@ -940,12 +1026,15 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
         };
         const oldPos = g.bPos, oldCol = g.bCol, oldSize = g.bSize, oldFront = g.bOnFront,
-              oldRad = g.bFrontRadius;
+              oldRad = g.bFrontRadius, oldLayer = g.bLayerOf;
         g.bPos = ensure(g.bPos, w * 8);
         g.bCol = ensure(g.bCol, w * 4);
         g.bSize = ensure(g.bSize, w * 4);
         g.bOnFront = ensure(g.bOnFront, w * 4);
         g.bFrontRadius = ensure(g.bFrontRadius, w * 4);   // G2: per-instance dot radius
+        g.bPeeled = ensure(g.bPeeled, w * 4);             // G4: peel mask + layer scratch
+        g.bLayerOf = ensure(g.bLayerOf, w * 4);
+        g.bOnTmp = ensure(g.bOnTmp, w * 4);
         // G1 fixed-size frontier scratch + uniform, allocated once with the scene.
         if (!g.bFrontIdx) {
             g.bFrontIdx = this.device.createBuffer({
@@ -956,6 +1045,9 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
             g.uSky = this.device.createBuffer({
                 size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+            g.uDepth = this.device.createBuffer({   // G4 peel uniform {n, xSign, ySign, layer}
+                size: WEBGPU_GRAPH_MAX_DEPTH * 256,  // one 256-aligned slot per layer (dynamic offset)
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
             // G2 fixed-size scratch + uniforms.
             const mk = (size, usage) => this.device.createBuffer({ size, usage });
             const ST = GPUBufferUsage.STORAGE, CS = GPUBufferUsage.COPY_SRC, CD = GPUBufferUsage.COPY_DST;
@@ -971,7 +1063,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             g.uGraphCol = mk(48, GPUBufferUsage.UNIFORM | CD);
         }
         const grew = g.bPos !== oldPos || g.bCol !== oldCol || g.bSize !== oldSize ||
-                     g.bOnFront !== oldFront || g.bFrontRadius !== oldRad;
+                     g.bOnFront !== oldFront || g.bFrontRadius !== oldRad || g.bLayerOf !== oldLayer;
         if (w > 0) {
             this.device.queue.writeBuffer(g.bPos, 0, posArr, 0, w * 2);
             this.device.queue.writeBuffer(g.bCol, 0, colArr, 0, w);
@@ -1021,6 +1113,12 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
                 { binding: 2, resource: bg(g.bCol) }, { binding: 3, resource: bg(g.bOnFront) },
                 { binding: 4, resource: bg(g.bFrontRadius) }, { binding: 5, resource: bg(g.uGraphCol) },
             ] });
+            g.depthBindGroup = this.device.createBindGroup({ layout: this.depthBgl, entries: [
+                { binding: 0, resource: { buffer: g.uDepth, offset: 0, size: 16 } },
+                { binding: 1, resource: bg(g.bPos) },
+                { binding: 2, resource: bg(g.bPeeled) }, { binding: 3, resource: bg(g.bLayerOf) },
+                { binding: 4, resource: bg(g.bOnTmp) },
+            ] });
         }
         g.count = w;
         g.key = opts.key;
@@ -1029,6 +1127,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
         g.cpuMeta = meta;
         g.xSign = xSign;
         g.ySign = ySign;
+        g.depth = Math.max(1, Math.min(WEBGPU_GRAPH_MAX_DEPTH, opts.depth | 0 || 1));   // G4 peel count
         // G2 canonical geometry. Anti-ideal corner = the canonical-min DOMAIN edges
         // (the CPU staircase caps at screen 0 / plotH = the worst-value edges). HV
         // reference R = cloud canonical-min corner − eps (matches computeHvContributions).
@@ -1110,6 +1209,29 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
         pass(this.pSceneHvContrib,"hvBindGroup", wgF);
         pass(this.pSceneHvMax,    "hvBindGroup", 1);
         pass(this.pSceneHvRadius, "hvBindGroup", wgF);
+        // G4: depth-layer peeling (only when requested). peelInit, then `depth`
+        // (peelSky, peelMark) pairs — each pass over the whole cloud, serialized so
+        // every dominance test sees the prior mark's settled peeled[]. layerOf[] is
+        // the result (read back by the verify hook; rendered in the next phase).
+        if (g.depth > 1) {
+            // Write every layer's uniform slot up front (one submit, so all queue
+            // writes precede the command buffer); pick the slot per pass via the
+            // dynamic offset. peelInit reads slot 0 (only n is meaningful there).
+            for (let L = 0; L < g.depth; L++) {
+                const du = new ArrayBuffer(16);
+                new Uint32Array(du, 0, 1)[0] = g.count;
+                new Float32Array(du, 4, 2).set([g.xSign, g.ySign]);
+                new Uint32Array(du, 12, 1)[0] = L;
+                dev.queue.writeBuffer(g.uDepth, L * 256, du);
+            }
+            const dpass = (pipe, slot) => {
+                const cp = enc.beginComputePass();
+                cp.setPipeline(pipe); cp.setBindGroup(0, g.depthBindGroup, [slot * 256]);
+                cp.dispatchWorkgroups(wg); cp.end();
+            };
+            dpass(this.pDepthInit, 0);
+            for (let L = 0; L < g.depth; L++) { dpass(this.pDepthSky, L); dpass(this.pDepthMark, L); }
+        }
         // Pick a free staging buffer (double-buffered: a still-mapped buffer
         // from a previous scene-dirty frame must not be re-targeted). At
         // scene-dirty cadence both being busy "can't happen" — latest-wins skip
@@ -1253,7 +1375,8 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
                          "bOnFront", "bFrontIdx", "bCount", "uSky",
                          "bFrontSorted", "bFrontSortedIdx", "bStaircase", "bStairIndirect",
                          "bShadeIndirect", "bHv", "bFrontRadius", "bHvScalar",
-                         "uStair", "uHv", "uGraphCol", "bGlyph"]) g[k]?.destroy();
+                         "uStair", "uHv", "uGraphCol", "bGlyph",
+                         "bPeeled", "bLayerOf", "bOnTmp", "uDepth"]) g[k]?.destroy();
         for (const s of g.stage || []) s?.destroy();
         this.glyphTex?.destroy(); this.glyphTex = null; this.glyph = null;
         this.graph = null;
@@ -1411,6 +1534,19 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
                 if (!met || !met.has(ch.codePointAt(0))) atlasMissing++;
         }
 
+        // ── G4 invariant: GPU onion-peel layer sizes == the CPU oracle. Read layerOf[]
+        // back, tally points per layer 0..depth-1, and compare to __bl2d_depthLayers
+        // (script.js paretoLayers). depthMis -1 when depth==1 (no peeling requested).
+        let depthMis = -1, depthLayersGpu = null;
+        if (g.depth > 1) {
+            const lo = await pointRenderer._readback(g.bLayerOf, g.count * 4, Uint32Array);
+            depthLayersGpu = new Array(g.depth).fill(0);
+            for (let i = 0; i < g.count; i++) { const L = lo[i]; if (L < g.depth) depthLayersGpu[L]++; }
+            const cpu = window.__bl2d_depthLayers || [];
+            depthMis = Math.abs(depthLayersGpu.length - cpu.length);
+            for (let L = 0; L < g.depth; L++) depthMis += Math.abs((depthLayersGpu[L] || 0) - (cpu[L] || 0));
+        }
+
         return {
             dotCount: g.count,
             expectedN: window.__bl2d_gpuGraphN ?? null,
@@ -1419,6 +1555,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             frontMis, frontCount, cardPidsMatch,
             stairVertMis, hvMis, hvMaxRel, radiusMis, shadeQuadrant,
             glyphCount, glyphMis, tickMis, atlasMissing, glyphUploadPath, atlasW, atlasH,
+            depthMis, depthLayersGpu, depth: g.depth,
             frontReads: g.frontReads,
             uploads: g.uploads,
             key: g.key,

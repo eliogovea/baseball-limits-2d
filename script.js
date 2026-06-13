@@ -5990,7 +5990,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             document.documentElement.dataset.theme || "",
             sYear, eYear, mode, datasetKey, minPa, league, bats, country, franchise,
             xDim, yDim, colorBy, cloudOpacity, pointRadius,
-            xSign, ySign, unique.length,
+            xSign, ySign, unique.length, peelDepth,
         ].join("|");
         // G2 render colours, resolved to [r,g,b] in 0..1 (d3.color handles hex + CSS
         // vars). Stair line = --frontier-color (worst → purple), 0.55 opacity to match
@@ -6009,6 +6009,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             xSign, ySign,
             xDomain: xScale.domain(), yDomain: yScale.domain(),
             stairColor: [...stairRgb, 0.55], hvColor: hvRgb, frontOverride,
+            depth: peelDepth,   // G4: GPU onion-peel layer count (1 = frontier only)
         });
         pointRenderer.writeSceneScale(xScale, yScale, margin, width, height, xSign, ySign);
         // The pixel-space bg instances must not double-draw under the scene, and
