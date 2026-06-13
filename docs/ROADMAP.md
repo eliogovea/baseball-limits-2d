@@ -20,21 +20,53 @@ source of truth for *shipped* status of individual features.
 3. **POCs stay** as pedagogical references (not ported to BL2S); merged feature
    branches are deleted; `main` is the deployed branch.
 
-## Ordered plan
+## Current state (snapshot — 2026-06-13)
 
-Do the tracks in this order (data first — small, unblocks deletions; then the
-committed render destination):
+The G-track (full-GPU rendering) is the bulk of recent work and is nearly done; the data
+tracks (S3/S4) have NOT been started yet. Concretely:
 
-| # | Track | Phases | Status |
-|---|---|---|---|
-| 1 | **S3** — app onto BL2S, remove `.evt` | S3a–S3e | ☐ not started |
-| 2 | **S4** — retire BL2P | S4a–S4b | ☐ not started (new) |
-| 3 | **G-track** — full-GPU graph | G0–G5 ✅ (G5i deferred), G6 ◑ | G0–G5h shipped; GPU is the default path (G6 in progress) |
-| 4 | **S-track** — GPU season animation | SA0–SA4 | ☐ design only |
-| 5 | **S2** — Lahman complement | — | ☐ after S3/S4 |
+- **G-track G0–G5h SHIPPED** on `feat/event-level-pbp` — dots, sign-aware frontier,
+  staircase, HV shade + contributions, glyph text, depth/era-B/ghost overlays, and the
+  GPU hover/pin interaction overlays (G5a–c; G5d kept on SVG; G5e lifecycle). Present
+  convergence (`present_unified`) + the single `graphLoop` owner ship on the converged
+  `?legacyPresent=0` path (default still the proven legacy path). Commits `43b225d` (G5),
+  earlier G0–G4 commits in `rendering.md`.
+- **GPU is the non-optional default renderer** (commit `6eb276c`) — WebGPU auto-enables,
+  Canvas2D is the silent automatic fallback, a read-only `#renderer-status` indicator
+  shows GPU/CPU, spring is default-on; the renderer toggles were removed. This is the
+  start of **G6** (graduate the flag).
+- **NOT done:** the G5 real-browser MANUAL checkpoints, the `legacyPresent` default-flip,
+  the rest of G6 (parity matrix / device-loss sign-off / rotated Y-title), **G5i**
+  (deferred), and the entire **data layer** (S3/S4/S2) + the **S-track** season animation.
 
-_Resume at the first unticked phase. Update the checkbox + progress-trail row in the
-same commit as each phase._
+## Ordered plan (recommended next → last)
+
+The original "data first" order was overtaken by the G-track work; the recommended order
+now finishes the in-flight render track, then returns to the (still-unstarted) data work:
+
+| # | Track | Phases | Status | Who can do it |
+|---|---|---|---|---|
+| 1 | **G6** — graduate the G-track | G6a–G6f (detail in [`rendering.md`](rendering.md) §"G6") | ◑ in progress (GPU-default shipped) | G6a + G6b-flip need a **human/browser MANUAL**; G6c–G6f are agent-doable headless |
+| 2 | **S3** — app onto BL2S, remove `.evt` | S3a–S3e | ☐ not started | fully agent-doable |
+| 3 | **S4** — retire BL2P | S4a–S4b | ☐ not started | fully agent-doable |
+| 4 | **S-track** — GPU season animation (folds in G5i) | SA0–SA4 | ☐ design only | agent-doable; SA2 motion needs a MANUAL |
+| 5 | **S2** — Lahman complement | — | ☐ after S3/S4 | fully agent-doable |
+
+### ▶ RESUME HERE (next session)
+
+Two independent entry points — pick based on whether a human is available to drive a browser:
+
+- **If a human can do the browser MANUAL:** start **G6a** (run the G5 real-browser
+  checkpoints on the branch's Pages preview), then **G6b** (flip the `legacyPresent`
+  default). Both are detailed in `rendering.md` §"G6".
+- **If it's an unattended coding agent:** do the headless-doable G6 close-out —
+  **G6c** (one-run parity matrix), **G6d** (device-loss recovery test), **G6e** (rotated
+  Y-axis title on the GPU) — in any order; they don't depend on the MANUAL. *Or* start
+  **S3a** (the BL2S builder), which is fully actionable and was the original priority.
+
+_Resume at the first unticked phase of the chosen track. Update the checkbox + the
+progress-trail row + the README "Ideas & future work" entry in the SAME commit as each
+phase (README is the source of truth for shipped status)._
 
 ---
 

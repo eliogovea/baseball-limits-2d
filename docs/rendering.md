@@ -225,11 +225,11 @@ keeps Canvas2D as the permanent fallback.
 |---|---|---|---|
 | **G0** ✅ | retained-scene dots; data-space coord model; bundler split | `sceneCloud` | dotCount == filtered N; readback pos == uploaded |
 | **G1** ✅ | sign-aware GPU frontier + readback contract | `sceneSkyline` (+`compact`) | GPU onFront == CPU sweep, 20 random combos incl. ERA↓; readback set == cards; Henderson 1982 SB=130 on-frontier |
-| **G2** | staircase + HV shade + HV contributions | `hvContrib`, `hvShade` | bHv == `computeHvContributions` ≤1e-6 rel; radii match; ERA↓ shade quadrant |
-| **G3** | GPU text: atlas, axes, ticks, titles, labels | `glyphs`, `axes` | glyph count == Σ string lengths; ticks == d3-format; atlas covers every codepoint |
-| **G4** | overlays: depth layers, era-B, ghost (dashed), cross-fade | `depthLayers`, `stairGhost`, emit+arcLen | layers == CPU onion-peel (`__bl2d_depthLayers`); ghost == CPU global-ref; dash stable under zoom |
-| **G5** | interaction + spring-FLIP + loop owner + **stream convergence** | `hoverRing`, `regretLine` | picks == CPU quadtree + `computeDistToFrontier`; idle parks rAF; `verifySpring` green on converged path |
-| **G6** | graduate flag; keep Canvas2D fallback | — | full parity matrix in one headless run; device-loss recovery |
+| **G2** ✅ | staircase + HV shade + HV contributions | `hvContrib`, `hvShade` | bHv == `computeHvContributions` ≤1e-6 rel; radii match; ERA↓ shade quadrant |
+| **G3** ✅ | GPU text: atlas, axes, ticks, labels (rotated Y-title → G6e) | `glyphs`, `axes` | glyph count == Σ string lengths; ticks == d3-format; atlas covers every codepoint |
+| **G4** ✅ | overlays: depth layers, era-B, ghost (dashed); cross-fade → G5i | `depthLayers`, `stairGhost`, emit+arcLen | layers == CPU onion-peel (`__bl2d_depthLayers`); ghost == CPU global-ref; dash stable under zoom |
+| **G5** ✅ | interaction overlays + loop owner + stream convergence (G5d→SVG, G5i deferred) | `regret`, `rings` | picks == CPU quadtree + `computeDistToFrontier`; idle parks rAF; `verifySpring` green on converged path |
+| **G6** ◑ | graduate flag (GPU-default shipped); keep Canvas2D fallback | — | **detailed resumable plan below** (§"G6"): MANUALs → flip `legacyPresent` → parity matrix + device-loss + rotated Y-title |
 
 Each gate is one headless command:
 ```
@@ -445,6 +445,94 @@ default is flipped in a dedicated commit. **MANUAL checkpoints still owed** (hea
 script the live cursor / judge animation cadence): G5b/c live-cursor tracking, G5h 60/120 Hz
 smoothness — run them in a real browser or a per-branch Pages preview before flipping the
 `legacyPresent` default.
+
+---
+
+## G6 — graduate the G-track (finish + sign-off) — RESUMABLE PLAN
+
+**Where this stands:** the renderer-selection half of G6 already shipped (commit `6eb276c`):
+WebGPU is the non-optional default, Canvas2D is the silent automatic fallback, a read-only
+`#renderer-status` indicator shows GPU/CPU, spring is default-on, and the "GPU"/"spring"
+header toggles are gone. What remains is the *sign-off* of the GPU path as production-grade
+and retiring the last seams. Six sub-phases; **resume at the first unchecked box.** Each is
+independently shippable with its own verify gate. Re-grep line numbers (they drift).
+
+**Two classes of work** — important for resuming in an unattended session:
+- **Human/browser-gated:** G6a (the G5 MANUALs) and the G6b flip depend on a real browser
+  (headless SwiftShader can't judge live-cursor feel or animation cadence). An agent can
+  *prepare* them but a human must run the MANUAL and confirm before the flip lands.
+- **Agent-doable headless:** G6c (parity matrix), G6d (device-loss recovery), G6e (rotated
+  Y-title), G6f (hatch cleanup) need no human — they verify via `snap-webgpu.js` invariants
+  + offscreen readback. Do these in any order; they don't depend on the MANUAL.
+
+### [ ] G6a — run the owed G5 MANUAL checkpoints (human/browser)
+Run on the branch's Pages preview (`…/experimental/feat-event-level-pbp/`) or a local
+browser with WebGPU. Record pass/fail in the commit that lands G6b. Checklist:
+- **Indicator:** header shows **"GPU"** (blue) on a WebGPU machine; force a no-WebGPU
+  browser (or `?renderer=canvas`) → shows **"CPU"**, chart still renders, no red banner.
+- **G5b/c (default flags):** hover non-frontier dots → the dashed regret leader + distance
+  ring track the cursor with no lag/flicker; hover frontier dots → the isolation ring
+  matches the old SVG. Move between dots quickly → no stale overlay lingers.
+- **G5h (`?legacyPresent=0`):** play the career animation → spring smooth at 60/120 Hz; when
+  it settles, the tab goes idle (no busy rAF — check DevTools Performance / CPU).
+- **`?gpuonly=1`:** on a no-WebGPU browser shows the red banner (the dev stance still works).
+
+### [ ] G6b — flip the `legacyPresent` default → converged (human-gated on G6a)
+Once G6a passes: make `present_unified()` + `graphLoop` the LIVE path for everyone.
+- `script.js` `LEGACY_PRESENT` (~4523): invert the default so the converged path is on
+  unless `?legacyPresent=1` (keep that as the rollback hatch for one release).
+- Verify headless: `__bl2d_verifyGraph` (static, bundle) AND `__bl2d_verifySpring`
+  (gpustream, dev server) green with the NEW default; `__bl2d_rafScheduled` idle-parks; the
+  G5b/c overlay gates (`regretMis`/`ringMis 0`) still green.
+- **Soak, then a SEPARATE later commit** removes the now-dead `present_legacy()`, the
+  `_interactRaf` legacy coalescer, and `springLoop`/`startSpringLoop`/`stopSpringLoop`
+  (subsumed by `graphLoop`) — only after a release with no regressions. Until then keep them
+  for the `?legacyPresent=1` rollback.
+
+### [ ] G6c — one-run full parity matrix (agent-doable)
+Replace the ad-hoc per-phase gates with ONE headless sweep. New `window.__bl2d_verifyGraphMatrix()`
+(or a snap-webgpu driver) that, by driving the real selectors, loops every combo and asserts
+all invariants 0, emitting a pass/fail table:
+- modes: season × career; datasets: batting × pitching;
+- axis classes: counting×counting, **lower-is-better** (ERA↓/WHIP↓/BB9↓), rate (AVG/OBP/SLG),
+  composite (TB/PA); the **Best/Worst** toggle; **depth** d=1..5; **era-B** compare; **ghost**
+  (a bats/country filter); HV contributions (`radiusMis`).
+- Assert: `posMis/skylineMis/frontMis/stairVertMis/radiusMis/glyphMis/tickMis/atlasMissing/`
+  `depthMis/depthStairMis/overlayMis/regretMis/ringMis` all 0, `cardPidsMatch true`,
+  `shadeQuadrant` correct, retention (`uploads`/`frontReads` stay 1 on identity-preserving redraws).
+- **Negative control:** deliberately perturb one oracle and confirm the matrix FAILS (so a
+  green run means something). Gate: all-green matrix + the negative control catches a break.
+
+### [ ] G6d — device-loss recovery test (agent-doable)
+The `device.lost → swapToCanvas2D` path (script.js ~4558 / ~4538) exists but is untested.
+Headless: bring up WebGPU (`?webgpuHeadless=1`), then trigger a loss (call the GPUDevice's
+loss path / `device.destroy()` via an exposed `window.__bl2d_forceDeviceLoss()` hook to add)
+and assert: `window.__bl2d_renderer` flips `webgpu→canvas2d`, the indicator flips to **"CPU"**,
+**no banner** (graceful, since not `?gpuonly`), the chart cleanly redraws on Canvas2D, and a
+subsequent `?verifyFrontier=1` is `mis 0` on the CPU path. Add the `__bl2d_forceDeviceLoss`
+test hook (gated to a flag so it can't fire in prod).
+
+### [ ] G6e — rotated Y-axis title on the GPU (agent-doable + offscreen visual)
+The one chart text still on SVG (G3 deliberately deferred the rotated Y-title). Options: a
+per-instance rotation angle in `WEBGPU_GLYPH_WGSL` (webgpu-graph.js ~809) applied to the
+glyph quad, or pre-rotated cells. Lay the title out CPU-side (reuse the axis-title text +
+position), emit rotated glyph instances, suppress the SVG Y-title under `gpuGraph` (it keeps
+its glossary-hover hit-rect as an invisible DOM element if needed). Verify: `glyphMis` still 0
+with the Y-title codepoints included; offscreen readback shows the rotated title; `tickMis 0`.
+(Then the chart is 100% GPU text — the SDF upgrade stays a documented future option.)
+
+### [ ] G6f — dev-hatch cleanup + docs (agent-doable)
+Audit the surviving URL hatches and document them in ONE place (a short table in this file):
+keep the verification/debug ones — `?renderer=canvas`, `?gpugraph=0`, `?gpustream=0`,
+`?gpuonly=1`, `?webgpuHeadless`, `?verifyFrontier`, `?legacyPresent=1` (until the G6b soak) —
+remove anything now dead. Update CLAUDE.md §"Running locally"/verification if the snap
+recipes changed. After G6f the G-track is **shipped**; Canvas2D remains the permanent
+fallback (never deleted).
+
+**G6 done ⇒** the full-GPU chart is the production renderer end-to-end (cloud → frontier →
+HV → overlays → text → interaction), one loop owner, one present body, with Canvas2D as the
+permanent silent fallback. Then the roadmap returns to the data tracks (S3 → S4) and the
+S-track (which folds in **G5i**).
 
 ---
 
