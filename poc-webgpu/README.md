@@ -55,6 +55,9 @@ the deployed multi-file app and offline `dist/` bundle stay on Canvas 2D.
 
 `snap-webgpu.js` is a POC-local clone of `scripts/snap.js` that launches Chrome
 with WebGPU enabled (the shared snap.js uses `--disable-gpu`, which kills it).
+The ANGLE backend is picked per platform — Metal on macOS (reliable; the Vulkan/
+MoltenVK path can fail `requestDevice`), Vulkan elsewhere — and is overridable
+with `SNAP_WEBGPU_ANGLE=metal|vulkan|swiftshader`.
 
 ```sh
 # career invariant + spot-checks + a screenshot

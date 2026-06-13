@@ -25,12 +25,20 @@ async function main() {
     const userDataDir = fs.mkdtempSync('/tmp/chrome-webgpu-');
     const port = 9222 + Math.floor(Math.random() * 1000);
     // WebGPU-enabling flags. --enable-unsafe-webgpu exposes navigator.gpu in
-    // headless; Vulkan/ANGLE give a backend; SwiftShader is the software fallback.
+    // headless; an ANGLE backend gives a real GPU device; SwiftShader is the
+    // software fallback. The ANGLE backend is platform-aware: on macOS the
+    // native Metal backend is reliable, whereas --use-angle=vulkan (MoltenVK)
+    // can fail requestDevice with "external Instance reference no longer
+    // exists"; on Linux/Windows Vulkan is the right default. Override with
+    // SNAP_WEBGPU_ANGLE=metal|vulkan|swiftshader if a machine needs it.
+    const angle = process.env.SNAP_WEBGPU_ANGLE ||
+        (process.platform === 'darwin' ? 'metal' : 'vulkan');
+    const backendFeature = { metal: 'Metal', vulkan: 'Vulkan' }[angle];
     const chrome = spawn(CHROME, [
         '--headless=new', '--no-sandbox',
         '--enable-unsafe-webgpu',
-        '--enable-features=Vulkan',
-        '--use-angle=vulkan',
+        ...(backendFeature ? [`--enable-features=${backendFeature}`] : []),
+        `--use-angle=${angle}`,
         '--enable-unsafe-swiftshader',
         `--remote-debugging-port=${port}`,
         `--user-data-dir=${userDataDir}`,
