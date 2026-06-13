@@ -111,6 +111,14 @@ Export (SVG/PNG) reads back the offscreen texture under WebGPU
   optional-chained hooks in `script.js`). Gate green on the bundle: dotCount==N,
   posMis 0, zoom/resize re-uploads nothing. Finding: smooth is the default view on
   this branch, so the `file://` bundle is the G0 verification vehicle for static frames.
+- **G1** — sign-aware GPU frontier over the retained scene (`sceneSkyline` + `compact`
+  in `webgpu-graph.js`) + the readback contract's mechanism (double-buffered
+  fire-and-forget `mapAsync` of `bCount`+`bFrontIdx` → `g.front`; cards stay CPU-fed
+  until G5). The scene now uploads the FULL deduped cloud — the cloud shader
+  degenerates on-front instances, so the render is unchanged until G2. Gate green on
+  the bundle: skylineMis 0 / frontMis 0 / cardPidsMatch across 20 random axis combos
+  incl. ERA↓, BB/9↓ and the worst-frontier toggle; uploads & frontReads stay 1 across
+  identity-preserving redraws; Henderson on-frontier; `verifySpring` regression green.
 
 ### Pending (ordering in ROADMAP.md)
 
@@ -185,7 +193,7 @@ keeps Canvas2D as the permanent fallback.
 | Phase | Goal | New WGSL | Verify gate (headless, `__bl2d_verifyGraph`) |
 |---|---|---|---|
 | **G0** ✅ | retained-scene dots; data-space coord model; bundler split | `sceneCloud` | dotCount == filtered N; readback pos == uploaded |
-| **G1** | sign-aware GPU frontier + readback contract | `sceneSkyline` | GPU onFront == CPU sweep, 20 random combos incl. ERA↓; readback set == cards; Henderson 1982 SB=130 on-frontier |
+| **G1** ✅ | sign-aware GPU frontier + readback contract | `sceneSkyline` (+`compact`) | GPU onFront == CPU sweep, 20 random combos incl. ERA↓; readback set == cards; Henderson 1982 SB=130 on-frontier |
 | **G2** | staircase + HV shade + HV contributions | `hvContrib`, `hvShade` | bHv == `computeHvContributions` ≤1e-6 rel; radii match; ERA↓ shade quadrant |
 | **G3** | GPU text: atlas, axes, ticks, titles, labels | `glyphs`, `axes` | glyph count == Σ string lengths; ticks == d3-format; atlas covers every codepoint |
 | **G4** | overlays: depth layers, era-B, ghost (dashed), cross-fade | `depthLayers`, `stairGhost`, emit+arcLen | layers == CPU onion-peel (`__bl2d_depthLayers`); ghost == CPU global-ref; dash stable under zoom |

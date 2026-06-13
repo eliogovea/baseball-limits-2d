@@ -176,7 +176,7 @@ Full design, phase details, WGSL entry points, and verify gates:
 | Phase | What | Status |
 |---|---|---|
 | G0 | retained-scene dots + data-space coord model + bundler split | ✅ shipped (`webgpu-graph.js`) |
-| G1 | GPU sign-aware frontier + readback contract | ☐ not started |
+| G1 | GPU sign-aware frontier + readback contract | ✅ shipped (`webgpu-graph.js`: `sceneSkyline`+`compact`) |
 | G2 | staircase + HV shade + HV contributions | ☐ not started |
 | G3 | GPU text (glyph atlas, axes, labels) | ☐ not started |
 | G4 | overlays: depth, era-B, ghost (dashed), cross-fade | ☐ not started |
@@ -185,10 +185,17 @@ Full design, phase details, WGSL entry points, and verify gates:
 
 G0 finding to carry forward: smooth is the default view (every axis pair is
 stat-layer-covered), so the `file://` bundle is the verification vehicle for static
-frames; routing the evtSeason completed-seasons bg layer through the scene is the
-natural reach-extension — decide in G1. Also absorbed by the G-track: the gpustream
-follow-ups (idle `onFront` readback replacing the live JS frontier → G1/G5; crisper
+frames. Also absorbed by the G-track: the gpustream
+follow-ups (idle `onFront` readback replacing the live JS frontier → G5; crisper
 quad-based staircase line; bats/country mask on the GPU).
+
+G1 decisions of record: the scene now uploads the FULL deduped cloud (`unique`,
+frontier included — the cloud shader degenerates on-front instances, so the visible
+output is unchanged until G2 draws the frontier dots itself); xSign/ySign joined the
+scene identity key; the double-buffered fire-and-forget readback (`bCount`+`bFrontIdx`
+→ `g.front`) ships as MECHANISM only — cards/tooltip/quadtree stay CPU-fed until the
+G5 convergence. The evtSeason completed-seasons bg-layer reach-extension was
+considered and deferred (it belongs with the S-track's completed-season scene, SA2).
 
 ---
 

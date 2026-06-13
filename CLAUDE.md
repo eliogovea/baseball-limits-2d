@@ -130,7 +130,7 @@ The multi-file fallback `buildMetaFromPeopleCsv` in `script.js` mirrors the same
 ## Things that look like bugs but aren't
 
 - **Same-named players get a `(b.YYYY)` tag in tooltips and cards.** Slightly verbose but intentional — it's the disambiguator from `_display_name.py`. The on-chart label strips the suffix and shows just the last name via `lastNameOf()`.
-- **ERA / WHIP / BB/9 / H/9 on the pitching frontier highlight the WORST seasons.** Those stats are "lower is better" but the frontier algorithm finds the upper-right envelope, so the highest values bubble up. Glossary entries note this; inverting the sweep per-stat is a clean follow-up.
+- **ERA / WHIP / BB/9 / H/9 frontiers point the "right" way now.** The sweep is sign-aware: `lowerIsBetter` stats flip `xSign`/`ySign` so the frontier finds the correct (low) limit, and the Best/Worst toggle flips both signs deliberately. (An older note here claimed lower-is-better stats highlighted the worst seasons — that predates the sign-aware sweep.)
 - **The header `console.log` from `script.js` doesn't reach `scripts/snap.js`'s capture in some headless setups** (Runtime per-execution-context quirk). For debug diagnostics, expose state on `window.__bl2d_*` and read it via `snap.js`'s evalJS argument.
 
 ## Working methodology

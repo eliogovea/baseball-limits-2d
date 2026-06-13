@@ -5971,25 +5971,31 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         // sceneKey is bgKey MINUS everything scale-shaped (domains, width/height,
         // dpr) — identical key ⇒ uploadScene skips the upload entirely and this
         // refresh only writes the 64-byte uScene mapping. Zoom/resize for free.
+        // G1: the scene holds the FULL deduped cloud (`unique`, frontier
+        // included) so the GPU skyline can judge every point; the cloud shader
+        // degenerates on-front instances, so what RENDERS is still exactly the
+        // non-front background. xSign/ySign are scene identity (they change
+        // which points survive the skyline), so they join the key.
         const sceneKey = [
-            "g0", filters.smooth ? "smooth" : "static",
+            "g1", filters.smooth ? "smooth" : "static",
             document.documentElement.dataset.theme || "",
             sYear, eYear, mode, datasetKey, minPa, league, bats, country, franchise,
             xDim, yDim, colorBy, cloudOpacity, pointRadius,
-            backgroundPoints.length,
+            xSign, ySign, unique.length,
         ].join("|");
-        pointRenderer.uploadScene(backgroundPoints, {
+        pointRenderer.uploadScene(unique, {
             key: sceneKey,
             fillFor: d => colorOf(d, colorBy, getMeta),
             alpha: cloudOpacity,
             radius: pointRadius,
+            xSign, ySign,
         });
-        pointRenderer.writeSceneScale(xScale, yScale, margin, width, height);
+        pointRenderer.writeSceneScale(xScale, yScale, margin, width, height, xSign, ySign);
         // The pixel-space bg instances must not double-draw under the scene, and
         // a later non-graph frame must rebuild them (sentinel ≠ any real bgKey).
         pointRenderer.count.bg = 0;
         pointRenderer.bgCacheKey = "gpugraph";
-        window.__bl2d_gpuGraphN = backgroundPoints.length;
+        window.__bl2d_gpuGraphN = unique.length;
     } else {
         // Leaving the scene path (mode/filter flip): drop the scene so present()
         // stops drawing it. No-op on Canvas 2D and on every ordinary frame.
