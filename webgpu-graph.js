@@ -229,6 +229,301 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 }`;
 
+// ── G2: staircase, hypervolume contributions, shade ──────────────────────────
+// Frontier-dot radius range — the on-screen size encodes a point's HV contribution,
+// matching the CPU's radiusFor (script.js: FRONTIER_R_MIN/MAX + sqrt(contrib/max)).
+const WEBGPU_GRAPH_R_MIN = 4.0, WEBGPU_GRAPH_R_MAX = 11.0, WEBGPU_GRAPH_FRONT_RING = 1.5;
+
+// WGSL (compute): the sign-aware GPU staircase — ranksort + emit. G1's `compact`
+// already produced bFrontIdx[0..K)+bCount, so this module only SORTS that set by
+// canonical x and EMITS the step polyline. It is a port of the streaming staircase
+// (script.js WEBGPU_STAIRCASE_WGSL) with two sign-aware divergences:
+//   • rank by CANONICAL x (pos.x·xSign), and scatter the original index alongside
+//     the sorted position (frontSortedIdx) so the HV pass can skip-by-index;
+//   • the caps land on the canonical DOMAIN EDGES (XantiC, YantiC), not value 0 —
+//     reproducing the CPU staircaseScreen, whose left cap sits at screen-x 0
+//     (= the worst-x domain edge) and bottom cap at screen-y plotH (= worst-y edge).
+// frontSorted holds CANONICAL (X,Y); emit un-folds (·sgn) back to DATA space so the
+// staircase[] vertices ride the same affine uScene.ab map as the cloud — a zoom is a
+// uniform write, the staircase never recomputes. Vertex count = 1 + 2K (== 2K+1, the
+// CPU R sequence: left-cap + K points + K drops where the last drop is the bottom cap).
+const WEBGPU_SCENESTAIR_WGSL = `
+const MAX_FRONT : u32 = ${WEBGPU_GRAPH_MAX_FRONT}u;
+struct Stair { n: u32, xSign: f32, ySign: f32, antiX: f32, antiY: f32 };  // antiX/Y are CANONICAL
+struct DrawArgs { vertexCount: u32, instanceCount: u32, firstVertex: u32, firstInstance: u32 };
+@group(0) @binding(0) var<uniform>             U:           Stair;
+@group(0) @binding(1) var<storage, read>       pos:         array<vec2<f32>>;   // DATA space
+@group(0) @binding(2) var<storage, read>       frontIdx:    array<u32>;          // G1 compact output
+@group(0) @binding(3) var<storage, read_write> count:       array<atomic<u32>>;  // K (G1)
+@group(0) @binding(4) var<storage, read_write> frontSorted: array<vec2<f32>>;    // CANONICAL, x-asc
+@group(0) @binding(5) var<storage, read_write> frontSortedIdx: array<u32>;       // → original index
+@group(0) @binding(6) var<storage, read_write> staircase:   array<vec2<f32>>;    // DATA space
+@group(0) @binding(7) var<storage, read_write> indirect:    DrawArgs;            // stair line-strip
+@group(0) @binding(8) var<storage, read_write> shadeIndirect: DrawArgs;          // HV-shade fan
+
+@compute @workgroup_size(64)
+fn ranksort(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let kk = gid.x;
+  let K = atomicLoad(&count[0]);
+  if (kk >= K) { return; }
+  let sgn = vec2<f32>(U.xSign, U.ySign);
+  let p  = frontIdx[kk];
+  let pc = pos[p] * sgn;                                   // canonical
+  var rank = 0u;
+  for (var j = 0u; j < K; j = j + 1u) {
+    let q  = frontIdx[j];
+    let qx = pos[q].x * U.xSign;                           // canonical x
+    if (qx < pc.x || (qx == pc.x && q < p)) { rank = rank + 1u; }
+  }
+  frontSorted[rank] = pc;
+  frontSortedIdx[rank] = p;
+}
+
+@compute @workgroup_size(64)
+fn emit(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let r = gid.x;
+  let K = atomicLoad(&count[0]);
+  if (r >= K) { return; }
+  let sgn = vec2<f32>(U.xSign, U.ySign);
+  if (r == 0u) {
+    // Left cap: canonical (antiX, firstY), un-folded to data space.
+    staircase[0] = vec2<f32>(U.antiX, frontSorted[0].y) * sgn;
+    let M = 1u + 2u * K;
+    indirect.vertexCount = M;       indirect.instanceCount = 1u;
+    indirect.firstVertex = 0u;      indirect.firstInstance = 0u;
+    shadeIndirect.vertexCount = 3u * (M - 1u);  shadeIndirect.instanceCount = 1u;
+    shadeIndirect.firstVertex = 0u; shadeIndirect.firstInstance = 0u;
+  }
+  let here = frontSorted[r];                               // canonical
+  let next = r + 1u;
+  // Drop to the next point's y, or — for the last point — to the canonical worst-y
+  // domain edge (the CPU's plotH bottom cap), not value 0.
+  let dropY = select(U.antiY, frontSorted[next].y, next < K);
+  staircase[1u + 2u*r]      = here * sgn;
+  staircase[1u + 2u*r + 1u] = vec2<f32>(here.x, dropY) * sgn;
+}`;
+
+// WGSL (compute): hypervolume contributions — the EXACT leave-one-out-with-fill
+// oracle (script.js computeHvContributions) ported to the GPU, NOT the cheap
+// exclusive-corner formula. CPU sweepExcluding(p) re-sweeps ALL of `unique`, so
+// removing a frontier member lets cloud points behind it fill in; ΔHV = totalHv −
+// altHv is the real loss, and that is what sizes the visible dot radius. One thread
+// per frontier slot re-sweeps the whole cloud in canonical space with a per-thread
+// monotone stack — O(F·N), F≤~30, N≤~20k → sub-ms. All compares are canonical so the
+// four sign quadrants share one body. RxC/RyC are the canonical reference point
+// (universe min corner − eps), computed on the CPU to match the oracle's eps math.
+const WEBGPU_HVCONTRIB_WGSL = `
+const MAX_FRONT : u32 = ${WEBGPU_GRAPH_MAX_FRONT}u;
+const R_MIN : f32 = ${WEBGPU_GRAPH_R_MIN};
+const R_MAX : f32 = ${WEBGPU_GRAPH_R_MAX};
+const HV_STACK : u32 = 64u;                 // per-thread stack cap; real frontiers ≪ this
+struct Hv { n: u32, xSign: f32, ySign: f32, Rx: f32, Ry: f32 };   // Rx/Ry are CANONICAL
+@group(0) @binding(0) var<uniform>             U:           Hv;
+@group(0) @binding(1) var<storage, read>       pos:         array<vec2<f32>>;   // DATA space
+@group(0) @binding(2) var<storage, read>       frontSorted: array<vec2<f32>>;   // CANONICAL, x-asc
+@group(0) @binding(3) var<storage, read>       frontSortedIdx: array<u32>;
+@group(0) @binding(4) var<storage, read_write> count:       array<atomic<u32>>;
+@group(0) @binding(5) var<storage, read_write> hv:          array<f32>;         // contrib per rank
+@group(0) @binding(6) var<storage, read_write> frontRadius: array<f32>;         // radius per INSTANCE
+@group(0) @binding(7) var<storage, read_write> scalar:      array<f32>;         // [0]=totalHv [1]=maxContrib
+
+// hvOf over the canonical, x-ascending frontSorted[0..K): vertical-strip decomposition.
+fn hvTotal_(K: u32) -> f32 {
+  var acc = 0.0;
+  var xPrev = U.Rx;
+  for (var r = 0u; r < K; r = r + 1u) {
+    let p = frontSorted[r];
+    acc = acc + (p.x - xPrev) * (p.y - U.Ry);
+    xPrev = p.x;
+  }
+  return acc;
+}
+
+@compute @workgroup_size(1)
+fn hvTotal() {
+  let K = atomicLoad(&count[0]);
+  scalar[0] = hvTotal_(K);
+}
+
+@compute @workgroup_size(64)
+fn hvContrib(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let r = gid.x;
+  let K = atomicLoad(&count[0]);
+  if (r >= K) { return; }
+  let sgn = vec2<f32>(U.xSign, U.ySign);
+  let skip = frontSortedIdx[r];
+  // Re-sweep the whole cloud excluding 'skip', in CANONICAL space, with a monotone
+  // stack — identical pop rules to CPU sweepExcluding (pop while top.Y < pY; then the
+  // equal-Y / smaller-X tiebreak), walked in upload order so the survivor set matches.
+  var stk: array<vec2<f32>, 64>;
+  var top: i32 = -1;
+  for (var i = 0u; i < U.n; i = i + 1u) {
+    if (i == skip) { continue; }
+    let pc = pos[i] * sgn;
+    loop {
+      if (top < 0) { break; }
+      if (stk[top].y < pc.y) { top = top - 1; } else { break; }
+    }
+    if (top >= 0 && stk[top].y == pc.y && stk[top].x < pc.x) { top = top - 1; }
+    top = top + 1;
+    if (u32(top) < HV_STACK) { stk[top] = pc; }
+  }
+  var alt = 0.0;
+  var xPrev = U.Rx;
+  for (var s = 0; s <= top; s = s + 1) {
+    alt = alt + (stk[s].x - xPrev) * (stk[s].y - U.Ry);
+    xPrev = stk[s].x;
+  }
+  let contrib = scalar[0] - alt;
+  hv[r] = max(contrib, 0.0);
+}
+
+@compute @workgroup_size(1)
+fn hvMax() {
+  let K = atomicLoad(&count[0]);
+  var m = 0.0;
+  for (var r = 0u; r < K; r = r + 1u) { m = max(m, hv[r]); }
+  scalar[1] = select(m, 1.0, m <= 0.0);          // CPU's "maxContrib || 1"
+}
+
+@compute @workgroup_size(64)
+fn hvRadius(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let r = gid.x;
+  let K = atomicLoad(&count[0]);
+  if (r >= K) { return; }
+  let idx = frontSortedIdx[r];
+  let maxC = scalar[1];
+  frontRadius[idx] = R_MIN + (R_MAX - R_MIN) * sqrt(hv[r] / maxC);
+}`;
+
+// WGSL (render): the GPU staircase line. Vertex-pulls the DATA-space staircase[] the
+// emit pass wrote, maps with the same affine uScene.ab as the cloud, draws a line-
+// strip via drawIndirect (vertex count came from the GPU). Colour + opacity arrive in
+// uGraphCol[0] (the CPU --frontier-color / worst-mode purple, with its 0.55 opacity).
+const WEBGPU_STAIRLINE_GRAPH_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+struct Col { stair: vec4<f32>, shade: vec4<f32>, front: vec4<f32> };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> staircase: array<vec2<f32>>;
+@group(0) @binding(2) var<uniform> gc: Col;
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+  let p = staircase[vi];
+  let px = sc.ab.x * p.x + sc.ab.y;
+  let py = sc.ab.z * p.y + sc.ab.w;
+  return vec4<f32>(px / sc.vp.x * 2.0 - 1.0, 1.0 - py / sc.vp.y * 2.0, 0.0, 1.0);
+}
+@fragment
+fn fs() -> @location(0) vec4<f32> { return vec4<f32>(gc.stair.rgb, gc.stair.a); }`;
+
+// WGSL (render): the hypervolume SHADE — a gradient fill of the dominated region
+// under the staircase, fading from the ideal corner (opacity 0.10) toward the
+// anti-ideal corner (0.01), reproducing the SVG linearGradient (script.js #hv-shade-
+// grad). Geometry: a triangle FAN from the anti-ideal apex over the staircase
+// polyline (the dominated region is star-shaped from that corner). drawIndirect's
+// vertex count = 3·(M−1) was written by emit. The fragment projects its pixel position
+// onto the ideal→anti axis (uScene.corn = (antiX,antiY,idealX,idealY) in pixels) for t.
+const WEBGPU_HVSHADE_GRAPH_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+struct Col { stair: vec4<f32>, shade: vec4<f32>, front: vec4<f32> };
+struct Stair { n: u32, xSign: f32, ySign: f32, antiX: f32, antiY: f32 };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> staircase: array<vec2<f32>>;
+@group(0) @binding(2) var<uniform> gc: Col;
+@group(0) @binding(3) var<uniform> st: Stair;
+struct VSOut { @builtin(position) clip: vec4<f32>, @location(0) frag: vec2<f32> };
+fn toPx(p: vec2<f32>) -> vec2<f32> { return vec2<f32>(sc.ab.x * p.x + sc.ab.y, sc.ab.z * p.y + sc.ab.w); }
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
+  let t = vi / 3u;            // triangle index
+  let c = vi % 3u;            // corner within the fan triangle (anti, v[t], v[t+1])
+  let antiData = vec2<f32>(st.antiX * st.xSign, st.antiY * st.ySign);  // un-fold to data
+  var p: vec2<f32>;
+  if (c == 0u) { p = antiData; }
+  else if (c == 1u) { p = staircase[t]; }
+  else { p = staircase[t + 1u]; }
+  let px = toPx(p);
+  var o: VSOut;
+  o.clip = vec4<f32>(px.x / sc.vp.x * 2.0 - 1.0, 1.0 - px.y / sc.vp.y * 2.0, 0.0, 1.0);
+  o.frag = px;
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let ideal = sc.corn.zw;
+  let anti  = sc.corn.xy;
+  let axis  = anti - ideal;
+  let denom = max(dot(axis, axis), 1e-6);
+  let t = clamp(dot(i.frag - ideal, axis) / denom, 0.0, 1.0);
+  let a = mix(0.10, 0.01, t);
+  return vec4<f32>(gc.shade.rgb, a);
+}`;
+
+// WGSL (render): GPU frontier DOTS with HV-derived radii + white ring — a port of the
+// streaming spring-cloud's front pass (script.js WEBGPU_SPRINGCLOUD_WGSL). Degenerates
+// every non-front instance (one draw over the full cloud), pulls its radius from
+// frontRadius[ii] (written by hvRadius), and either keeps the era colour (col[ii], best
+// mode) or the worst-mode override (uGraphCol.front, .w = use-override). Drawn ON TOP.
+const WEBGPU_SCENEFRONT_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+struct Col { stair: vec4<f32>, shade: vec4<f32>, front: vec4<f32> };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> pos: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> col: array<u32>;
+@group(0) @binding(3) var<storage, read> onFront: array<u32>;
+@group(0) @binding(4) var<storage, read> frontRadius: array<f32>;
+@group(0) @binding(5) var<uniform> gc: Col;
+struct VSOut {
+  @builtin(position) clip: vec4<f32>,
+  @location(0) off: vec2<f32>,
+  @location(1) @interpolate(flat) fill: vec4<f32>,
+  @location(2) @interpolate(flat) radius: f32,
+  @location(3) @interpolate(flat) ring: f32,
+};
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(-1.0,1.0),
+  vec2<f32>(-1.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>( 1.0,1.0));
+fn unpack(c: u32) -> vec4<f32> {
+  return vec4<f32>(f32(c & 0xffu), f32((c >> 8u) & 0xffu),
+                   f32((c >> 16u) & 0xffu), f32((c >> 24u) & 0xffu)) / 255.0;
+}
+fn degenerate() -> VSOut {
+  var o: VSOut; o.clip = vec4<f32>(2.0, 2.0, 0.0, 1.0);
+  o.off = vec2<f32>(0.0); o.fill = vec4<f32>(0.0); o.radius = 0.0; o.ring = 0.0; return o;
+}
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  if (onFront[ii] == 0u) { return degenerate(); }
+  let p = pos[ii];
+  let r = frontRadius[ii];
+  let ring = ${WEBGPU_GRAPH_FRONT_RING};
+  let ext = r + ring;
+  let px = sc.ab.x * p.x + sc.ab.y;
+  let py = sc.ab.z * p.y + sc.ab.w;
+  let cx = px / sc.vp.x * 2.0 - 1.0;
+  let cy = 1.0 - py / sc.vp.y * 2.0;
+  let corner = C[vi];
+  var o: VSOut;
+  o.clip = vec4<f32>(cx + corner.x * ext / sc.vp.x * 2.0, cy + corner.y * ext / sc.vp.y * 2.0, 0.0, 1.0);
+  o.off = corner * ext;
+  o.radius = r; o.ring = ring;
+  let era = unpack(col[ii]).rgb;
+  let fillrgb = select(era, gc.front.rgb, gc.front.w > 0.5);
+  o.fill = vec4<f32>(fillrgb, 1.0);                 // frontier dots are opaque
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let dist = length(i.off);
+  let outer = i.radius + i.ring * 0.5;
+  let aa = 1.0 - smoothstep(outer - 0.75, outer + 0.75, dist);
+  if (aa <= 0.0) { discard; }
+  var col: vec3<f32>;
+  if (dist > i.radius - i.ring * 0.5) { col = vec3<f32>(1.0, 1.0, 1.0); }  // white ring
+  else { col = i.fill.rgb; }
+  return vec4<f32>(col, aa);
+}`;
+
 // ── GraphRenderer methods, attached to WebGPURenderer ────────────────────────
 // Deferred scripts run in document order, so WebGPURenderer (script.js) exists by
 // the time this file executes — and chooseRenderer() hasn't run yet (it waits on
@@ -282,6 +577,52 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
             layout: skyLayout, compute: { module: skyMod, entryPoint: "skyline" } });
         this.pSceneCompact = dev.createComputePipeline({
             layout: skyLayout, compute: { module: skyMod, entryPoint: "compact" } });
+
+        // ── G2 compute: staircase (ranksort/emit) + HV (total/contrib/max/radius) ──
+        const un = (b) => ({ binding: b, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } });
+        const ro = (b) => ({ binding: b, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } });
+        const rw = (b) => ({ binding: b, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } });
+        this.stairBgl = dev.createBindGroupLayout({ entries: [
+            un(0), ro(1), ro(2), rw(3), rw(4), rw(5), rw(6), rw(7), rw(8) ] });
+        const stairMod = dev.createShaderModule({ code: WEBGPU_SCENESTAIR_WGSL });
+        const stairLayout = dev.createPipelineLayout({ bindGroupLayouts: [this.stairBgl] });
+        this.pSceneRanksort = dev.createComputePipeline({ layout: stairLayout, compute: { module: stairMod, entryPoint: "ranksort" } });
+        this.pSceneEmit     = dev.createComputePipeline({ layout: stairLayout, compute: { module: stairMod, entryPoint: "emit" } });
+
+        this.hvBgl = dev.createBindGroupLayout({ entries: [
+            un(0), ro(1), ro(2), ro(3), rw(4), rw(5), rw(6), rw(7) ] });
+        const hvMod = dev.createShaderModule({ code: WEBGPU_HVCONTRIB_WGSL });
+        const hvLayout = dev.createPipelineLayout({ bindGroupLayouts: [this.hvBgl] });
+        this.pSceneHvTotal   = dev.createComputePipeline({ layout: hvLayout, compute: { module: hvMod, entryPoint: "hvTotal" } });
+        this.pSceneHvContrib = dev.createComputePipeline({ layout: hvLayout, compute: { module: hvMod, entryPoint: "hvContrib" } });
+        this.pSceneHvMax     = dev.createComputePipeline({ layout: hvLayout, compute: { module: hvMod, entryPoint: "hvMax" } });
+        this.pSceneHvRadius  = dev.createComputePipeline({ layout: hvLayout, compute: { module: hvMod, entryPoint: "hvRadius" } });
+
+        // ── G2 render: stair line, HV shade, frontier dots ──
+        const uV = (b) => ({ binding: b, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } });
+        const sV = (b) => ({ binding: b, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } });
+        this.stairLineBgl = dev.createBindGroupLayout({ entries: [ uV(0), sV(1), uV(2) ] });
+        this.pSceneStairLine = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.stairLineBgl] }),
+            vertex: { module: dev.createShaderModule({ code: WEBGPU_STAIRLINE_GRAPH_WGSL }), entryPoint: "vs" },
+            fragment: { module: dev.createShaderModule({ code: WEBGPU_STAIRLINE_GRAPH_WGSL }), entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "line-strip" } });
+
+        this.hvShadeBgl = dev.createBindGroupLayout({ entries: [ uV(0), sV(1), uV(2), uV(3) ] });
+        const shadeMod = dev.createShaderModule({ code: WEBGPU_HVSHADE_GRAPH_WGSL });
+        this.pSceneHvShade = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.hvShadeBgl] }),
+            vertex: { module: shadeMod, entryPoint: "vs" },
+            fragment: { module: shadeMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+
+        this.sceneFrontBgl = dev.createBindGroupLayout({ entries: [ uV(0), sV(1), sV(2), sV(3), sV(4), uV(5) ] });
+        const frontMod = dev.createShaderModule({ code: WEBGPU_SCENEFRONT_WGSL });
+        this.pSceneFront = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.sceneFrontBgl] }),
+            vertex: { module: frontMod, entryPoint: "vs" },
+            fragment: { module: frontMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
     };
 
     // Upload (or skip!) the scene. `key` is the SCALE-INDEPENDENT identity of the
@@ -304,6 +645,16 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
             frontReads: 0,      // verify hook asserts retention (stays 1, like uploads)
             cpuMeta: null,      // written-index → {x, y, playerID, year} for reconciliation
             xSign: 1, ySign: 1,
+            // G2: staircase + HV state. bFrontSorted/bFrontSortedIdx hold the canonical
+            // x-sorted frontier; bStaircase/bStairIndirect the line-strip; bShadeIndirect
+            // the fan; bHv the per-rank contributions; bFrontRadius the per-instance dot
+            // radius; bHvScalar [totalHv, maxContrib]. uStair/uHv compute uniforms;
+            // uGraphCol the render colours (stair line / HV shade / worst-mode override).
+            bFrontSorted: null, bFrontSortedIdx: null, bStaircase: null,
+            bStairIndirect: null, bShadeIndirect: null, bHv: null, bFrontRadius: null,
+            bHvScalar: null, uStair: null, uHv: null, uGraphCol: null,
+            stairBindGroup: null, hvBindGroup: null,
+            stairLineBindGroup: null, hvShadeBindGroup: null, frontBindGroup: null,
         });
         if (!g.uScene) {
             g.uScene = this.device.createBuffer({
@@ -322,6 +673,10 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
         // compaction), so a frontIdx readback maps straight to player identity —
         // the bridge between GPU indices and the CPU world (cards, verify).
         const meta = new Array(n);
+        // Canonical (sign-folded) min/max of the cloud — the HV reference point R is the
+        // min corner − eps, exactly as computeHvContributions derives it (script.js).
+        const xSign = opts.xSign ?? 1, ySign = opts.ySign ?? 1;
+        let xMinS = Infinity, yMinS = Infinity, xMaxS = -Infinity, yMaxS = -Infinity;
         let w = 0;
         for (let k = 0; k < n; k++) {
             const d = points[k];
@@ -331,6 +686,9 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
             colArr[w] = packColorRGBA(fillFor(d), alpha);
             sizeArr[w] = radius;
             meta[w] = { x, y, playerID: d.playerID, year: d.year ?? d.yearID };
+            const sx = x * xSign, sy = y * ySign;
+            if (sx < xMinS) xMinS = sx; if (sx > xMaxS) xMaxS = sx;
+            if (sy < yMinS) yMinS = sy; if (sy > yMaxS) yMaxS = sy;
             w++;
         }
         // Grow-on-demand with COPY_SRC so the verify hook can read positions back
@@ -342,11 +700,13 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
             return this.device.createBuffer({ size,
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
         };
-        const oldPos = g.bPos, oldCol = g.bCol, oldSize = g.bSize, oldFront = g.bOnFront;
+        const oldPos = g.bPos, oldCol = g.bCol, oldSize = g.bSize, oldFront = g.bOnFront,
+              oldRad = g.bFrontRadius;
         g.bPos = ensure(g.bPos, w * 8);
         g.bCol = ensure(g.bCol, w * 4);
         g.bSize = ensure(g.bSize, w * 4);
         g.bOnFront = ensure(g.bOnFront, w * 4);
+        g.bFrontRadius = ensure(g.bFrontRadius, w * 4);   // G2: per-instance dot radius
         // G1 fixed-size frontier scratch + uniform, allocated once with the scene.
         if (!g.bFrontIdx) {
             g.bFrontIdx = this.device.createBuffer({
@@ -357,9 +717,22 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
             g.uSky = this.device.createBuffer({
                 size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+            // G2 fixed-size scratch + uniforms.
+            const mk = (size, usage) => this.device.createBuffer({ size, usage });
+            const ST = GPUBufferUsage.STORAGE, CS = GPUBufferUsage.COPY_SRC, CD = GPUBufferUsage.COPY_DST;
+            g.bFrontSorted    = mk(WEBGPU_GRAPH_MAX_FRONT * 8, ST | CS);
+            g.bFrontSortedIdx = mk(WEBGPU_GRAPH_MAX_FRONT * 4, ST | CS);
+            g.bStaircase      = mk((2 * WEBGPU_GRAPH_MAX_FRONT + 2) * 8, ST | CS);
+            g.bStairIndirect  = mk(16, ST | GPUBufferUsage.INDIRECT | CD | CS);
+            g.bShadeIndirect  = mk(16, ST | GPUBufferUsage.INDIRECT | CD | CS);
+            g.bHv             = mk(WEBGPU_GRAPH_MAX_FRONT * 4, ST | CS);
+            g.bHvScalar       = mk(16, ST | CD | CS);
+            g.uStair    = mk(32, GPUBufferUsage.UNIFORM | CD);
+            g.uHv       = mk(32, GPUBufferUsage.UNIFORM | CD);
+            g.uGraphCol = mk(48, GPUBufferUsage.UNIFORM | CD);
         }
         const grew = g.bPos !== oldPos || g.bCol !== oldCol || g.bSize !== oldSize ||
-                     g.bOnFront !== oldFront;
+                     g.bOnFront !== oldFront || g.bFrontRadius !== oldRad;
         if (w > 0) {
             this.device.queue.writeBuffer(g.bPos, 0, posArr, 0, w * 2);
             this.device.queue.writeBuffer(g.bCol, 0, colArr, 0, w);
@@ -382,14 +755,71 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
                 { binding: 3, resource: { buffer: g.bFrontIdx } },
                 { binding: 4, resource: { buffer: g.bCount } },
             ] });
+            const bg = (buf) => ({ buffer: buf });
+            g.stairBindGroup = this.device.createBindGroup({ layout: this.stairBgl, entries: [
+                { binding: 0, resource: bg(g.uStair) }, { binding: 1, resource: bg(g.bPos) },
+                { binding: 2, resource: bg(g.bFrontIdx) }, { binding: 3, resource: bg(g.bCount) },
+                { binding: 4, resource: bg(g.bFrontSorted) }, { binding: 5, resource: bg(g.bFrontSortedIdx) },
+                { binding: 6, resource: bg(g.bStaircase) }, { binding: 7, resource: bg(g.bStairIndirect) },
+                { binding: 8, resource: bg(g.bShadeIndirect) },
+            ] });
+            g.hvBindGroup = this.device.createBindGroup({ layout: this.hvBgl, entries: [
+                { binding: 0, resource: bg(g.uHv) }, { binding: 1, resource: bg(g.bPos) },
+                { binding: 2, resource: bg(g.bFrontSorted) }, { binding: 3, resource: bg(g.bFrontSortedIdx) },
+                { binding: 4, resource: bg(g.bCount) }, { binding: 5, resource: bg(g.bHv) },
+                { binding: 6, resource: bg(g.bFrontRadius) }, { binding: 7, resource: bg(g.bHvScalar) },
+            ] });
+            g.stairLineBindGroup = this.device.createBindGroup({ layout: this.stairLineBgl, entries: [
+                { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bStaircase) },
+                { binding: 2, resource: bg(g.uGraphCol) },
+            ] });
+            g.hvShadeBindGroup = this.device.createBindGroup({ layout: this.hvShadeBgl, entries: [
+                { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bStaircase) },
+                { binding: 2, resource: bg(g.uGraphCol) }, { binding: 3, resource: bg(g.uStair) },
+            ] });
+            g.frontBindGroup = this.device.createBindGroup({ layout: this.sceneFrontBgl, entries: [
+                { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bPos) },
+                { binding: 2, resource: bg(g.bCol) }, { binding: 3, resource: bg(g.bOnFront) },
+                { binding: 4, resource: bg(g.bFrontRadius) }, { binding: 5, resource: bg(g.uGraphCol) },
+            ] });
         }
         g.count = w;
         g.key = opts.key;
         g.uploads++;                          // verify hook asserts this stays put across re-renders
         g.cpuPos = posArr.subarray(0, w * 2); // JS-side copy for the G0 readback invariant
         g.cpuMeta = meta;
-        g.xSign = opts.xSign ?? 1;
-        g.ySign = opts.ySign ?? 1;
+        g.xSign = xSign;
+        g.ySign = ySign;
+        // G2 canonical geometry. Anti-ideal corner = the canonical-min DOMAIN edges
+        // (the CPU staircase caps at screen 0 / plotH = the worst-value edges). HV
+        // reference R = cloud canonical-min corner − eps (matches computeHvContributions).
+        const xd = opts.xDomain || [xMinS * xSign, xMaxS * xSign];
+        const yd = opts.yDomain || [yMinS * ySign, yMaxS * ySign];
+        const antiXC = Math.min(xd[0] * xSign, xd[1] * xSign);
+        const antiYC = Math.min(yd[0] * ySign, yd[1] * ySign);
+        const epsX = Math.max(1e-9, (xMaxS - xMinS) * 1e-6);
+        const epsY = Math.max(1e-9, (yMaxS - yMinS) * 1e-6);
+        g.RxC = (isFinite(xMinS) ? xMinS : 0) - epsX;
+        g.RyC = (isFinite(yMinS) ? yMinS : 0) - epsY;
+        g.antiXC = antiXC; g.antiYC = antiYC;
+        // uStair / uHv compute uniforms (n, signs, anti or ref corner).
+        const stU = new ArrayBuffer(32);
+        new Uint32Array(stU, 0, 1)[0] = w;
+        new Float32Array(stU, 4, 4).set([xSign, ySign, antiXC, antiYC]);
+        this.device.queue.writeBuffer(g.uStair, 0, stU);
+        const hvU = new ArrayBuffer(32);
+        new Uint32Array(hvU, 0, 1)[0] = w;
+        new Float32Array(hvU, 4, 4).set([xSign, ySign, g.RxC, g.RyC]);
+        this.device.queue.writeBuffer(g.uHv, 0, hvU);
+        // uGraphCol: stair line rgba, HV shade rgb, worst-mode front override (rgb, use).
+        const sc = opts.stairColor || [0.06, 0.09, 0.16, 0.55];
+        const hc = opts.hvColor || [0.0, 0.176, 0.447];
+        const fo = opts.frontOverride || [0, 0, 0, 0];
+        this.device.queue.writeBuffer(g.uGraphCol, 0, new Float32Array([
+            sc[0], sc[1], sc[2], sc[3] ?? 0.55,
+            hc[0], hc[1], hc[2], 0,
+            fo[0], fo[1], fo[2], fo[3] ?? 0,
+        ]));
         // The skyline runs HERE — i.e. only on scene-dirty frames, by
         // construction (this point is only reached when the key changed). The
         // submit lands on the queue BEFORE present()'s, so the same-frame cloud
@@ -414,8 +844,13 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
         new Float32Array(u, 4, 3).set([g.xSign, g.ySign, 0]);
         dev.queue.writeBuffer(g.uSky, 0, u);
         dev.queue.writeBuffer(g.bCount, 0, new Uint32Array(4)); // K → 0
+        // G2: reset the GPU-written draw args (a frame with K==0 must draw nothing).
+        dev.queue.writeBuffer(g.bStairIndirect, 0, new Uint32Array([0, 1, 0, 0]));
+        dev.queue.writeBuffer(g.bShadeIndirect, 0, new Uint32Array([0, 1, 0, 0]));
+        dev.queue.writeBuffer(g.bHvScalar, 0, new Float32Array([0, 1]));
         const enc = dev.createCommandEncoder();
         const wg = Math.ceil(g.count / 64);
+        const wgF = Math.ceil(WEBGPU_GRAPH_MAX_FRONT / 64);   // frontier passes self-guard by K
         for (const pipe of [this.pSceneSkyline, this.pSceneCompact]) {
             const cp = enc.beginComputePass();
             cp.setPipeline(pipe);
@@ -423,6 +858,19 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
             cp.dispatchWorkgroups(wg);
             cp.end();
         }
+        // G2 chain (same encoder, serialized): sort the frontier by canonical x, emit
+        // the staircase + shade-fan draw args, then the HV passes — totalHv (1) →
+        // per-rank leave-one-out contributions (K) → maxContrib (1) → per-dot radius (K).
+        const pass = (pipe, bgKey, groups) => {
+            const cp = enc.beginComputePass();
+            cp.setPipeline(pipe); cp.setBindGroup(0, g[bgKey]); cp.dispatchWorkgroups(groups); cp.end();
+        };
+        pass(this.pSceneRanksort, "stairBindGroup", wgF);
+        pass(this.pSceneEmit,     "stairBindGroup", wgF);
+        pass(this.pSceneHvTotal,  "hvBindGroup", 1);
+        pass(this.pSceneHvContrib,"hvBindGroup", wgF);
+        pass(this.pSceneHvMax,    "hvBindGroup", 1);
+        pass(this.pSceneHvRadius, "hvBindGroup", wgF);
         // Pick a free staging buffer (double-buffered: a still-mapped buffer
         // from a previous scene-dirty frame must not be re-targeted). At
         // scene-dirty cadence both being busy "can't happen" — latest-wins skip
@@ -479,7 +927,17 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
         // skyline gets signs via its own uSky — they're scene identity, not
         // view), but G2's HV shade orients its quadrant from here.
         u[8] = xSign ?? 1; u[9] = ySign ?? 1;
-        // u[12..15] = corn row: zeroed until G2 writes the shade corners.
+        // corn row = (antiX, antiY, idealX, idealY) in FULL pixel space (margin folded
+        // in, matching the affine output) — the HV shade fragment projects onto the
+        // ideal→anti axis for its gradient t. Plot edges from the D3 scale ranges:
+        // xScale.range() = [0, plotW], yScale.range() = [plotH, 0].
+        const sx = xSign ?? 1, sy = ySign ?? 1;
+        const plotW = xScale.range()[1] - xScale.range()[0];
+        const plotH = yScale.range()[0] - yScale.range()[1];
+        u[12] = margin.left + (sx > 0 ? 0 : plotW);      // antiX
+        u[13] = margin.top + (sy > 0 ? plotH : 0);       // antiY
+        u[14] = margin.left + (sx > 0 ? plotW : 0);      // idealX
+        u[15] = margin.top + (sy > 0 ? 0 : plotH);       // idealY
         this.device.queue.writeBuffer(g.uScene, 0, u);
     };
 
@@ -492,6 +950,33 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (!g || !(g.count > 0)) return;
         rp.setPipeline(this.pSceneCloud);
         rp.setBindGroup(0, g.bindGroup);
+        rp.draw(6, g.count);
+        rp.setPipeline(this.pPoints);
+    };
+
+    // G2: the HV shade — drawn BEFORE the scene cloud so the dominated-region fill
+    // sits UNDER the dots (matching the SVG order: shade, then cloud, then dots). The
+    // fan vertex count came from the GPU (bShadeIndirect), so a K==0 frame draws nothing.
+    P._drawGraphShade = function (rp) {
+        const g = this.graph;
+        if (!g || !(g.count > 0) || !g.bShadeIndirect) return;
+        rp.setPipeline(this.pSceneHvShade);
+        rp.setBindGroup(0, g.hvShadeBindGroup);
+        rp.drawIndirect(g.bShadeIndirect, 0);
+        rp.setPipeline(this.pPoints);
+    };
+
+    // G2: the on-top overlays — the red/purple staircase line (drawIndirect, vertex
+    // count from emit) then the GPU frontier dots (HV-sized, white-ringed; non-front
+    // instances degenerate). Drawn AFTER the cloud + heads, mirroring drawFrontierDots.
+    P._drawGraphOverlays = function (rp) {
+        const g = this.graph;
+        if (!g || !(g.count > 0)) return;
+        rp.setPipeline(this.pSceneStairLine);
+        rp.setBindGroup(0, g.stairLineBindGroup);
+        rp.drawIndirect(g.bStairIndirect, 0);
+        rp.setPipeline(this.pSceneFront);
+        rp.setBindGroup(0, g.frontBindGroup);
         rp.draw(6, g.count);
         rp.setPipeline(this.pPoints);
     };
@@ -514,7 +999,10 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
         const g = this.graph;
         if (!g) return;
         for (const k of ["bPos", "bCol", "bSize", "uScene",
-                         "bOnFront", "bFrontIdx", "bCount", "uSky"]) g[k]?.destroy();
+                         "bOnFront", "bFrontIdx", "bCount", "uSky",
+                         "bFrontSorted", "bFrontSortedIdx", "bStaircase", "bStairIndirect",
+                         "bShadeIndirect", "bHv", "bFrontRadius", "bHvScalar",
+                         "uStair", "uHv", "uGraphCol"]) g[k]?.destroy();
         for (const s of g.stage || []) s?.destroy();
         this.graph = null;
     };
@@ -584,12 +1072,71 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
             cardPidsMatch = gotPids.size === refPids.size &&
                 [...refPids].every(p => gotPids.has(p));
         }
+
+        // ── G2 invariants: staircase vertex count, HV contributions, dot radii, shade
+        // quadrant. The HV oracle is an f32 re-sweep over g.cpuPos (NOT the f64
+        // computeHvContributions) so it matches the GPU's f32 arithmetic exactly — the
+        // same provenance trick skylineMis uses; we also report the rel error vs the
+        // f64 sidebar numbers for sanity. Driven by the GPU's OWN rank order
+        // (bFrontSortedIdx) so rank r in bHv lines up with the JS oracle.
+        let stairVertMis = -1, hvMis = -1, hvMaxRel = -1, radiusMis = -1, shadeQuadrant = null;
+        if (g.front && g.front.key === g.key && g.count > 0) {
+            const K = g.front.count;
+            const stairCount = (await pointRenderer._readback(g.bStairIndirect, 16, Uint32Array))[0];
+            stairVertMis = Math.abs(stairCount - (1 + 2 * K));
+            const sortedIdx = await pointRenderer._readback(g.bFrontSortedIdx, K * 4, Uint32Array);
+            const gpuHv = await pointRenderer._readback(g.bHv, K * 4, Float32Array);
+            const gpuRad = await pointRenderer._readback(g.bFrontRadius, g.count * 4, Float32Array);
+            const fp = g.cpuPos, nn = g.count, sgx = g.xSign, sgy = g.ySign, RxC = g.RxC, RyC = g.RyC;
+            const hvOfStack = (st) => { let hv = 0, xp = RxC; for (const p of st) { hv += (p[0] - xp) * (p[1] - RyC); xp = p[0]; } return hv; };
+            const sweepExcl = (skip) => {
+                const st = [];
+                for (let i = 0; i < nn; i++) {
+                    if (i === skip) continue;
+                    const X = Math.fround(fp[i * 2] * sgx), Y = Math.fround(fp[i * 2 + 1] * sgy);
+                    while (st.length && st[st.length - 1][1] < Y) st.pop();
+                    if (st.length && st[st.length - 1][1] === Y && st[st.length - 1][0] < X) st.pop();
+                    st.push([X, Y]);
+                }
+                return st;
+            };
+            const totalJs = hvOfStack(sweepExcl(-1));
+            const contribJs = new Float64Array(K);
+            for (let r = 0; r < K; r++) contribJs[r] = totalJs - hvOfStack(sweepExcl(sortedIdx[r]));
+            let maxJs = 0; for (let r = 0; r < K; r++) maxJs = Math.max(maxJs, contribJs[r]);
+            if (maxJs <= 0) maxJs = 1;
+            hvMis = 0; hvMaxRel = 0; radiusMis = 0;
+            const R_MIN = WEBGPU_GRAPH_R_MIN, R_MAX = WEBGPU_GRAPH_R_MAX;
+            for (let r = 0; r < K; r++) {
+                const c = Math.max(contribJs[r], 0);
+                // Accuracy normalized by maxContrib — the quantity the dot radius actually
+                // consumes (radius = R_MIN + Δ·sqrt(contrib/max)). A RAW relative error is
+                // meaningless for near-zero contributions (radius is R_MIN either way), and
+                // a contribution is total−alt of two large HV areas, so f32 cancellation is
+                // unavoidable (the JS oracle accumulates in f64). 1e-3 of the dynamic range
+                // is the f32-realistic floor; radiusMis below is the authoritative visual gate.
+                const rel = Math.abs(gpuHv[r] - c) / maxJs;
+                if (rel > 1e-3) hvMis++;
+                if (rel > hvMaxRel) hvMaxRel = rel;
+                const cpuRad = R_MIN + (R_MAX - R_MIN) * Math.sqrt(c / maxJs);
+                if (Math.abs(gpuRad[sortedIdx[r]] - cpuRad) > 1e-3) radiusMis++;
+            }
+            // Shade quadrant: the anti-ideal corner must be the canonical MINIMUM corner
+            // (≤ every frontier point in canonical space) — flips correctly with signs.
+            shadeQuadrant = true;
+            for (const idx of g.front.indices) {
+                const X = g.cpuMeta[idx].x * sgx, Y = g.cpuMeta[idx].y * sgy;
+                if (g.antiXC > X + 1e-6 || g.antiYC > Y + 1e-6) shadeQuadrant = false;
+            }
+        }
+
         return {
             dotCount: g.count,
             expectedN: window.__bl2d_gpuGraphN ?? null,
             posMis, maxAbs,
             skylineMis, refFrontSize,
             frontMis, frontCount, cardPidsMatch,
+            stairVertMis, hvMis, hvMaxRel, radiusMis, shadeQuadrant,
             frontReads: g.frontReads,
             uploads: g.uploads,
             key: g.key,

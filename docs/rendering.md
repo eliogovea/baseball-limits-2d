@@ -119,6 +119,19 @@ Export (SVG/PNG) reads back the offscreen texture under WebGPU
   the bundle: skylineMis 0 / frontMis 0 / cardPidsMatch across 20 random axis combos
   incl. ERA↓, BB/9↓ and the worst-frontier toggle; uploads & frontReads stay 1 across
   identity-preserving redraws; Henderson on-frontier; `verifySpring` regression green.
+- **G2** — the GPU now owns the whole static envelope: a sign-aware staircase
+  (`ranksort`→`emit`, caps at the canonical domain edges, vertices un-folded to data
+  space so zoom stays a uniform write), a gradient HV shade (triangle fan from the
+  anti-ideal apex; fragment projects onto `uScene.corn`'s ideal→anti axis), HV-sized
+  white-ringed frontier dots (`sceneFront`), and HV contributions ported as the EXACT
+  leave-one-out-with-fill oracle (one GPU thread per frontier slot re-sweeps the cloud
+  excluding that point — NOT the cheap exclusive-corner formula, which would change the
+  visible dot radii). CPU SVG shade/staircase/`drawFrontierDots` suppressed under
+  `gpuGraph`. Gate green on the bundle across HR×SB, ERA↓×SO, WHIP↓×SO + worst toggle:
+  `radiusMis 0` (the authoritative visual gate), `stairVertMis 0`, `shadeQuadrant`
+  flips with signs; `hvMis 0` at a maxContrib-normalized f32 tolerance (raw 1e-6 is
+  unreachable — a contribution is total−alt of two large HV areas; the radius's sqrt
+  compresses it away); `verifySpring` regression green.
 
 ### Pending (ordering in ROADMAP.md)
 

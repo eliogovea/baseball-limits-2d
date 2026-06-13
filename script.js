@@ -4194,9 +4194,10 @@ class WebGPURenderer {
             view: this.offTex.createView(), clearValue: this.clearValue, loadOp: "clear", storeOp: "store" }] });
         const drawPts = (name) => { if (this.count[name] > 0) { rp.setBindGroup(0, this._bindGroup(this.buf[name])); rp.draw(6, this.count[name]); } };
         rp.setPipeline(this.pPoints); drawPts("bg");
-        // G-track hook (webgpu-graph.js): the retained-scene cloud draws at the
-        // background layer. Optional-chained no-op when the file isn't loaded or
-        // the scene is empty (every non-?gpugraph frame).
+        // G-track hooks (webgpu-graph.js): the HV shade fills UNDER the cloud (G2), then
+        // the retained-scene cloud draws at the background layer (G0/G1). Both are
+        // optional-chained no-ops when the file isn't loaded or the scene is empty.
+        this._drawGraphShade?.(rp);
         this._drawGraphScene?.(rp);
         // The cloud sits at the background layer (behind trails, heads, frontier dots).
         // Phase-5 spring path: vertex-pull the SMOOTHED pos[] (pass 0 = non-front cloud);
@@ -4216,6 +4217,9 @@ class WebGPURenderer {
         if (this.count.trail > 0) { rp.setPipeline(this.pLine); rp.setBindGroup(0, this._bindGroup(this.buf.trail)); rp.draw(6, this.count.trail); rp.setPipeline(this.pPoints); }
         drawPts("fg");
         drawPts("frontier");   // Phase-4 hybrid frontier dots (no-op in spring mode — GPU owns them)
+        // G-track G2 overlays: the GPU staircase line + HV-sized frontier dots, on top
+        // of the cloud/heads (mirrors drawFrontierDots' layer). No-op without the scene.
+        this._drawGraphOverlays?.(rp);
         // Phase-5: frontier dots (pass 1, front-only) + the red staircase via drawIndirect,
         // both on top of the cloud/heads. The staircase's vertex count was written by the
         // GPU emit pass into bIndirect — it never round-tripped through JS.
@@ -5798,7 +5802,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // them would put the shaded area (and a duplicate line) AHEAD of the gliding red line.
     // Skip both while the GPU spring animates; a paused/idle frame is a CPU frame where the
     // line and fill agree, so the shade returns the instant playback stops.
-    if (frontier.length > 0 && !filters.groupCareer && !gpuSpring) {
+    if (frontier.length > 0 && !filters.groupCareer && !gpuSpring && !gpuGraph) {
         const line = staircaseScreen(frontier);
 
         // Hypervolume shading: gradient fill of the dominated region beneath the
@@ -5983,12 +5987,23 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             xDim, yDim, colorBy, cloudOpacity, pointRadius,
             xSign, ySign, unique.length,
         ].join("|");
+        // G2 render colours, resolved to [r,g,b] in 0..1 (d3.color handles hex + CSS
+        // vars). Stair line = --frontier-color (worst → purple), 0.55 opacity to match
+        // .frontier-staircase; HV shade = navy (worst → purple); worst mode also
+        // overrides the frontier-dot fill (best mode keeps each dot's era colour).
+        const rgb01 = (css) => { const c = d3.color(css); return c ? [c.r / 255, c.g / 255, c.b / 255] : [0, 0, 0]; };
+        const frontierCss = getComputedStyle(document.documentElement).getPropertyValue("--frontier-color").trim() || "#0f172a";
+        const stairRgb = showWorstFrontier ? rgb01("#8b5cf6") : rgb01(frontierCss);
+        const hvRgb = showWorstFrontier ? rgb01("#8b5cf6") : rgb01("#002D72");
+        const frontOverride = showWorstFrontier ? [...rgb01("#8b5cf6"), 1] : [0, 0, 0, 0];
         pointRenderer.uploadScene(unique, {
             key: sceneKey,
             fillFor: d => colorOf(d, colorBy, getMeta),
             alpha: cloudOpacity,
             radius: pointRadius,
             xSign, ySign,
+            xDomain: xScale.domain(), yDomain: yScale.domain(),
+            stairColor: [...stairRgb, 0.55], hvColor: hvRgb, frontOverride,
         });
         pointRenderer.writeSceneScale(xScale, yScale, margin, width, height, xSign, ySign);
         // The pixel-space bg instances must not double-draw under the scene, and
@@ -6082,7 +6097,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         strokeWidth: 1.5,
         clear: !filters.groupCareer,               // keep the trails drawn just above
     });
-    if (!filters.groupCareer && pointRenderer.fgCanvas && !gpuSpring) {
+    if (!filters.groupCareer && pointRenderer.fgCanvas && !gpuSpring && !gpuGraph) {
         // Frontier dots composite over the fg cloud (no clear). They follow the active
         // Color-by encoding (era / league / bats), same as the cloud — staying distinct
         // via size + the white ring, not a fixed colour, so the encoding isn't

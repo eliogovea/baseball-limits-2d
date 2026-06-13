@@ -177,7 +177,7 @@ Full design, phase details, WGSL entry points, and verify gates:
 |---|---|---|
 | G0 | retained-scene dots + data-space coord model + bundler split | ✅ shipped (`webgpu-graph.js`) |
 | G1 | GPU sign-aware frontier + readback contract | ✅ shipped (`webgpu-graph.js`: `sceneSkyline`+`compact`) |
-| G2 | staircase + HV shade + HV contributions | ☐ not started |
+| G2 | staircase + HV shade + HV contributions | ✅ shipped (`webgpu-graph.js`: `ranksort`/`emit` + `hvTotal`/`hvContrib`/`hvMax`/`hvRadius` + shade/front pipelines) |
 | G3 | GPU text (glyph atlas, axes, labels) | ☐ not started |
 | G4 | overlays: depth, era-B, ghost (dashed), cross-fade | ☐ not started |
 | G5 | interaction + spring-FLIP + loop owner + stream-engine convergence | ☐ not started |
@@ -196,6 +196,21 @@ scene identity key; the double-buffered fire-and-forget readback (`bCount`+`bFro
 → `g.front`) ships as MECHANISM only — cards/tooltip/quadtree stay CPU-fed until the
 G5 convergence. The evtSeason completed-seasons bg-layer reach-extension was
 considered and deferred (it belongs with the S-track's completed-season scene, SA2).
+
+G2 decisions of record: the GPU now owns the WHOLE static envelope — the sign-aware
+staircase (canonical-x `ranksort` → `emit`, caps at the canonical DOMAIN edges not
+value 0, vertices un-folded to data space so zoom is still a uniform write), the
+gradient HV shade (a triangle FAN from the anti-ideal apex; the fragment projects
+onto the ideal→anti axis from `uScene.corn`), the HV-sized white-ringed frontier dots
+(the cloud shader's on-front degenerate handed over to a dedicated `sceneFront` pass),
+and — the crux — the HV contributions ported as the EXACT leave-one-out-with-fill
+oracle (`computeHvContributions`), NOT the cheap exclusive-corner formula: one GPU
+thread per frontier slot re-sweeps the whole cloud excluding that point. The CPU SVG
+staircase/shade and `drawFrontierDots` are suppressed under `gpuGraph`. Verify floor:
+`radiusMis 0` (the visible dot size is the authoritative parity gate) + `stairVertMis 0`
++ `shadeQuadrant` across HR×SB, ERA↓×SO, WHIP↓×SO and the worst toggle; `hvMis` uses a
+maxContrib-normalized f32 tolerance (a contribution is total−alt of two large HV areas,
+so raw 1e-6 is unreachable — the design's aspiration; the radius compresses it away).
 
 ---
 
