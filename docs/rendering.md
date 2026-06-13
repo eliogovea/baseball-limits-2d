@@ -227,6 +227,121 @@ through G4, `legacyPresent` rollback); atlas coverage/quality (two-tier + SDF up
 path); 5×O(n²) depth-layer cost (dirty-frames only; cap input to prior complement);
 HV reference-corner epsilon/sign parity (test ERA↓ early).
 
+### G0–G4 status (shipped on `feat/event-level-pbp`)
+
+G0 `4f1f11b` · G1 `740b1de` · G2 `7fe0aa0` · G3 `ae03fa2` (glyph text) · G4a `5947acd`
+(depth peel compute) · G4b `561dd56` (depth dots+staircases) · G4c `d53acc4` (depth
+shade) · G4d `94c2fe5` (era-B + ghost overlays). Headless harness fix `0b0b1fa`
+(ANGLE Metal on macOS). **Everything in `present()`'s G-track hooks today is retained-
+buffer + scale-uniform; a standalone `present()` re-call under gpuGraph redraws the whole
+scene from retained state (verified: `gpuCloud`/`springOn` false, `count.bg=0`).** This
+is the property G5 builds on.
+
+### G5 implementation plan (resumable)
+
+G5 is the convergence phase. It has **two independent workstreams** — do them in either
+order, but **G5-INT (interaction) is lower-risk and ships first**; **G5-LOOP (present
+convergence) edits the proven path and ships last behind `legacyPresent`.** Each sub-phase
+is independently shippable with a verify gate + a manual-test line. Resume at the first
+unchecked box.
+
+**Hard constraint (why this is a plan, not a commit):** hover/click are *interactive*; the
+methodology's UI verification floor requires "one manual browser interaction." Headless can
+verify pick-math + instance-buffer geometry (offscreen readback), **not** live-cursor feel
+(tracking, lag, flicker from re-presenting on mousemove). Every G5-INT sub-phase therefore
+ends with a **MANUAL** checkpoint the implementer must run in a real browser (or a Pages
+preview) before ticking it.
+
+**The full hover/interaction visual set today (all SVG, all over the canvas — `script.js`):**
+- `isolation ring` (frontier-point hover): `ringGroup` circle, `isolationMap` (built ~6299,
+  nearest-other-frontier-point radius), colour `isoRingColor` (~6297). Drawn ~6379.
+- `HV-contribution overlay polygon` (frontier-point hover + pinned): `drawHvOverlay`
+  (~5901) over `sweepExcluding` (~5921) — a per-hover **re-sweep**; this is the heaviest
+  hover visual and the one the design's "ring + regret line" shorthand omits.
+- `regret line` + `regret ring` (non-frontier hover): `regretGroup`, geometry from
+  `computeDistToFrontier` (~7071). Drawn ~6392/6405.
+- Tooltip (`#tooltip`, HTML) and frontier cards (`renderFrontierCards` ~6780) — **stay
+  DOM**, not canvas. Only the on-canvas vector overlays move to GPU.
+- Hit-testing: `hitTree` d3-quadtree (~6487), `mousemove` handler (~6503). **Quadtree stays
+  CPU** (exact; the design confirms this). G5 changes only what the pick *draws*, not how it
+  picks.
+
+#### G5-INT — interaction overlays on the GPU
+
+Each overlay becomes a tiny dynamic instance buffer; a hover/pin writes it and triggers a
+**coalesced** re-present (one `requestAnimationFrame`, not per-mousemove). New WGSL:
+`hoverRing` (one ringed circle), `regretLine` (one segment), reuse `pPlainDots`/`pDepthShade`
+where possible. New draw hook `_drawGraphInteraction(rp)` called LAST in `present()` (above
+text, or just under it). New buffers on `this.graph`: `bHover{Ring,Line,Poly}` + uniforms.
+
+- [ ] **G5a — coalesced re-present plumbing.** Add `pointRenderer.presentInteraction()` =
+  set a dirty flag + `requestAnimationFrame` that calls `present()` once (coalesce multiple
+  mousemoves into one frame). NO new visuals yet. Gate all of it on `gpuGraph`. *Verify:*
+  headless — rapid simulated `presentInteraction()` calls cause exactly one `present()` per
+  rAF, no GPU errors / device loss across 100 calls (`__bl2d_gpuError`/`deviceLost` null).
+  *MANUAL:* none (no visual change).
+- [ ] **G5b — GPU regret line + regret ring** (non-frontier hover). `WEBGPU_REGRET_WGSL`
+  (segment + ring, data-space endpoints from `computeDistToFrontier`). mousemove (gpuGraph):
+  write the buffer, `presentInteraction()`; suppress the SVG `regret-line--hover`. *Verify:*
+  headless — inject a known non-frontier point, assert the GPU regret instance endpoints ==
+  `computeDistToFrontier(d).{targetX,targetY}` mapped through the scale (new
+  `__bl2d_verifyGraph.regretMis`); offscreen-readback visual. *MANUAL:* hover non-frontier
+  dots in a browser — line tracks the cursor to the nearest limit, no lag/flicker.
+- [ ] **G5c — GPU isolation ring** (frontier hover). `WEBGPU_HOVERRING_WGSL` (one ringed
+  circle, radius from `isolationMap`). Suppress SVG `isolation-ring--hover`. *Verify:*
+  headless — GPU ring centre/radius == `isolationMap.get(d)` (`ringMis`); visual. *MANUAL:*
+  hover frontier dots — ring matches the SVG version.
+- [ ] **G5d — GPU HV-contribution hover polygon** (the heavy one). Port `drawHvOverlay`/
+  `sweepExcluding` to the GPU: the existing `hvContrib` machinery already re-sweeps excluding
+  one point — reuse it to emit the exclusive polygon for the hovered/pinned point into a fan
+  buffer. Suppress the SVG `hv-contrib-overlay--hover`. *Verify:* headless — GPU polygon area
+  == CPU `sweepExcluding` polygon area within f32 tol (`hvPolyMis`); visual. *MANUAL:* hover
+  frontier dots — the shaded exclusive region matches SVG. **(If too costly, keep this one on
+  SVG — it's pinned/hover-only and the design's MVP is ring+regret. Document the cut.)**
+- [ ] **G5e — pinned-state overlays** (click-to-pin uses the same buffers, persisted across
+  refresh via the `hl=` hash). Ensure the pinned ring/regret/poly ride the normal `present()`
+  (no mousemove needed — pinned state is in the scene identity). *Verify:* deep-link a pinned
+  `hl=` URL, headless readback shows the overlay. *MANUAL:* click-pin, change a filter, the
+  pin persists.
+
+#### G5-LOOP — present() convergence + single loop owner (RISKY; ships last)
+
+- [ ] **G5f — `legacyPresent` switch.** Extract the current `present()` body into
+  `present_legacy()`; add `present()` that dispatches to it (default) or the new unified path
+  (flag off by default). NO behaviour change yet. *Verify:* `__bl2d_verifyGraph` + `verifySpring`
+  byte-identical to pre-change (both green); default app unchanged.
+- [ ] **G5g — unified scene descriptor.** One render method taking
+  `{posBuf, colBuf, onFrontBuf, staircase…, source: "upload"|"spring"}` so the static-upload
+  path (G0–G4) and the spring path (`gpustream`) share ONE `present()` body. Behind
+  `legacyPresent`. *Verify:* with the flag ON, `verifyGraph` (static) AND `verifySpring`
+  (`gpustream`, dev server — `.evt` is stubbed null in the bundle) BOTH stay green; offscreen
+  readbacks match the legacy path. *MANUAL:* toggle `gpustream` + play the career animation —
+  spring still smooth; toggle `gpugraph` static — identical.
+- [ ] **G5h — single damage-flag `graphLoop`.** One rAF owner with flags
+  `{scene, scale, overlay, motion}`; idle = no rAF scheduled (assert via a frame counter).
+  Subsumes `springLoop`/`presentGlide` (~1842) and the G5a coalescer. *Verify:* idle parks
+  rAF (`__bl2d_rafScheduled === false` after settle); `verifySpring` green; no busy-loop.
+  *MANUAL:* animation smooth at 60/120 Hz; CPU idle when nothing moves.
+- [ ] **G5i — spring-FLIP cross-fade for static filter changes.** On a filter change under
+  gpuGraph, write new targets and glide (the spring becomes the single motion system); the
+  staircase cross-fades via prev/new buffers. *Verify:* `verifyGraph` green at the settled
+  state; FLIP is monotone (no overshoot — the critically-damped integrator). *MANUAL:* change
+  year range under gpuGraph — dots glide, staircase cross-fades, no snap.
+
+**Verify hooks to add to `__bl2d_verifyGraph`:** `regretMis`, `ringMis`, `hvPolyMis` (G5b–d);
+`rafScheduled`/idle assertion (G5h). Keep the existing `frontMis`/`cardPidsMatch` — G5 makes
+the GPU `g.front` readback authoritative for cards (the design's "readback contract"), so
+re-confirm `cardPidsMatch true` after any card-feed rewire.
+
+**Rollback:** every G5-LOOP step is behind `legacyPresent` (default = legacy). If `verifySpring`
+or `verifyGraph` regress, flip the default back to legacy and the app is unchanged. G5-INT
+steps are gated on `gpuGraph` and suppress their SVG counterpart only when their GPU draw is
+in place — partial migration keeps the SVG overlay, so a half-done G5-INT never loses a visual.
+
+**Resume pointer:** start at **G5a**. The seams above are current as of `94c2fe5`
+(re-grep line numbers — they drift). The standalone-`present()`-re-entry property
+(verified this session) is what makes G5a's coalesced re-present safe.
+
 ---
 
 ## Season GPU animation (S-track; folded in after the G-track foundation)
