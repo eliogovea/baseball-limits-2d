@@ -1379,8 +1379,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     setupExportButton();
     setupShareButton();
     setupGlossary();
-    setupRendererToggle();
-    setupGpustreamToggle();
+    syncRendererStatus();   // seed the read-only GPU/CPU indicator (chooseRenderer re-syncs once WebGPU resolves)
     applyModeConfig("season");
     setupModeToggle("mode-toggle", () => {
         const mode = getCurrentMode();
@@ -3640,11 +3639,12 @@ class WebGPURenderer {
         // first eligible frame uploads the event stream via uploadEvtStream(); see the
         // WEBGPU_ACCUM_WGSL / WEBGPU_EVTCLOUD_WGSL block above for the why.
         this.evt = null;
-        // Phase-5 gpuStreaming engine: ?renderer=webgpu&gpustream=1 turns the hybrid
-        // Phase-4 cloud into the FULL-GPU pipeline (spring + skyline + GPU staircase).
-        // Without the flag this stays the shipped Phase-4 hybrid. Explicit, opt-in, never
-        // the default. See docs/rendering.md §"Phase 5".
-        this.springMode = new URLSearchParams(location.search).has("gpustream");
+        // Phase-5 gpuStreaming engine: the FULL-GPU playback pipeline (spring + skyline +
+        // GPU staircase). Now the DEFAULT animation engine (GPU is non-optional) — it runs
+        // whenever it's eligible (monotone counting axes, no attribute filter) and falls back
+        // to the hybrid Phase-4 cloud automatically otherwise. ?gpustream=0 forces the hybrid
+        // cloud (debug). See docs/rendering.md §"Phase 5".
+        this.springMode = new URLSearchParams(location.search).get("gpustream") !== "0";
         this.lastSpringT = 0;   // wall-clock of the previous spring frame (for dt)
         // G-track (webgpu-graph.js): ?gpugraph=1 opts the STATIC chart into the
         // retained-scene GPU path (docs/rendering.md §G0). The
@@ -4505,16 +4505,16 @@ function swapRenderer(next) {
     next.bgCacheKey = null;
     if (prev && prev !== next) prev.destroy();
     window.__bl2d_renderer = next instanceof WebGPURenderer ? "webgpu" : "canvas2d";
-    syncRendererToggle();
-    syncGpustreamToggle();   // reflect spring-streaming state (also after an auto device-loss fallback)
+    syncRendererStatus();   // reflect the live backend on the read-only GPU/CPU indicator
     if (typeof refreshChart === "function") refreshChart();
 }
-// GPU rendering is now NON-OPTIONAL by default: once WebGPU is available the app commits
-// to it and REFUSES to silently fall back to Canvas 2D (a silent fallback could masquerade
-// as the GPU path). On any GPU failure/loss it shows a loud red banner instead — so a
-// rendered chart with NO banner is guaranteed GPU output. Escape hatch: ?cpufallback=1
-// restores the graceful Canvas-2D fallback (e.g. for an unsupported-browser smoke test).
-const CPU_FALLBACK_OK = new URLSearchParams(location.search).has("cpufallback");
+// Rendering is NON-OPTIONAL: WebGPU is the renderer, with Canvas 2D as the automatic,
+// SILENT fallback only when WebGPU is genuinely unavailable (no navigator.gpu / no adapter /
+// init throws / device lost). Real visitors always get a working chart; the header's
+// read-only indicator shows which backend is live (GPU vs CPU). The strict "no chart, loud
+// banner instead of a fallback" stance is now a DEV opt-in (?gpuonly=1) for verifying you're
+// actually exercising the GPU path — not the default a user could ever hit.
+const GPU_ONLY = new URLSearchParams(location.search).has("gpuonly");
 // G5f — present() convergence switch. The PROVEN per-frame path is present_legacy() (the
 // shipped body, untouched). present_unified() (G5g) merges the static-upload G-track path
 // and the spring-stream path into one scene-descriptor body. Default = LEGACY (true) until
@@ -4531,26 +4531,25 @@ function gpuOnlyBanner(msg) {
             "color:#fff;font:600 13px/1.4 system-ui,sans-serif;padding:8px 14px;text-align:center";
         document.body.appendChild(el);
     }
-    el.textContent = "⚠ GPU rendering unavailable / lost — CPU fallback disabled (add ?cpufallback=1 to allow it). " + msg;
-    console.error("[renderer] refusing Canvas 2D fallback:", msg);
+    el.textContent = "⚠ GPU rendering unavailable / lost (?gpuonly is on — remove it to fall back to Canvas 2D). " + msg;
+    console.error("[renderer] ?gpuonly: refusing Canvas 2D fallback:", msg);
 }
 function swapToCanvas2D(reason) {
-    if (!CPU_FALLBACK_OK) { gpuOnlyBanner(reason); return; }   // default: never silently fall back to CPU
+    if (GPU_ONLY) { gpuOnlyBanner(reason); return; }   // dev opt-in: refuse the fallback, banner instead
     if (pointRenderer instanceof Canvas2DRenderer) return;
     console.warn("[renderer] → Canvas 2D fallback:", reason);
-    swapRenderer(new Canvas2DRenderer());
+    swapRenderer(new Canvas2DRenderer());              // graceful, silent — the indicator shows CPU
 }
-// Build + swap in the WebGPU backend on demand (the URL flag at startup AND the header
-// toggle both call this). Resolves true on success, false on any failed rung — leaving
-// the working Canvas-2D render in place. The canvas-configure headless guard lives in
-// WebGPURenderer.resize(), so this is safe to call from an explicit user action.
+// Build + swap in the WebGPU backend (called once at startup). Resolves true on success,
+// false on any failed rung — leaving the working Canvas-2D render in place (the indicator
+// then shows CPU). The canvas-configure headless guard lives in WebGPURenderer.resize().
 async function enableWebGPU() {
     if (pointRenderer instanceof WebGPURenderer) return true;
-    if (!navigator.gpu) { console.warn("[renderer] navigator.gpu missing → Canvas 2D"); if (!CPU_FALLBACK_OK) gpuOnlyBanner("navigator.gpu missing (browser lacks WebGPU)"); return false; }
+    if (!navigator.gpu) { console.warn("[renderer] navigator.gpu missing → Canvas 2D"); if (GPU_ONLY) gpuOnlyBanner("navigator.gpu missing (browser lacks WebGPU)"); return false; }
     try {
         let adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
         if (!adapter) adapter = await navigator.gpu.requestAdapter({ forceFallbackAdapter: true });
-        if (!adapter) { console.warn("[renderer] no WebGPU adapter → Canvas 2D"); if (!CPU_FALLBACK_OK) gpuOnlyBanner("no WebGPU adapter"); return false; }
+        if (!adapter) { console.warn("[renderer] no WebGPU adapter → Canvas 2D"); if (GPU_ONLY) gpuOnlyBanner("no WebGPU adapter"); return false; }
         const device = await adapter.requestDevice();
         const webgpu = new WebGPURenderer(device, adapter);
         await webgpu.init();
@@ -4562,105 +4561,39 @@ async function enableWebGPU() {
     } catch (e) {
         const msg = e?.message || String(e);
         console.warn("[renderer] WebGPU init failed → Canvas 2D:", msg);
-        if (!CPU_FALLBACK_OK) gpuOnlyBanner("init failed: " + msg);
+        if (GPU_ONLY) gpuOnlyBanner("init failed: " + msg);
         return false;
     }
 }
 // Startup ladder: only auto-enables WebGPU under ?renderer=webgpu, and never under
-// headless (so the default app's snap.js checks stay on Canvas 2D). The header toggle is
-// the interactive entry point for everyone else.
+// headless (so the default app's snap.js checks stay on Canvas 2D).
 async function chooseRenderer() {
     const params = new URLSearchParams(location.search);
-    // GPU is now the default: auto-enable WebGPU unless explicitly opted out (?renderer=canvas).
-    if (params.get("renderer") === "canvas") return;
-    // Headless still stays Canvas 2D (preserves the default-app snap.js checks) unless asked.
+    // Rendering is non-optional: auto-enable WebGPU. ?renderer=canvas is a hidden dev hatch
+    // (unsupported-browser smoke test) — no user-facing toggle.
+    if (params.get("renderer") === "canvas") { syncRendererStatus(); return; }
+    // Headless stays Canvas 2D (preserves the default-app snap.js checks) unless asked.
     const headless = /HeadlessChrome/i.test(navigator.userAgent) || navigator.webdriver;
-    if (headless && !params.has("webgpuHeadless")) { console.log("[renderer] headless → staying Canvas 2D"); return; }
+    if (headless && !params.has("webgpuHeadless")) { console.log("[renderer] headless → staying Canvas 2D"); syncRendererStatus(); return; }
     await enableWebGPU();
+    syncRendererStatus();
 }
 
-// Persist the choice in the ?renderer query param (preserving the hash) so it survives a
-// reload and is shareable — the same flag chooseRenderer reads at startup.
-function writeRendererParam(on) {
-    const url = new URL(location.href);
-    if (on) url.searchParams.set("renderer", "webgpu"); else url.searchParams.delete("renderer");
-    history.replaceState(null, "", url.pathname + url.search + location.hash);
-}
-
-// Reflect the live backend on the header toggle (also called after an automatic
-// device-loss fallback, so the button can't lie about what's active).
-function syncRendererToggle() {
-    const btn = document.getElementById("renderer-toggle");
-    if (!btn) return;
-    const on = pointRenderer instanceof WebGPURenderer;
-    const available = !!navigator.gpu;
-    btn.classList.toggle("active", on);
-    btn.setAttribute("aria-pressed", String(on));
-    btn.disabled = !available && !on;
-    btn.title = !available
-        ? "WebGPU not available in this browser"
-        : on ? "GPU rendering on — click for Canvas 2D" : "Render the point cloud on the GPU (experimental)";
-}
-
-function setupRendererToggle() {
-    const btn = document.getElementById("renderer-toggle");
-    if (!btn) return;
-    btn.addEventListener("click", async () => {
-        if (pointRenderer instanceof WebGPURenderer) {
-            swapToCanvas2D("user toggle");
-            writeRendererParam(false);
-        } else {
-            btn.disabled = true;                            // brief guard while the device spins up
-            const ok = await enableWebGPU();
-            writeRendererParam(ok);
-            if (!ok) { btn.title = "WebGPU unavailable — staying on Canvas 2D"; setTimeout(syncRendererToggle, 2000); }
-        }
-        syncRendererToggle();
-    });
-    syncRendererToggle();
-}
-
-// Persist the Phase-5 spring-streaming choice in ?gpustream=1 (preserving hash) so it
-// survives a reload and is shareable — WebGPURenderer reads it at construction (springMode).
-function writeGpustreamParam(on) {
-    const url = new URL(location.href);
-    if (on) url.searchParams.set("gpustream", "1"); else url.searchParams.delete("gpustream");
-    history.replaceState(null, "", url.pathname + url.search + location.hash);
-}
-
-// Reflect the spring-streaming state on its toggle. The button only makes sense while a
-// WebGPU renderer is live (gpustream needs renderer=webgpu), so it's hidden under Canvas 2D.
-function syncGpustreamToggle() {
-    const btn = document.getElementById("gpustream-toggle");
-    if (!btn) return;
+// Reflect the live backend on the header's READ-ONLY indicator (rendering isn't user-
+// selectable, so this is a status light, not a toggle). "GPU" = WebGPU active; "CPU" =
+// the automatic Canvas 2D fallback (WebGPU unavailable / lost). Also re-run after a
+// device-loss fallback so the indicator can't lie about what's live.
+function syncRendererStatus() {
+    const el = document.getElementById("renderer-status");
+    if (!el) return;
     const onGpu = pointRenderer instanceof WebGPURenderer;
-    const on = onGpu && !!pointRenderer.springMode;
-    btn.hidden = !onGpu;                                 // only relevant when the GPU backend is active
-    btn.classList.toggle("active", on);
-    btn.setAttribute("aria-pressed", String(on));
-    btn.title = on ? "Spring streaming on — click for the hybrid GPU cloud"
-                   : "Full-GPU spring streaming (experimental)";
-}
-
-function setupGpustreamToggle() {
-    const btn = document.getElementById("gpustream-toggle");
-    if (!btn) return;
-    btn.addEventListener("click", async () => {
-        if (!(pointRenderer instanceof WebGPURenderer)) return;   // hidden anyway; guard double-clicks
-        const turningOn = !pointRenderer.springMode;
-        btn.disabled = true;
-        // springMode + the Phase-5 pipelines are fixed at renderer construction, so flip the
-        // URL flag then REBUILD the WebGPU renderer (hop through Canvas 2D so enableWebGPU's
-        // "already WebGPU" early-return doesn't skip the rebuild). The fresh renderer re-reads
-        // ?gpustream at construction.
-        writeGpustreamParam(turningOn);
-        swapToCanvas2D("rebuild for gpustream toggle");
-        await enableWebGPU();
-        btn.disabled = false;
-        syncRendererToggle();
-        syncGpustreamToggle();
-    });
-    syncGpustreamToggle();
+    el.textContent = onGpu ? "GPU" : "CPU";
+    el.classList.toggle("active", onGpu);
+    el.title = onGpu
+        ? "Rendering on the GPU (WebGPU)"
+        : (navigator.gpu ? "WebGPU lost — rendering on the CPU (Canvas 2D)"
+                         : "WebGPU unavailable — rendering on the CPU (Canvas 2D)");
+    el.setAttribute("aria-label", "Renderer: " + (onGpu ? "GPU" : "CPU"));
 }
 window.__bl2d_chooseRenderer = chooseRenderer;
 window.__bl2d_exportDataURLs = () => pointRenderer.exportDataURLs();   // headless WebGPU readback probe

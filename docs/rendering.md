@@ -11,12 +11,15 @@ uploaded). Phase ordering and status live in [`ROADMAP.md`](ROADMAP.md).
 
 ## The render paths today
 
+WebGPU is the **default, non-optional** renderer (2026-06-13); the paths below are no longer
+opt-in flags but the live default, with Canvas2D as the automatic fallback.
+
 | Path | Gate | Where | Covers |
 |---|---|---|---|
-| **Canvas2D + SVG** (default) | always | `drawScatterPlot` + `Canvas2DRenderer`, `script.js` | everything: axes, staircase, HV shade, depth layers, era-vs-era, ghost frontier, labels w/ collision avoidance, hover rings, regret lines, FLIP, quadtree hit-test |
-| **WebGPU point cloud + GPU accumulate** (Phases 3–4) | `?renderer=webgpu` | `WebGPURenderer`, `script.js:~3583–4297` | `.evt`-career cloud on GPU (compute-accumulate + instanced quads); JS incremental frontier stays authoritative; staircase/axes stay SVG |
-| **gpustream** (Phase 5) | `?renderer=webgpu&gpustream=1` | spring/skyline/staircase WGSL in `script.js:~3325–3575` | full-GPU streaming: accumulate → spring → skyline → staircase (`drawIndirect`); zero per-frame readback; CPU only clocks the cursor |
-| **G-track** (G0 shipped) | `?renderer=webgpu&gpugraph=1` | `webgpu-graph.js` (`GraphRenderer`) | retained-scene GPU dot renderer for static modes; data-space buffers + scale uniform; G1–G6 extend to frontier/HV/text/overlays/interaction |
+| **Canvas2D + SVG** (fallback) | WebGPU unavailable / lost / headless / `?renderer=canvas` | `drawScatterPlot` + `Canvas2DRenderer`, `script.js` | everything: axes, staircase, HV shade, depth layers, era-vs-era, ghost frontier, labels w/ collision avoidance, hover rings, regret lines, FLIP, quadtree hit-test |
+| **WebGPU point cloud + GPU accumulate** (Phases 3–4) | default (WebGPU available) | `WebGPURenderer`, `script.js:~3583–4297` | `.evt`-career cloud on GPU (compute-accumulate + instanced quads); JS incremental frontier stays authoritative |
+| **gpustream** (Phase 5) | default-on when eligible (`?gpustream!=0`) | spring/skyline/staircase WGSL in `script.js:~3325–3575` | full-GPU streaming: accumulate → spring → skyline → staircase (`drawIndirect`); zero per-frame readback; CPU only clocks the cursor |
+| **G-track** (G0–G5h shipped) | default (`?gpugraph!=0`) | `webgpu-graph.js` (`GraphRenderer`) | retained-scene GPU chart: dots, sign-aware frontier, staircase, HV shade+contributions, depth layers, era-B/ghost, glyph text, hover/pin interaction overlays; data-space buffers + scale uniform |
 
 The architecture splits work between two layers everywhere: **high-cardinality,
 low-semantic** content (the point cloud, trails) on canvas/GPU; **low-cardinality,
@@ -66,13 +69,25 @@ cards, and spotlight stay DOM, fed by the readback contract).
 
 ## Engine selection & fallback
 
+**Rendering is NON-OPTIONAL (decided 2026-06-13): WebGPU is the renderer, with Canvas2D
+as the automatic, SILENT fallback** only when WebGPU is genuinely unavailable. There is
+no user-facing renderer toggle anymore — the header carries a **read-only `#renderer-status`
+indicator** ("GPU" when WebGPU is live, "CPU" on the Canvas2D fallback) so a visitor can
+see which backend is active without being able to switch it. The old "GPU"/"spring"
+header pills + the `?renderer=webgpu` opt-in are gone.
+
 ```
-chooseRenderer():  no flag | no navigator.gpu | no adapter | init throws | headless
-                   → Canvas2D (first paint is ALWAYS Canvas2D; WebGPU swaps in async)
-device.lost        → swapToCanvas2D() mid-session, clean redraw
-chooseStreamingEngine(model):
-  ?renderer=webgpu && evtGpuMonotone(model).ok && navigator.gpu && !isHeadless()
-                   → gpuStreaming, else cpuStreaming
+chooseRenderer():  auto-enable WebGPU. first paint is ALWAYS Canvas2D; WebGPU swaps in async.
+  no navigator.gpu | no adapter | init throws | device.lost
+                   → graceful SILENT Canvas2D fallback (indicator flips to "CPU"); NO banner
+  headless (HeadlessChrome / webdriver) && !?webgpuHeadless
+                   → stay Canvas2D (keeps the default-app snap.js checks on CPU)
+  ?renderer=canvas → stay Canvas2D (hidden dev hatch, unsupported-browser smoke test)
+  ?gpuonly=1       → DEV opt-in: refuse the fallback, show the red #gpuonly-banner instead
+                     (so you can prove a frame is genuinely GPU output)
+streaming engine (springMode, now DEFAULT-ON):
+  evtGpuMonotone(model).ok && navigator.gpu && !isHeadless() && ?gpustream!=0
+                   → gpuStreaming (spring), else the hybrid/CPU cloud (auto by eligibility)
 ```
 
 The streaming path is **two explicit self-contained engines, not a hybrid** (the GPU
@@ -80,7 +95,10 @@ engine consumes events+uniforms, the CPU engine screen-space points — a shared
 `setForeground(points)` seam would be a lie for the GPU path). Shared between them:
 data only (model load, event stream, metadata, SVG chrome). Separate: frontier
 (CPU `IncrementalFrontier` vs GPU skyline), cloud, staircase, motion, loop. The offline
-`dist/` bundle is Canvas2D-only (the WGSL rides along inert; no WASM, no shader fetch).
+`dist/` bundle is a *generated* artifact (build_bundle.py inlines the same JS/CSS/WGSL +
+data); it now tries WebGPU like the live site and falls back to Canvas2D gracefully if the
+opening browser lacks it — so opening it `file://` on a no-WebGPU machine still shows a
+working chart, never the banner.
 
 Export (SVG/PNG) reads back the offscreen texture under WebGPU
 (`exportDataURLs()`); Canvas2D returns its layer canvases natively.

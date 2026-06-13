@@ -181,7 +181,7 @@ Full design, phase details, WGSL entry points, and verify gates:
 | G3 | GPU text (glyph atlas, axes, labels) | ✅ shipped (`ae03fa2`) |
 | G4 | overlays: depth, era-B, ghost (dashed), cross-fade | ✅ shipped (G4a–d) |
 | G5 | interaction + loop owner + present convergence | ✅ G5a–G5h (G5d cut→SVG; G5i deferred) |
-| G6 | graduate flag; keep Canvas2D fallback | ◑ in progress (GPU is now the default path; `?gpugraph=0`/`?renderer=canvas`/`?cpufallback=1` escape hatches + GPU-only banner) |
+| G6 | graduate flag; keep Canvas2D fallback | ◑ in progress (WebGPU non-optional + default; graceful silent Canvas2D fallback + read-only GPU/CPU indicator; spring default-on; toggles removed; `?renderer=canvas`/`?gpugraph=0`/`?gpustream=0` dev hatches, `?gpuonly=1` for the strict banner) |
 
 G0 finding to carry forward: smooth is the default view (every axis pair is
 stat-layer-covered), so the `file://` bundle is the verification vehicle for static

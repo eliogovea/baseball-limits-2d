@@ -61,8 +61,7 @@
                 <button type="button" class="theme-btn" data-theme="editorial" title="Editorial theme" aria-label="Editorial theme"></button>
                 <button type="button" class="theme-btn" data-theme="dark" title="Night theme" aria-label="Night theme"></button>
             </div>
-            <button class="renderer-toggle" id="renderer-toggle" type="button" aria-pressed="false" aria-label="Toggle WebGPU rendering" title="Render the point cloud on the GPU (experimental)">GPU</button>
-            <button class="renderer-toggle gpustream-toggle" id="gpustream-toggle" type="button" aria-pressed="false" aria-label="Toggle GPU spring streaming" title="Full-GPU spring streaming (experimental; needs GPU on)" hidden>spring</button>
+            <span class="renderer-status" id="renderer-status" role="status" aria-label="Renderer: GPU" title="Rendering on the GPU (WebGPU)">GPU</span>
             <button class="icon-btn" id="export-btn" type="button" aria-label="Download SVG" title="Download SVG">
                 <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 1v7M4.5 5.5L7 8l2.5-2.5"/><path d="M2 10v2h10v-2"/></svg>
             </button>

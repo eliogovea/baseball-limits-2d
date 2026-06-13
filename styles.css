@@ -157,8 +157,13 @@ a:focus-visible,
 /* Experimental WebGPU backend toggle — a compact text pill in the header. Muted
    until enabled, accented when GPU rendering is live; disabled when WebGPU is
    unavailable. */
-.renderer-toggle {
+/* Read-only renderer indicator (rendering is non-optional — this is a status light,
+   not a toggle). Active = GPU (WebGPU) in blue; inactive = CPU (Canvas 2D fallback),
+   muted. No hover/cursor affordance: it isn't clickable. */
+.renderer-status {
     flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
     height: 28px;
     padding: 0 10px;
     border-radius: 14px;
@@ -167,33 +172,12 @@ a:focus-visible,
     color: var(--text-muted);
     font: 700 11px/1 var(--font-sans, sans-serif);
     letter-spacing: 0.04em;
-    cursor: pointer;
-    transition: all var(--transition);
+    user-select: none;
 }
-.renderer-toggle:hover:not(:disabled) {
-    color: var(--mlb-blue);
-    border-color: var(--mlb-blue);
-}
-.renderer-toggle.active {
+.renderer-status.active {
     background: var(--mlb-blue);
     border-color: var(--mlb-blue);
     color: #fff;
-}
-.renderer-toggle:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-}
-/* Phase-5 spring-streaming toggle: a sibling of the GPU button, only shown while
-   WebGPU is active. Its active state uses the frontier red so it reads distinctly
-   from the GPU button's blue. */
-.gpustream-toggle.active {
-    background: var(--mlb-red, #c8102e);
-    border-color: var(--mlb-red, #c8102e);
-    color: #fff;
-}
-.gpustream-toggle:hover:not(:disabled) {
-    color: var(--mlb-red, #c8102e);
-    border-color: var(--mlb-red, #c8102e);
 }
 
 /* Color-theme switcher — compact swatches (each previews its theme's panel +
