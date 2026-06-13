@@ -29,7 +29,7 @@ committed render destination):
 |---|---|---|---|
 | 1 | **S3** — app onto BL2S, remove `.evt` | S3a–S3e | ☐ not started |
 | 2 | **S4** — retire BL2P | S4a–S4b | ☐ not started (new) |
-| 3 | **G-track** — full-GPU graph | G0 ✅, G1–G6 | G0 shipped (`webgpu-graph.js`) |
+| 3 | **G-track** — full-GPU graph | G0–G5 ✅ (G5i deferred), G6 ◑ | G0–G5h shipped; GPU is the default path (G6 in progress) |
 | 4 | **S-track** — GPU season animation | SA0–SA4 | ☐ design only |
 | 5 | **S2** — Lahman complement | — | ☐ after S3/S4 |
 
@@ -178,10 +178,10 @@ Full design, phase details, WGSL entry points, and verify gates:
 | G0 | retained-scene dots + data-space coord model + bundler split | ✅ shipped (`webgpu-graph.js`) |
 | G1 | GPU sign-aware frontier + readback contract | ✅ shipped (`webgpu-graph.js`: `sceneSkyline`+`compact`) |
 | G2 | staircase + HV shade + HV contributions | ✅ shipped (`webgpu-graph.js`: `ranksort`/`emit` + `hvTotal`/`hvContrib`/`hvMax`/`hvRadius` + shade/front pipelines) |
-| G3 | GPU text (glyph atlas, axes, labels) | ☐ not started |
-| G4 | overlays: depth, era-B, ghost (dashed), cross-fade | ☐ not started |
-| G5 | interaction + spring-FLIP + loop owner + stream-engine convergence | ☐ not started |
-| G6 | graduate flag; keep Canvas2D fallback | ☐ not started |
+| G3 | GPU text (glyph atlas, axes, labels) | ✅ shipped (`ae03fa2`) |
+| G4 | overlays: depth, era-B, ghost (dashed), cross-fade | ✅ shipped (G4a–d) |
+| G5 | interaction + loop owner + present convergence | ✅ G5a–G5h (G5d cut→SVG; G5i deferred) |
+| G6 | graduate flag; keep Canvas2D fallback | ◑ in progress (GPU is now the default path; `?gpugraph=0`/`?renderer=canvas`/`?cpufallback=1` escape hatches + GPU-only banner) |
 
 G0 finding to carry forward: smooth is the default view (every axis pair is
 stat-layer-covered), so the `file://` bundle is the verification vehicle for static

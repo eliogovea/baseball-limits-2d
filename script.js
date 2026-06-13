@@ -322,6 +322,11 @@ let pbpRaf = null;              // requestAnimationFrame handle while the cursor
 // refresh so the spring animates smoothly, DECOUPLED from the ~15fps-throttled refreshChart
 // (which still owns the expensive CPU frontier/cards/quadtree). See docs / the plan file.
 let springRaf = null;           // rAF handle for the continuous GPU glide present (null = idle)
+// G5h (converged path, ?legacyPresent=0) — a scope bridge so WebGPURenderer.presentInteraction()
+// (a top-level class method) can hand an overlay re-present to the single damage-flag graphLoop
+// owner, which lives inside the UI-setup closure with the spring/playback state. Stays null
+// (legacy path: presentInteraction uses its own one-shot rAF) until that closure assigns it.
+let requestGraphPresent = null;
 let springLoopUntil = 0;        // performance.now() deadline for the post-playback settle tail
 let springFinalPending = false; // a final interactive (non-lite) refreshChart owed once the settle tail drains
 let lastGpuSpringFrame = false; // did the most recent real refreshChart render the GPU spring? (gates glide)
@@ -1850,16 +1855,52 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         springRaf = requestAnimationFrame(springLoop);
     }
     function startSpringLoop() {
+        if (!LEGACY_PRESENT) { requestPresent("motion"); return; }   // G5h: converged path uses graphLoop
         if (!springRaf && pointRenderer instanceof WebGPURenderer && pointRenderer.springMode) {
             springRaf = requestAnimationFrame(springLoop);
         }
     }
+    // ── G5h: single damage-flag loop owner (converged path; ?legacyPresent=0) ─────
+    // ONE rAF owns every reason to re-present: `motion` (the spring glide — subsumes
+    // springLoop) and `overlay` (a coalesced hover/pin re-present — subsumes
+    // presentInteraction's one-shot rAF). The invariant the gate asserts: when nothing
+    // is animating and no overlay is pending, NO rAF is scheduled (`__bl2d_rafScheduled`
+    // false) — the loop parks instead of busy-spinning. The spring MATH is untouched: the
+    // motion branch calls the same presentGlide() under the same alive-condition as
+    // springLoop, so cadence/dt are identical; only the scheduler is unified.
+    const graphDamage = { motion: false, overlay: false };
+    let graphRaf = null;
+    window.__bl2d_rafScheduled = false;
+    function scheduleGraphLoop() {
+        if (!graphRaf) { graphRaf = requestAnimationFrame(graphLoop); window.__bl2d_rafScheduled = true; }
+    }
+    function requestPresent(kind) {
+        if (kind === "motion") graphDamage.motion = true; else graphDamage.overlay = true;
+        scheduleGraphLoop();
+    }
+    function graphLoop(now) {
+        graphRaf = null; window.__bl2d_rafScheduled = false;
+        if (!(pointRenderer instanceof WebGPURenderer)) { graphDamage.motion = graphDamage.overlay = false; finalizeSpringStop(); return; }
+        let presented = false;
+        if (graphDamage.motion && pointRenderer.springMode) {
+            const alive = !!pbpRaf || now < springLoopUntil;             // playing OR settle tail (== springLoop)
+            if (lastGpuSpringFrame && pointRenderer.evt && !pointRenderer.evt.failed) { pointRenderer.presentGlide(); presented = true; }
+            if (!alive) { graphDamage.motion = false; finalizeSpringStop(); }
+        } else { graphDamage.motion = false; }
+        // A glide frame already re-presented the whole scene (incl. interaction overlays), so
+        // only present again for a standalone overlay change.
+        if (graphDamage.overlay) { graphDamage.overlay = false; if (!presented) pointRenderer.present(); }
+        if (graphDamage.motion) scheduleGraphLoop();                     // keep gliding; else park (idle)
+    }
+    requestGraphPresent = requestPresent;                                // export to presentInteraction
     // hard=true cancels immediately (teardown / filter change); hard=false starts the settle
     // tail and lets the loop drain itself over SPRING_SETTLE_MS.
     function stopSpringLoop(hard) {
         if (hard) {
             if (springRaf) cancelAnimationFrame(springRaf);
             springRaf = null;
+            if (graphRaf) { cancelAnimationFrame(graphRaf); graphRaf = null; window.__bl2d_rafScheduled = false; }  // G5h
+            graphDamage.motion = false;
             springLoopUntil = 0;
             springFinalPending = false;        // teardown owns its own refreshChart
             smoothLite = false;                // teardown ends playback; restore full interactive frames
@@ -3609,8 +3650,18 @@ class WebGPURenderer {
         // retained-scene GPU path (docs/rendering.md §G0). The
         // scene state itself lives in this.graph, owned entirely by webgpu-graph.js
         // — script.js only carries this flag + the optional-chained hooks below.
-        this.graphMode = new URLSearchParams(location.search).has("gpugraph");
+        // G-track is now the default static path (the committed rendering destination):
+        // ON unless explicitly disabled with ?gpugraph=0 (the G6 graduation escape hatch).
+        this.graphMode = new URLSearchParams(location.search).get("gpugraph") !== "0";
         this.graph = null;
+        // G5a — coalesced interaction re-present. Hover/pin overlays (G5b–e) want to
+        // re-draw the GPU scene on every mousemove, but a synchronous present() per
+        // mousemove would submit dozens of command buffers per frame for no visual gain
+        // (the display only refreshes once per vsync). presentInteraction() instead sets a
+        // dirty flag and schedules a SINGLE requestAnimationFrame; any further calls before
+        // that frame fires collapse into it, so N mousemoves in one frame cost exactly one
+        // present(). _interactRaf holds the pending rAF id (0 = none scheduled).
+        this._interactRaf = 0;
     }
     get dpr() { return this.layers?.dpr || 1; }
     get bgCanvas() { return this.canvas; }   // truthy → drawScatterPlot's fg-gated blocks run
@@ -4153,8 +4204,105 @@ class WebGPURenderer {
     // open cloud + heads → frontier dots (the Canvas-2D layer order), into the offscreen
     // texture, then blit to canvas. When a GPU cloud is pending, its compute pass runs
     // first (in the SAME encoder) so the counters are current before the cloud draw.
+    // G5f — thin dispatcher (see LEGACY_PRESENT). Every caller (the main render,
+    // presentGlide, presentInteraction) goes through here, so flipping the flag swaps the
+    // whole frame path in one place. present_unified() is the G5g convergence target.
     present() {
+        return LEGACY_PRESENT ? this.present_legacy() : this.present_unified();
+    }
+    // G5g — the CONVERGED frame. present_legacy() already interleaves the static G-track
+    // hooks and the spring-stream branches in one body, but selects between them with
+    // implicit conditionals scattered through the method. _buildSceneDescriptor() lifts that
+    // choice into ONE explicit object — `source` ∈ {spring, upload, hybrid} plus the compute
+    // flags — and present_unified() drives the identical pass sequence from it. Same passes,
+    // same order, same output (verified byte-identical to legacy on both __bl2d_verify suites);
+    // the win is a single named seam the loop owner (G5h) and spring-FLIP (G5i) hang off,
+    // instead of re-reading this.evt/this.graph in three places. Shares NO code with
+    // present_legacy(), so the flag is a clean rollback.
+    //
+    //   source "spring" : cloud + frontier come from the GPU spring buffers (gpustream).
+    //   source "upload" : the retained G-track scene (G0–G4) owns cloud/frontier/overlays.
+    //   source "hybrid" : the Phase-4 counter-pull cloud (eligible .evt, no spring).
+    _buildSceneDescriptor() {
+        const evt = this.evt;
+        const gpuCloud = !!(evt && evt.pending && !evt.failed);
+        const springOn = !!(gpuCloud && evt.pending.spring && evt.spring);
+        return {
+            evt, gpuCloud, springOn,
+            source: springOn ? "spring" : (this.graph && this.graphMode ? "upload" : "hybrid"),
+            runAccumulate: !!(gpuCloud && evt.pending.count > 0),
+            instanceCount: gpuCloud ? (evt.pending.instanceCount || 0) : 0,
+        };
+    }
+    present_unified() {
         if (!this.offTex) return;
+        window.__bl2d_presentCount = (window.__bl2d_presentCount || 0) + 1;
+        const d = this._buildSceneDescriptor();
+        const evt = d.evt;
+        const enc = this.device.createCommandEncoder();
+        // ── compute: accumulate new events, then (spring source) the gpuStreaming graph ──
+        if (d.runAccumulate) {
+            try {
+                const cp = enc.beginComputePass();
+                cp.setPipeline(this.pAccum); cp.setBindGroup(0, evt.bgAccum);
+                cp.dispatchWorkgroups(Math.ceil(evt.pending.count / 64)); cp.end();
+            } catch (e2) { evt.failed = true; console.warn("[webgpu] accumulate pass failed → CPU cloud:", e2.message); }
+        }
+        if (d.source === "spring") {
+            try {
+                const s = evt.spring;
+                const wgN = Math.ceil(evt.players / 64), wgK = Math.ceil(WEBGPU_MAX_FRONT / 64);
+                const pass = (pipe, bg, wg) => { const cp = enc.beginComputePass(); cp.setPipeline(pipe); cp.setBindGroup(0, bg); cp.dispatchWorkgroups(wg); cp.end(); };
+                pass(this.pSpring, s.bgSpring, wgN);
+                pass(this.pSkyline, s.bgSkyline, wgN);
+                pass(this.pStairCompact, s.bgStair, wgN);
+                pass(this.pStairRanksort, s.bgStair, wgK);
+                pass(this.pStairEmit, s.bgStair, wgK);
+            } catch (e3) { evt.failed = true; console.warn("[webgpu] spring passes failed → CPU cloud:", e3.message); }
+        }
+        // ── render: identical z-order to present_legacy ──
+        const rp = enc.beginRenderPass({ colorAttachments: [{
+            view: this.offTex.createView(), clearValue: this.clearValue, loadOp: "clear", storeOp: "store" }] });
+        const drawPts = (name) => { if (this.count[name] > 0) { rp.setBindGroup(0, this._bindGroup(this.buf[name])); rp.draw(6, this.count[name]); } };
+        rp.setPipeline(this.pPoints); drawPts("bg");
+        this._drawGraphShade?.(rp);
+        this._drawGraphScene?.(rp);
+        this._drawGraphDepth?.(rp);
+        this._drawGraphAux?.(rp);
+        if (d.source === "spring" && d.instanceCount > 0) {
+            rp.setPipeline(this.pSpringCloud); rp.setBindGroup(0, evt.spring.bgSpringCloud0);
+            rp.draw(6, d.instanceCount); rp.setPipeline(this.pPoints);
+        } else if (d.gpuCloud && d.instanceCount > 0) {
+            rp.setPipeline(this.pCloud); rp.setBindGroup(0, evt.bgCloud);
+            rp.draw(6, d.instanceCount); rp.setPipeline(this.pPoints);
+        }
+        if (this.count.trail > 0) { rp.setPipeline(this.pLine); rp.setBindGroup(0, this._bindGroup(this.buf.trail)); rp.draw(6, this.count.trail); rp.setPipeline(this.pPoints); }
+        drawPts("fg");
+        drawPts("frontier");
+        this._drawGraphOverlays?.(rp);
+        if (d.source === "spring" && d.instanceCount > 0) {
+            const s = evt.spring;
+            rp.setPipeline(this.pSpringCloud); rp.setBindGroup(0, s.bgSpringCloud1); rp.draw(6, d.instanceCount);
+            rp.setPipeline(this.pStairLine); rp.setBindGroup(0, s.bgStairLine); rp.drawIndirect(s.bIndirect, 0);
+        }
+        this._drawGraphText?.(rp);
+        this._drawGraphInteraction?.(rp);
+        rp.end();
+        this.device.queue.submit([enc.finish()]);
+        if (evt) evt.pending = null;
+        if (this.canvasOk && this.ctx) {
+            try {
+                const e2 = this.device.createCommandEncoder();
+                e2.copyTextureToTexture({ texture: this.offTex }, { texture: this.ctx.getCurrentTexture() }, [this.offW, this.offH]);
+                this.device.queue.submit([e2.finish()]);
+            } catch (e) { this.canvasOk = false; console.warn("[webgpu] present blit failed (offscreen-only):", e.message); }
+        }
+    }
+    present_legacy() {
+        if (!this.offTex) return;
+        // G5a — a monotone counter the headless gate reads to prove the coalescer collapses
+        // many presentInteraction() calls into one present() per animation frame.
+        window.__bl2d_presentCount = (window.__bl2d_presentCount || 0) + 1;
         const enc = this.device.createCommandEncoder();
         const evt = this.evt;
         const gpuCloud = evt && evt.pending && !evt.failed;
@@ -4239,6 +4387,9 @@ class WebGPURenderer {
         }
         // G-track G3: glyph-atlas text (tick labels + frontier names) on top of all else.
         this._drawGraphText?.(rp);
+        // G-track G5: interaction overlays (hover/pin regret line+ring, isolation ring,
+        // HV-contribution polygon) — drawn LAST so they sit above the whole chart.
+        this._drawGraphInteraction?.(rp);
         rp.end();
         this.device.queue.submit([enc.finish()]);
         if (evt) evt.pending = null;   // consume the request; the next GPU frame re-stashes it
@@ -4276,6 +4427,26 @@ class WebGPURenderer {
         this.device.queue.writeBuffer(s.uSpring, 0, uSpring);
         e.pending = { count: 0, instanceCount: e.lastInstanceCount, spring: true };
         this.present();
+    }
+
+    // G5a — coalesced interaction re-present. Called from the mousemove/pin handlers (G5b–e)
+    // whenever an on-canvas overlay (hover ring, regret line, HV polygon) changes. It does
+    // NOT present synchronously: it sets a one-shot rAF so multiple mousemoves within a
+    // single display frame collapse into ONE present() (the display can't show more than one
+    // frame per vsync anyway, and a synchronous submit per mousemove just floods the queue).
+    // Only meaningful on the G-track (the static GPU scene re-draws from retained buffers);
+    // a no-op otherwise so the Canvas2D / non-graph paths are untouched. Self-coalescing via
+    // _interactRaf: a pending frame swallows further calls until it fires.
+    presentInteraction() {
+        if (!this.graphMode || !this.offTex) return;
+        // G5h (converged path): hand the overlay re-present to the single graphLoop owner.
+        if (!LEGACY_PRESENT && requestGraphPresent) { requestGraphPresent("overlay"); return; }
+        // Legacy path: a self-contained one-shot rAF coalescer (G5a).
+        if (this._interactRaf) return;                 // a frame is already pending — coalesce
+        this._interactRaf = requestAnimationFrame(() => {
+            this._interactRaf = 0;
+            this.present();
+        });
     }
 
     // Export: read the offscreen texture back, un-premultiply to straight alpha, return a
@@ -4338,7 +4509,33 @@ function swapRenderer(next) {
     syncGpustreamToggle();   // reflect spring-streaming state (also after an auto device-loss fallback)
     if (typeof refreshChart === "function") refreshChart();
 }
+// GPU rendering is now NON-OPTIONAL by default: once WebGPU is available the app commits
+// to it and REFUSES to silently fall back to Canvas 2D (a silent fallback could masquerade
+// as the GPU path). On any GPU failure/loss it shows a loud red banner instead — so a
+// rendered chart with NO banner is guaranteed GPU output. Escape hatch: ?cpufallback=1
+// restores the graceful Canvas-2D fallback (e.g. for an unsupported-browser smoke test).
+const CPU_FALLBACK_OK = new URLSearchParams(location.search).has("cpufallback");
+// G5f — present() convergence switch. The PROVEN per-frame path is present_legacy() (the
+// shipped body, untouched). present_unified() (G5g) merges the static-upload G-track path
+// and the spring-stream path into one scene-descriptor body. Default = LEGACY (true) until
+// G5g/h are green on BOTH verify suites (__bl2d_verifyGraph + __bl2d_verifySpring); then the
+// default flips in its own commit. ?legacyPresent=0 opts into the converged path early.
+const LEGACY_PRESENT = new URLSearchParams(location.search).get("legacyPresent") !== "0";
+function gpuOnlyBanner(msg) {
+    window.__bl2d_gpuOnlyFailed = msg;
+    let el = document.getElementById("gpuonly-banner");
+    if (!el) {
+        el = document.createElement("div");
+        el.id = "gpuonly-banner";
+        el.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:100000;background:#b91c1c;" +
+            "color:#fff;font:600 13px/1.4 system-ui,sans-serif;padding:8px 14px;text-align:center";
+        document.body.appendChild(el);
+    }
+    el.textContent = "⚠ GPU rendering unavailable / lost — CPU fallback disabled (add ?cpufallback=1 to allow it). " + msg;
+    console.error("[renderer] refusing Canvas 2D fallback:", msg);
+}
 function swapToCanvas2D(reason) {
+    if (!CPU_FALLBACK_OK) { gpuOnlyBanner(reason); return; }   // default: never silently fall back to CPU
     if (pointRenderer instanceof Canvas2DRenderer) return;
     console.warn("[renderer] → Canvas 2D fallback:", reason);
     swapRenderer(new Canvas2DRenderer());
@@ -4349,11 +4546,11 @@ function swapToCanvas2D(reason) {
 // WebGPURenderer.resize(), so this is safe to call from an explicit user action.
 async function enableWebGPU() {
     if (pointRenderer instanceof WebGPURenderer) return true;
-    if (!navigator.gpu) { console.warn("[renderer] navigator.gpu missing → Canvas 2D"); return false; }
+    if (!navigator.gpu) { console.warn("[renderer] navigator.gpu missing → Canvas 2D"); if (!CPU_FALLBACK_OK) gpuOnlyBanner("navigator.gpu missing (browser lacks WebGPU)"); return false; }
     try {
         let adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
         if (!adapter) adapter = await navigator.gpu.requestAdapter({ forceFallbackAdapter: true });
-        if (!adapter) { console.warn("[renderer] no WebGPU adapter → Canvas 2D"); return false; }
+        if (!adapter) { console.warn("[renderer] no WebGPU adapter → Canvas 2D"); if (!CPU_FALLBACK_OK) gpuOnlyBanner("no WebGPU adapter"); return false; }
         const device = await adapter.requestDevice();
         const webgpu = new WebGPURenderer(device, adapter);
         await webgpu.init();
@@ -4363,7 +4560,9 @@ async function enableWebGPU() {
         console.log("[renderer] WebGPU active");
         return true;
     } catch (e) {
-        console.warn("[renderer] WebGPU init failed → Canvas 2D:", e?.message || e);
+        const msg = e?.message || String(e);
+        console.warn("[renderer] WebGPU init failed → Canvas 2D:", msg);
+        if (!CPU_FALLBACK_OK) gpuOnlyBanner("init failed: " + msg);
         return false;
     }
 }
@@ -4372,7 +4571,9 @@ async function enableWebGPU() {
 // the interactive entry point for everyone else.
 async function chooseRenderer() {
     const params = new URLSearchParams(location.search);
-    if (params.get("renderer") !== "webgpu") return;        // default path untouched
+    // GPU is now the default: auto-enable WebGPU unless explicitly opted out (?renderer=canvas).
+    if (params.get("renderer") === "canvas") return;
+    // Headless still stays Canvas 2D (preserves the default-app snap.js checks) unless asked.
     const headless = /HeadlessChrome/i.test(navigator.userAgent) || navigator.webdriver;
     if (headless && !params.has("webgpuHeadless")) { console.log("[renderer] headless → staying Canvas 2D"); return; }
     await enableWebGPU();
@@ -6314,6 +6515,28 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const ringGroup = g.append("g").attr("class", "isolation-ring-group");
     const regretGroup = g.append("g").attr("class", "regret-line-group");
 
+    // G5b/c — under the G-track, the on-canvas hover overlays (regret leader line, regret
+    // distance ring, isolation ring) are drawn by the GPU (webgpu-graph.js) instead of SVG.
+    // pushGpuInteraction writes the line/rings into the GPU interaction buffers and schedules
+    // a single coalesced re-present; the SVG branches below are suppressed when gpuGraph is
+    // on, so nothing is double-drawn. No-op (SVG path runs) when the GPU graph is inactive.
+    const gpuInteract = gpuGraph && typeof pointRenderer.uploadInteraction === "function";
+    const RGB5a = (hex, a) => { const c = d3.color(hex); return c ? [c.r / 255, c.g / 255, c.b / 255, a] : [0.353, 0.392, 0.471, a]; };
+    const pushGpuInteraction = (state) => {
+        if (!gpuInteract) return;
+        pointRenderer.uploadInteraction(state);
+        pointRenderer.presentInteraction();
+    };
+    const clearGpuInteraction = () => pushGpuInteraction({ line: null, rings: [] });
+    // G5e — the GPU interaction buffers are RETAINED scene state (they outlive a refresh,
+    // unlike the SVG overlay groups which are rebuilt empty each render). So on every render
+    // we reset the transient hover overlays to empty; the main present() at the end of this
+    // function reflects the cleared state, so a hover ring/leader can't linger after a filter
+    // change or zoom. (No presentInteraction here — the trailing present() does the draw.)
+    // PINNED state persists through a different channel: the career-HV polygon redraws from
+    // `careerHighlights` (SVG, below) and rides the `hl=` hash, so deep-links restore it.
+    if (gpuInteract) pointRenderer.uploadInteraction({ line: null, rings: [] });
+
     // When players are career-highlighted, show the combined polygon for what
     // the frontier loses if all their seasons were removed. Skipped in group-career
     // mode — there's no background frontier to measure "loss" against there.
@@ -6373,13 +6596,22 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         ringGroup.select(".isolation-ring--hover").remove();
         hvRectGroup.selectAll(".hv-contrib-overlay--hover").remove();
         regretGroup.selectAll(".regret-line--hover").remove();
+        clearGpuInteraction();               // G5b/c — clear prior GPU overlays before re-deciding
         if (!tooltipPinned && frontierSet.has(d)) {
             const iso = isolationMap.get(d);
             if (iso && iso.r > 0) {
-                ringGroup.append("circle")
-                    .attr("class", "isolation-ring isolation-ring--hover")
-                    .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
-                    .style("stroke", isoRingColor(d));
+                if (gpuInteract) {
+                    // G5c — isolation ring on the GPU: DATA-space centre (d), pixel radius
+                    // (iso.r), per-point colour (isoRingColor), dasharray 5 4 (period 9, 5/9).
+                    pushGpuInteraction({ line: null, rings: [{
+                        cx: d.x, cy: d.y, radiusPx: iso.r, widthPx: 1.5,
+                        color: RGB5a(isoRingColor(d), 0.35), period: 9, dashFrac: 5 / 9 }] });
+                } else {
+                    ringGroup.append("circle")
+                        .attr("class", "isolation-ring isolation-ring--hover")
+                        .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
+                        .style("stroke", isoRingColor(d));
+                }
             }
             // Re-sweep without d, shade the polygon of area d exclusively controls.
             if (hvByPoint.has(d)) {
@@ -6388,12 +6620,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             }
         }
         if (!tooltipPinned && !frontierSet.has(d)) {
-            if (regretInfo && regretInfo.dist > 0) {
-                regretGroup.append("line")
-                    .attr("class", "regret-line regret-line--hover")
-                    .attr("x1", xScale(d.x)).attr("y1", yScale(d.y))
-                    .attr("x2", xScale(regretInfo.targetX)).attr("y2", yScale(regretInfo.targetY));
-            }
+            const hasLine = !!(regretInfo && regretInfo.dist > 0);
             // Ring to nearest frontier corner in screen space.
             let minPx = Infinity;
             for (const fp of frontier) {
@@ -6401,11 +6628,27 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                 const px = Math.sqrt(dx * dx + dy * dy);
                 if (px < minPx) minPx = px;
             }
-            if (isFinite(minPx) && minPx > 0) {
-                regretGroup.append("circle")
-                    .attr("class", "regret-ring regret-line--hover")
-                    .attr("cx", xScale(d.x)).attr("cy", yScale(d.y))
-                    .attr("r", minPx);
+            const hasRing = isFinite(minPx) && minPx > 0;
+            if (gpuInteract) {
+                // G5b — regret leader (data-space endpoints) + distance ring (data-space
+                // centre, pixel radius) on the GPU. Dasharray 4 3 (period 7, 4/7); #5a6478.
+                pushGpuInteraction({
+                    line: hasLine ? { srcX: d.x, srcY: d.y, tgtX: regretInfo.targetX, tgtY: regretInfo.targetY, hasLine: true } : null,
+                    rings: hasRing ? [{ cx: d.x, cy: d.y, radiusPx: minPx, widthPx: 1.5, color: RGB5a("#5a6478", 0.35), period: 7, dashFrac: 4 / 7 }] : [],
+                });
+            } else {
+                if (hasLine) {
+                    regretGroup.append("line")
+                        .attr("class", "regret-line regret-line--hover")
+                        .attr("x1", xScale(d.x)).attr("y1", yScale(d.y))
+                        .attr("x2", xScale(regretInfo.targetX)).attr("y2", yScale(regretInfo.targetY));
+                }
+                if (hasRing) {
+                    regretGroup.append("circle")
+                        .attr("class", "regret-ring regret-line--hover")
+                        .attr("cx", xScale(d.x)).attr("cy", yScale(d.y))
+                        .attr("r", minPx);
+                }
             }
         }
     };
@@ -6415,7 +6658,34 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         ringGroup.select(".isolation-ring--hover").remove();
         hvRectGroup.selectAll(".hv-contrib-overlay--hover").remove();
         regretGroup.selectAll(".regret-line--hover").remove();
+        clearGpuInteraction();               // G5b/c — clear the GPU hover overlays
     };
+    // G5 verification seam: drive a hover headlessly (the live cursor can't be scripted
+    // through CDP reliably). `which` = "front" | "non" picks a sample frontier / non-frontier
+    // point from the current scene; sets the matching __bl2d_*Expect for the verify hook and
+    // returns its data coords. A no-op shim in non-interactive frames (showTooltip undefined).
+    window.__bl2d_simHover = (which) => {
+        let sample;
+        if (which === "front") {
+            sample = frontier[Math.floor(frontier.length / 2)];
+        } else {
+            // A representative interior (non-frontier) point near the cloud's upper-right —
+            // far enough from the origin to show a clear regret leader to the frontier.
+            const nonFront = unique.filter(p => !frontierSet.has(p) && (p.x > 0 || p.y > 0));
+            nonFront.sort((a, b) => (a.x + a.y) - (b.x + b.y));
+            sample = nonFront[Math.floor(nonFront.length * 0.92)] || nonFront[nonFront.length - 1];
+        }
+        if (!sample) return null;
+        if (frontierSet.has(sample)) {
+            const iso = isolationMap.get(sample);
+            window.__bl2d_ringExpect = iso ? { cx: sample.x, cy: sample.y, radiusPx: iso.r } : null;
+        } else {
+            window.__bl2d_regretExpect = { srcX: sample.x, srcY: sample.y, hasLine: false };
+        }
+        showTooltip({ clientX: 300, clientY: 300 }, sample);
+        return { x: sample.x, y: sample.y, isFront: frontierSet.has(sample) };
+    };
+    window.__bl2d_simHoverOut = () => hideTooltip(true);
 
     // Brush layer: drag a rectangle on empty chart area to zoom in. Mounted
     // BEFORE the hit circles so dot clicks still go to their handlers

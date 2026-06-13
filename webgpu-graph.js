@@ -478,6 +478,137 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(u.color.rgb, u.color.a);
 }`;
 
+// ── G5b: non-frontier "regret" hover overlay (dashed line + dashed ring) ──────
+// When the cursor is over a point that is NOT on the frontier, the chart draws a dashed
+// leader from that point to its nearest spot ON the frontier staircase (how far it falls
+// short of the limit), plus a dashed ring whose radius is the pixel distance to the
+// nearest frontier DOT. This shader reproduces the SVG `.regret-line` / `.regret-ring`
+// (stroke #5a6478, width 1.5px, dasharray "4 3", opacity 0.6 / 0.35) entirely on the GPU.
+//
+// ONE pipeline, ONE uniform, drawn as draw(6, 2): a single 2-triangle quad, billboarded
+// two ways by instance_index — instance 0 is the line (a thin screen-space ribbon so the
+// 1.5px width and the dash are exact), instance 1 is the ring (a square billboard, dashed
+// in the fragment by arc-angle). The endpoints live in DATA space and ride uScene.ab just
+// like every other G-track buffer, so a pan/zoom is a 64-byte uniform write — the overlay
+// never recomputes its geometry. An absent line/ring (hasLine/hasRing == 0) collapses its
+// instance off-screen. Screen-space dashing matches stroke-dasharray exactly: the dash
+// repeats every `period` px of arc length (4px on + 3px off ⇒ period 7, dashFrac 4/7).
+const WEBGPU_REGRET_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+// a    = (srcX, srcY, tgtX, tgtY)        — DATA-space endpoints (src = the hovered point)
+// b    = (ringRpx, lineWpx, hasLine, hasRing)
+// dash = (periodPx, dashFrac, _, _)
+// lineCol / ringCol = straight-alpha RGBA (the pipeline's src-over blend multiplies by a)
+struct Regret { a: vec4<f32>, b: vec4<f32>, dash: vec4<f32>, lineCol: vec4<f32>, ringCol: vec4<f32> };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<uniform> u: Regret;
+struct VSOut {
+  @builtin(position) clip: vec4<f32>,
+  @location(0) @interpolate(flat) kind: f32,   // 0 = line, 1 = ring
+  @location(1) v: vec2<f32>,                    // line: (alongPx, perpPx); ring: offset px
+  @location(2) @interpolate(flat) ext: f32,     // line: halfWidth px; ring: radius px
+};
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(-1.0,1.0),
+  vec2<f32>(-1.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>( 1.0,1.0));
+fn toPx(p: vec2<f32>) -> vec2<f32> { return vec2<f32>(sc.ab.x * p.x + sc.ab.y, sc.ab.z * p.y + sc.ab.w); }
+fn toClip(px: vec2<f32>) -> vec4<f32> { return vec4<f32>(px.x / sc.vp.x * 2.0 - 1.0, 1.0 - px.y / sc.vp.y * 2.0, 0.0, 1.0); }
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  let corner = C[vi];
+  var o: VSOut;                                  // zero-initialized; an off-screen clip hides unused instances
+  let srcPx = toPx(u.a.xy);
+  if (ii == 0u) {
+    if (u.b.z < 0.5) { o.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0); return o; }   // hasLine == 0
+    let tgtPx = toPx(u.a.zw);
+    let d = tgtPx - srcPx;
+    let len = max(length(d), 1e-4);
+    let dir = d / len;
+    let nrm = vec2<f32>(-dir.y, dir.x);
+    let halfW = u.b.y * 0.5;
+    let t = corner.x * 0.5 + 0.5;                 // 0 at src, 1 at tgt
+    let along = t * len;
+    let perp = corner.y * halfW;
+    o.clip = toClip(srcPx + dir * along + nrm * perp);
+    o.kind = 0.0; o.v = vec2<f32>(along, perp); o.ext = halfW;
+  } else {
+    if (u.b.w < 0.5) { o.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0); return o; }   // hasRing == 0
+    let r = u.b.x; let halfW = u.b.y * 0.5; let ext = r + halfW + 1.0;
+    let off = corner * ext;
+    o.clip = toClip(srcPx + off);
+    o.kind = 1.0; o.v = off; o.ext = r;
+  }
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let period = max(u.dash.x, 1e-3);
+  if (i.kind < 0.5) {
+    // line: 1.5px-wide ribbon, AA across the perpendicular, dashed along its length
+    if (fract(i.v.x / period) > u.dash.y) { discard; }
+    let aa = 1.0 - smoothstep(i.ext - 0.75, i.ext + 0.75, abs(i.v.y));
+    if (aa <= 0.0) { discard; }
+    return vec4<f32>(u.lineCol.rgb, aa * u.lineCol.a);
+  }
+  // ring: AA band at radius ext (half-width = lineW/2), dashed by screen arc length
+  let dist = length(i.v);
+  let hw = u.b.y * 0.5;
+  let aa = 1.0 - smoothstep(hw - 0.75, hw + 0.75, abs(dist - i.ext));
+  if (aa <= 0.0) { discard; }
+  let ang = atan2(i.v.y, i.v.x);                  // (-pi, pi]
+  let arc = (ang + 3.14159265) * i.ext;           // angle → screen arc length at this radius
+  if (fract(arc / period) > u.dash.y) { discard; }
+  return vec4<f32>(u.ringCol.rgb, aa * u.ringCol.a);
+}`;
+
+// ── G5c: instanced dashed rings (isolation ring, regret distance ring, pinned rings) ──
+// One pipeline draws every dashed ring overlay the chart needs, vertex-pulling a storage
+// array of Ring records — so a hover (1 ring), a non-frontier hover (the regret distance
+// ring), or a pinned multi-point state (G5e) are all draw(6, ringCount). Each ring is a
+// billboard quad centred on a DATA-space point (rides uScene.ab), with a PIXEL radius and
+// width, an independent straight-alpha colour, and a screen-space dash (period, dashFrac)
+// — matching SVG `.isolation-ring` (dasharray 5 4) and `.regret-ring` (dasharray 4 3).
+const WEBGPU_RINGS_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+// geo = (cxData, cyData, radiusPx, widthPx); col = straight RGBA; dash = (periodPx, dashFrac, _, _)
+struct Ring { geo: vec4<f32>, col: vec4<f32>, dash: vec4<f32> };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> rings: array<Ring>;
+struct VSOut {
+  @builtin(position) clip: vec4<f32>,
+  @location(0) off: vec2<f32>,
+  @location(1) @interpolate(flat) radius: f32,
+  @location(2) @interpolate(flat) width: f32,
+  @location(3) @interpolate(flat) col: vec4<f32>,
+  @location(4) @interpolate(flat) dash: vec2<f32>,
+};
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(-1.0,1.0),
+  vec2<f32>(-1.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>( 1.0,1.0));
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  let r = rings[ii];
+  let cpx = vec2<f32>(sc.ab.x * r.geo.x + sc.ab.y, sc.ab.z * r.geo.y + sc.ab.w);
+  let radius = r.geo.z; let width = r.geo.w; let ext = radius + width * 0.5 + 1.0;
+  let off = C[vi] * ext;
+  var o: VSOut;
+  o.clip = vec4<f32>((cpx.x + off.x) / sc.vp.x * 2.0 - 1.0, 1.0 - (cpx.y + off.y) / sc.vp.y * 2.0, 0.0, 1.0);
+  o.off = off; o.radius = radius; o.width = width; o.col = r.col; o.dash = r.dash.xy;
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let dist = length(i.off);
+  let hw = i.width * 0.5;
+  let aa = 1.0 - smoothstep(hw - 0.75, hw + 0.75, abs(dist - i.radius));
+  if (aa <= 0.0) { discard; }
+  let period = max(i.dash.x, 1e-3);
+  let ang = atan2(i.off.y, i.off.x);               // (-pi, pi]
+  let arc = (ang + 3.14159265) * i.radius;         // angle → screen arc length at this radius
+  if (fract(arc / period) > i.dash.y) { discard; }
+  return vec4<f32>(i.col.rgb, aa * i.col.a);
+}`;
+
 // ── G2: staircase, hypervolume contributions, shade ──────────────────────────
 // Frontier-dot radius range — the on-screen size encodes a point's HV contribution,
 // matching the CPU's radiusFor (script.js: FRONTIER_R_MIN/MAX + sqrt(contrib/max)).
@@ -1028,6 +1159,33 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             vertex: { module: dashLineMod, entryPoint: "vs" },
             fragment: { module: dashLineMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
             primitive: { topology: "line-strip" } });
+
+        // ── G5b render: the non-frontier "regret" hover overlay (line + ring). Two
+        // uniforms only (Scene + a tiny Regret block); no storage buffers — the whole
+        // overlay is two quads. Visible to the fragment too, since the colours/dash live
+        // in the Regret uniform. See WEBGPU_REGRET_WGSL for the geometry derivation.
+        this.regretBgl = dev.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+            { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+        ] });
+        const regretMod = dev.createShaderModule({ code: WEBGPU_REGRET_WGSL });
+        this.pRegret = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.regretBgl] }),
+            vertex: { module: regretMod, entryPoint: "vs" },
+            fragment: { module: regretMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+        // ── G5c render: instanced dashed rings (isolation / regret / pinned). Scene
+        // uniform + a rings storage array; draw(6, ringCount).
+        this.ringsBgl = dev.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+            { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        ] });
+        const ringsMod = dev.createShaderModule({ code: WEBGPU_RINGS_WGSL });
+        this.pRings = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.ringsBgl] }),
+            vertex: { module: ringsMod, entryPoint: "vs" },
+            fragment: { module: ringsMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
     };
 
     // Build (or rebuild) the Canvas2D glyph atlas at the given dpr covering `charset`.
@@ -1244,6 +1402,94 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
         } else { g.ghostStairN = 0; g.ghostDotN = 0; }
     };
 
+    // ── G5b/c: interaction overlays (hover/pin), written per cursor event ─────────
+    // Unlike the scene/overlay uploads (keyed on identity, skipped when unchanged), the
+    // interaction overlays change on every mousemove, so this writes the small buffers and
+    // flips the draw counters. The render itself is coalesced to one frame by
+    // WebGPURenderer.presentInteraction(). Two independent overlay kinds:
+    //
+    //   state.line  = { srcX, srcY, tgtX, tgtY, hasLine, width?, color?, period?, dashFrac? }
+    //                 — the regret leader (DATA-space endpoints) — or null/hasLine:false to clear.
+    //   state.rings = [ { cx, cy, radiusPx, widthPx?, color?, period?, dashFrac? }, … ]
+    //                 — every dashed ring (DATA-space centre, PIXEL radius); [] clears them.
+    //
+    // A key present in `state` REPLACES that overlay; a key absent LEAVES it untouched (so a
+    // caller can update just the rings without disturbing the line). Colours default to the
+    // SVG `.regret-line` paint (#5a6478). last*/counts feed the verify hooks.
+    P.uploadInteraction = function (state) {
+        this._initGraphPipelines();
+        const g = this.graph;
+        if (!g || !state) return;
+        const dev = this.device;
+        if ("line" in state) {
+            const L = state.line;
+            if (!L || !L.hasLine) { g.interLineOn = false; g.lastLine = null; }
+            else {
+                if (!g.bRegretU) g.bRegretU = dev.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+                if (!g.regretBG || g._regretScene !== g.uScene) {
+                    g.regretBG = dev.createBindGroup({ layout: this.regretBgl, entries: [
+                        { binding: 0, resource: { buffer: g.uScene } },
+                        { binding: 1, resource: { buffer: g.bRegretU } } ] });
+                    g._regretScene = g.uScene;
+                }
+                const col = L.color || [0.353, 0.392, 0.471, 0.6];   // #5a6478 @ .6
+                const buf = new Float32Array(20);
+                buf.set([L.srcX, L.srcY, L.tgtX, L.tgtY], 0);                       // a = endpoints
+                buf.set([0, L.width || 1.5, 1, 0], 4);                              // b = (_, lineW, hasLine, _)
+                buf.set([L.period || 7, L.dashFrac != null ? L.dashFrac : 4 / 7, 0, 0], 8);
+                buf.set(col, 12); buf.set(col, 16);                                // lineCol (ringCol slot unused)
+                dev.queue.writeBuffer(g.bRegretU, 0, buf);
+                g.interLineOn = true; g.lastLine = L;
+            }
+        }
+        if ("rings" in state) {
+            const rs = state.rings || [];
+            g.ringCount = rs.length;
+            g.lastRings = rs;
+            if (rs.length) {
+                const need = rs.length * 48;                                       // 3·vec4 per Ring
+                if (!g.bRings || g.bRings.size < need) {
+                    g.bRings?.destroy();
+                    g.bRings = dev.createBuffer({ size: Math.max(256, (need + 255) & ~255),
+                        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+                    g.ringsBG = null;
+                }
+                if (!g.ringsBG || g._ringsScene !== g.uScene) {
+                    g.ringsBG = dev.createBindGroup({ layout: this.ringsBgl, entries: [
+                        { binding: 0, resource: { buffer: g.uScene } },
+                        { binding: 1, resource: { buffer: g.bRings } } ] });
+                    g._ringsScene = g.uScene;
+                }
+                const arr = new Float32Array(rs.length * 12);
+                rs.forEach((r, k) => {
+                    const o = k * 12;
+                    arr[o] = r.cx; arr[o + 1] = r.cy; arr[o + 2] = r.radiusPx; arr[o + 3] = r.widthPx || 1.5;
+                    const c = r.color || [0.353, 0.392, 0.471, 0.35];
+                    arr[o + 4] = c[0]; arr[o + 5] = c[1]; arr[o + 6] = c[2]; arr[o + 7] = c[3];
+                    arr[o + 8] = r.period || 7; arr[o + 9] = r.dashFrac != null ? r.dashFrac : 4 / 7;
+                });
+                dev.queue.writeBuffer(g.bRings, 0, arr);
+            }
+        }
+    };
+
+    // Draw the interaction overlays LAST in the frame (above text), so the hover/pin leader,
+    // rings, and HV polygon sit on top of the whole chart. No-op when nothing is set.
+    P._drawGraphInteraction = function (rp) {
+        const g = this.graph;
+        if (!g) return;
+        if (g.ringCount > 0 && g.ringsBG) {
+            rp.setPipeline(this.pRings);
+            rp.setBindGroup(0, g.ringsBG);
+            rp.draw(6, g.ringCount);
+        }
+        if (g.interLineOn && g.regretBG) {
+            rp.setPipeline(this.pRegret);
+            rp.setBindGroup(0, g.regretBG);
+            rp.draw(6, 1);                       // instance 0 = the regret leader line
+        }
+    };
+
     // Upload (or skip!) the scene. `key` is the SCALE-INDEPENDENT identity of the
     // point set — filters/mode/axes/colors but NOT the scale domain, viewport, or
     // dpr. Same key ⇒ the resident buffers are already correct ⇒ this returns
@@ -1300,6 +1546,13 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             uEraDot: null, eraStairN: 0, eraDotN: 0, eraLineBG: null, eraShadeBG: null, eraDotsBG: null,
             bGhostStair: null, bGhostArc: null, bGhostDots: null, uGhostDash: null, uGhostDot: null,
             ghostStairN: 0, ghostDotN: 0, ghostLineBG: null, ghostDotsBG: null,
+            // G5b/c interaction overlays (transient, written per hover/pin — NOT keyed on the
+            // scene identity). The regret LINE rides bRegretU (80-byte uniform); every dashed
+            // RING (isolation, regret distance, pinned) rides bRings (storage array of Ring).
+            // *BG cache the bind group vs the uScene it was built against (rebuilt only if
+            // uScene is recreated). interLineOn/ringCount gate the draws; last* feed verify.
+            bRegretU: null, regretBG: null, interLineOn: false, _regretScene: null, lastLine: null,
+            bRings: null, ringsBG: null, ringCount: 0, _ringsScene: null, lastRings: null,
         });
         if (!g.uScene) {
             g.uScene = this.device.createBuffer({
@@ -2028,6 +2281,32 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
                 return m;
             })(),
             eraStairN: g.eraStairN, ghostStairN: g.ghostStairN,
+            // G5b: regret leader anchoring. After a non-frontier hover, the GPU regret line's
+            // source MUST equal the hovered point's DATA coords (anchored in data space,
+            // transformed by uScene.ab in the shader). regretMis = L1(src − hovered) [+ tgt if
+            // hasLine] — 0 ⇒ the GPU carries exactly the CPU regret geometry. Null until a hover.
+            regretMis: (() => {
+                const e = window.__bl2d_regretExpect;
+                if (!e || !g.lastLine) return null;
+                const r = g.lastLine;
+                let m = Math.abs(r.srcX - e.srcX) + Math.abs(r.srcY - e.srcY);
+                if (e.hasLine) m += Math.abs(r.tgtX - e.tgtX) + Math.abs(r.tgtY - e.tgtY);
+                if (!isFinite(r.tgtX) || !isFinite(r.tgtY)) m += 1e6;
+                return m;
+            })(),
+            // G5c: isolation ring. After a frontier hover, the first GPU ring's DATA-space
+            // centre MUST equal the hovered frontier point and its pixel radius the
+            // isolationMap distance (set on window.__bl2d_ringExpect by the sim hook). 0 ⇒ match.
+            ringMis: (() => {
+                const e = window.__bl2d_ringExpect;
+                if (!e || !g.lastRings || !g.lastRings.length) return null;
+                const r = g.lastRings[0];
+                let m = Math.abs(r.cx - e.cx) + Math.abs(r.cy - e.cy);
+                if (e.radiusPx != null) m += Math.abs(r.radiusPx - e.radiusPx);
+                return m;
+            })(),
+            interLineOn: g.interLineOn,
+            ringCount: g.ringCount,
             frontReads: g.frontReads,
             uploads: g.uploads,
             key: g.key,
