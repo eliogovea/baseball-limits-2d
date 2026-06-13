@@ -552,6 +552,9 @@ html[data-theme="dark"] select.field {
     font-size: 11px;
     fill: var(--text-muted);
 }
+/* G3: under the full-GPU graph the tick LABELS render from the GPU glyph atlas; keep
+   the <text> nodes (a11y) but make them invisible. Tick marks + domain path stay. */
+body.gpugraph .axis text { fill: transparent; }
 .axis line, .axis path {
     stroke: var(--border);
 }

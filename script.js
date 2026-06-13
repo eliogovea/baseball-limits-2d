@@ -4232,6 +4232,8 @@ class WebGPURenderer {
             rp.setBindGroup(0, s.bgStairLine);
             rp.drawIndirect(s.bIndirect, 0);
         }
+        // G-track G3: glyph-atlas text (tick labels + frontier names) on top of all else.
+        this._drawGraphText?.(rp);
         rp.end();
         this.device.queue.submit([enc.finish()]);
         if (evt) evt.pending = null;   // consume the request; the next GPU frame re-stashes it
@@ -5792,6 +5794,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         !filters.evt && !filters.smooth && !filters.groupCareer
     );
     window.__bl2d_gpuGraph = gpuGraph;
+    // G3: hide the SVG axis tick TEXT when the GPU draws it (keep the <text> nodes for
+    // a11y; tick MARKS + domain path keep their stroke). Class-gated in styles.css.
+    document.body.classList.toggle("gpugraph", gpuGraph);
 
     // Group-career suppresses the staircase + HV shade: with only a handful of
     // career dots tracing trajectories, the Pareto envelope clutters more than it
@@ -6119,6 +6124,22 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             scales: gpuScaleUniform(xScale, yScale, margin, width, height, pointRadius, cloudOpacity),
         });
     }
+    // On-chart frontier labels: greedy collision avoidance, mobile shows only the two
+    // extreme endpoints. Computed HERE (before present) because under gpuGraph the GPU
+    // glyph text must be uploaded before the render pass; the SVG leader/label appends
+    // below reuse the same `labels`. HV radius applies only to .special-point.
+    const labelRadius = hvEncodingEnabled ? FRONTIER_R_MAX : frontierRadius;
+    const labels = filters.groupCareer ? [] : layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, labelRadius, width < 480);
+    // G3: under gpuGraph the axis tick labels + frontier names render from the GPU glyph
+    // atlas (the leader LINES + axis TITLES + tick MARKS stay SVG). Build + upload the
+    // glyph instances before present(); the SVG text is suppressed (class + !gpuGraph gate).
+    if (gpuGraph && typeof pointRenderer.uploadText === "function") {
+        const t = buildTextInstances(pointRenderer, {
+            xScale, yScale, margin, plotW, plotH, labels, isSmall: width < 480 });
+        pointRenderer.uploadText(t.instances, { count: t.count, strings: t.strings, charset: t.charset });
+        window.__bl2d_gpuGraphText = { count: t.count, expected: t.expected, strings: t.strings };
+        window.__bl2d_gpuGraphTicks = t.tickStrings;
+    }
     // Composite the accumulated layers (no-op for Canvas 2D, which painted as it went;
     // the WebGPU backend submits its single render pass here).
     pointRenderer.present();
@@ -6181,16 +6202,8 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         }
     }
 
-    // On-chart frontier labels: greedy collision avoidance, mobile shows
-    // only the two extreme endpoints so small viewports stay readable.
-    // HV radius applies only to .special-point; career-trail dots stay at the
-    // constant size set by pointRadius+3 so the gold layer remains a clean
-    // per-season encoding.
-    const labelRadius = hvEncodingEnabled ? FRONTIER_R_MAX : frontierRadius;
-    // Group-career members are labelled by their own persistent name labels below,
-    // so skip the frontier-label layout (there's no visible frontier in this mode).
-    const labels = filters.groupCareer ? [] : layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, labelRadius, width < 480);
-    // Leader lines for dodged labels (drawn under the text).
+    // Leader lines for dodged labels (drawn under the text). `labels` was computed
+    // before present() (the GPU glyph text needs it uploaded before the render pass).
     g.append("g")
         .attr("class", "frontier-leaders")
         .selectAll("line")
@@ -6201,7 +6214,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         .attr("y1", d => d.leader.y1)
         .attr("x2", d => d.leader.x2)
         .attr("y2", d => d.leader.y2);
-    g.append("g")
+    if (!gpuGraph) g.append("g")
         .attr("class", "frontier-labels")
         .selectAll("text")
         .data(labels).enter()
@@ -6639,6 +6652,80 @@ function layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, pointR, is
     svgNode.removeChild(measurer);
     recordOverlaps(placed);
     return out;
+}
+
+// G3 (GPU text): turn this refresh's axis tick labels + frontier player labels into
+// glyph instances for the GPU atlas pipeline (webgpu-graph.js). Tick generation
+// (d3 .ticks()/.tickFormat() — exactly what d3.axisBottom/Left use) and label layout
+// (layoutFrontierLabels, reused verbatim) stay CPU; this only lays the resulting strings
+// into atlas-metric glyph quads. Variant 0 = ticks (--text-muted), 1/2 = frontier labels
+// (--mlb-blue, with a white halo). Returns the packed Float32Array + verify metadata.
+function buildTextInstances(renderer, { xScale, yScale, margin, plotW, plotH, labels, isSmall }) {
+    const root = getComputedStyle(document.documentElement);
+    const tickColor = packColorRGBA((root.getPropertyValue("--text-muted") || "#5a6478").trim(), 1);
+    const labelColor = packColorRGBA((root.getPropertyValue("--mlb-blue") || "#002d72").trim(), 1);
+    const haloColor = packColorRGBA("#ffffff", 1);
+
+    // d3-axis default tick values + format (same n as the SVG axes use).
+    const nx = Math.max(4, Math.floor(plotW / 80)), ny = Math.max(4, Math.floor(plotH / 50));
+    const xFmt = xScale.tickFormat(nx), yFmt = yScale.tickFormat(ny);
+    const xTicks = xScale.ticks(nx), yTicks = yScale.ticks(ny);
+    const tickStrings = { x: xTicks.map(xFmt), y: yTicks.map(yFmt) };
+    window.__bl2d_liveScales = { xScale, yScale, nx, ny };   // for the headless tick verify
+
+    // Items: { text, x, y (baseline, full px), anchor, variant, color, halo }.
+    const items = [];
+    // X ticks: centered, baseline below the axis (d3 dy:0.71em ≈ +8px past tickSize+pad=9).
+    for (let i = 0; i < xTicks.length; i++)
+        items.push({ text: tickStrings.x[i], x: margin.left + xScale(xTicks[i]),
+            y: margin.top + plotH + 17, anchor: "middle", variant: 0, color: tickColor, halo: false });
+    // Y ticks: right-aligned at x=-9 (tickSize+pad), baseline at +3.5 (dy:0.32em) to center.
+    for (let i = 0; i < yTicks.length; i++)
+        items.push({ text: tickStrings.y[i], x: margin.left - 9,
+            y: margin.top + yScale(yTicks[i]) + 3.5, anchor: "end", variant: 0, color: tickColor, halo: false });
+    // Frontier labels (layout x/y are plot-local; y is the baseline). Halo + fill.
+    const labelVariant = isSmall ? 2 : 1;
+    for (const L of labels)
+        items.push({ text: L.text, x: margin.left + L.x, y: margin.top + L.y,
+            anchor: L.anchor, variant: labelVariant, color: labelColor, halo: true });
+
+    // Charset union → ensure the atlas covers it, then read its metrics.
+    let charset = "";
+    for (const it of items) charset += it.text;
+    const metrics = renderer.ensureGlyphAtlas(Array.from(new Set(Array.from(charset))).join(""));
+
+    // Lay each string into glyph quads. Two instances per halo glyph (halo then fill).
+    const recs = [];   // each: [x,y,w,h,u0,v0,u1,v1,colorBits]
+    const push = (m, penX, baseY, uv, color) => recs.push([
+        penX - m.padCss, baseY - m.ascCss - m.padCss, m.w, m.h, uv[0], uv[1], uv[2], uv[3], color]);
+    const strings = [];
+    let expected = 0;   // ideal glyph count: every codepoint a fill, +1 for halo'd glyphs
+    for (const it of items) {
+        strings.push(it.text);
+        const chars = Array.from(it.text);
+        expected += chars.length * (it.halo ? 2 : 1);
+        let total = 0;
+        for (const ch of chars) { const m = metrics.get(it.variant * 0x10000 + ch.codePointAt(0)); if (m) total += m.advance; }
+        let penX = it.anchor === "middle" ? it.x - total / 2 : it.anchor === "end" ? it.x - total : it.x;
+        for (const ch of chars) {
+            const m = metrics.get(it.variant * 0x10000 + ch.codePointAt(0));
+            if (!m) continue;
+            if (it.halo) push(m, penX, it.y, [m.hu0, m.hv0, m.hu1, m.hv1], haloColor);
+            push(m, penX, it.y, [m.u0, m.v0, m.u1, m.v1], it.color);
+            penX += m.advance;
+        }
+    }
+    // Pack to the 3·vec4 (12 float) record layout; colour bits go in float slot 8.
+    const count = recs.length;
+    const f32 = new Float32Array(count * 12);
+    const u32 = new Uint32Array(f32.buffer);
+    for (let i = 0; i < count; i++) {
+        const r = recs[i], b = i * 12;
+        f32[b] = r[0]; f32[b + 1] = r[1]; f32[b + 2] = r[2]; f32[b + 3] = r[3];
+        f32[b + 4] = r[4]; f32[b + 5] = r[5]; f32[b + 6] = r[6]; f32[b + 7] = r[7];
+        u32[b + 8] = r[8];
+    }
+    return { instances: f32, count, strings, charset, tickStrings, expected };
 }
 
 

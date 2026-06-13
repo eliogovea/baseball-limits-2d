@@ -524,6 +524,84 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(col, aa);
 }`;
 
+// ── G3: glyph-atlas text ─────────────────────────────────────────────────────
+// The chart's axis tick labels + frontier player names render from a pre-rasterized
+// Canvas2D glyph atlas (NOT SDF — docs/rendering.md §"G-track design"): tick generation
+// (d3 .ticks()/.tickFormat()) and label collision layout (layoutFrontierLabels) stay
+// CPU; the GPU just draws the CPU-laid-out glyph quads. This is the renderer's first
+// sampled texture. Axis TITLES stay SVG (they keep click/glossary interaction, and the
+// rotated Y-title defers to G5) — the pragmatic G3 cut.
+
+// Base charset: digits, ASCII letters, the punctuation ticks/labels emit, and the whole
+// Latin-1 letter block (À–ÿ) so player-name diacritics (Martínez/Pérez/Peña) are covered
+// without enumerating 24k names. uploadText lazy-rebuilds if a string needs a codepoint
+// outside this set (e.g. an exotic name), so coverage is guaranteed, not guessed.
+const GRAPH_GLYPH_BASE_CHARSET = (() => {
+    let s = " .,-+%/()0123456789";
+    for (let c = 0x41; c <= 0x5a; c++) s += String.fromCharCode(c);   // A–Z
+    for (let c = 0x61; c <= 0x7a; c++) s += String.fromCharCode(c);   // a–z
+    for (let c = 0xc0; c <= 0xff; c++) s += String.fromCharCode(c);   // Latin-1 À–ÿ
+    return s;
+})();
+// Text variants: [id] = {px, weight}. 0 ticks, 1 labels-desktop, 2 labels-mobile.
+const GRAPH_GLYPH_VARIANTS = [
+    { px: 11, weight: 400 },   // 0: axis tick labels (.axis text)
+    { px: 11, weight: 600 },   // 1: frontier labels desktop (.frontier-label)
+    { px: 9,  weight: 600 },   // 2: frontier labels mobile (.frontier-label--mobile)
+];
+const GRAPH_GLYPH_HALO_VARIANTS = new Set([1, 2]);   // label variants get a white halo cell
+const GRAPH_GLYPH_ATLAS_MAX = 2048;
+
+// WGSL (render): instanced textured quads. Each instance is a glyph quad in PIXEL space
+// (margin already folded in by the CPU), vertex-pulled like WEBGPU_SCENEFRONT_WGSL; the
+// fragment samples the atlas's alpha coverage and tints by the per-instance colour. The
+// output is PREMULTIPLIED to match the G-track src-over blend, so the white halo and the
+// coloured fill (two instances per label glyph) composite exactly like SVG paint-order.
+const WEBGPU_GLYPH_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> inst: array<vec4<f32>>;   // 3 vec4 per glyph (stride 48 B)
+@group(0) @binding(2) var atlas: texture_2d<f32>;
+@group(0) @binding(3) var samp: sampler;
+struct VSOut {
+  @builtin(position) clip: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+  @location(1) @interpolate(flat) rgba: u32,
+};
+// Glyph record = 48 B = 3 × vec4<f32>:
+//   [0] rect = (x, y, w, h)  CSS px (margin folded in)
+//   [1] uv   = (u0, v0, u1, v1)  atlas UV
+//   [2] col  = (colourBits, _, _, _)  packed RGBA8 in float[0]'s bit pattern
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(0.0,0.0), vec2<f32>(1.0,0.0), vec2<f32>(0.0,1.0),
+  vec2<f32>(0.0,1.0), vec2<f32>(1.0,0.0), vec2<f32>(1.0,1.0));
+fn unpack(c: u32) -> vec4<f32> {
+  return vec4<f32>(f32(c & 0xffu), f32((c >> 8u) & 0xffu),
+                   f32((c >> 16u) & 0xffu), f32((c >> 24u) & 0xffu)) / 255.0;
+}
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  let rect = inst[ii * 3u];          // x, y, w, h  (CSS px)
+  let uvr  = inst[ii * 3u + 1u];     // u0, v0, u1, v1
+  let col  = inst[ii * 3u + 2u];     // colourBits in .x
+  let corner = C[vi];
+  let px = rect.x + corner.x * rect.z;
+  let py = rect.y + corner.y * rect.w;
+  var o: VSOut;
+  o.clip = vec4<f32>(px / sc.vp.x * 2.0 - 1.0, 1.0 - py / sc.vp.y * 2.0, 0.0, 1.0);
+  o.uv = vec2<f32>(mix(uvr.x, uvr.z, corner.x), mix(uvr.y, uvr.w, corner.y));
+  o.rgba = bitcast<u32>(col.x);
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let cov = textureSample(atlas, samp, i.uv).a;
+  if (cov <= 0.0) { discard; }
+  let c = unpack(i.rgba);
+  let a = c.a * cov;
+  return vec4<f32>(c.rgb * a, a);    // premultiplied
+}`;
+
 // ── GraphRenderer methods, attached to WebGPURenderer ────────────────────────
 // Deferred scripts run in document order, so WebGPURenderer (script.js) exists by
 // the time this file executes — and chooseRenderer() hasn't run yet (it waits on
@@ -623,6 +701,162 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             vertex: { module: frontMod, entryPoint: "vs" },
             fragment: { module: frontMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
             primitive: { topology: "triangle-list" } });
+
+        // ── G3 render: glyph-atlas text (the first sampled texture) ──
+        this.glyphBgl = dev.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+            { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+            { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
+            { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
+        ] });
+        const glyphMod = dev.createShaderModule({ code: WEBGPU_GLYPH_WGSL });
+        this.pSceneGlyph = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.glyphBgl] }),
+            vertex: { module: glyphMod, entryPoint: "vs" },
+            fragment: { module: glyphMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+        this.glyphSampler = dev.createSampler({ magFilter: "linear", minFilter: "linear" });
+    };
+
+    // Build (or rebuild) the Canvas2D glyph atlas at the given dpr covering `charset`.
+    // Rasterizes each (variant, char) cell white-on-transparent (alpha coverage; the
+    // fragment tints by instance colour); label variants additionally get a white
+    // STROKE cell for the halo (pixel-matching .frontier-label's paint-order:stroke).
+    // Returns nothing; populates this.glyph = { dpr, metrics, w, h, charset, uploadPath }
+    // and (re)creates this.glyphTex. metrics maps variant*0x10000+codepoint → cell info.
+    P._buildGlyphAtlas = function (dpr, charset) {
+        const family = (getComputedStyle(document.documentElement)
+            .getPropertyValue("--font-sans") || "sans-serif").trim() || "sans-serif";
+        const cv = document.createElement("canvas");
+        const ctx = cv.getContext("2d");
+        const pad = Math.ceil(3 * dpr) + 1;             // absorbs the 1.5·dpr halo stroke + 1px guard
+        const chars = Array.from(new Set(Array.from(charset)));
+        // ── Cell model (device px) ──────────────────────────────────────────────
+        // Advance-based: cell width = ceil(advance) + 2·pad; the pen origin sits at
+        // (pad, pad+asc) inside the cell. fill and halo are SEPARATE cells of the same
+        // footprint (pad covers the stroke overhang). Placement contract for the CPU:
+        //   rect.x = penX − padCss,  rect.y = baselineY − ascCss − padCss,
+        //   rect.w = wCss, rect.h = hCss; then penX += advanceCss.
+        const cells = [];
+        for (let v = 0; v < GRAPH_GLYPH_VARIANTS.length; v++) {
+            const { px, weight } = GRAPH_GLYPH_VARIANTS[v];
+            ctx.font = `${weight} ${Math.round(px * dpr)}px ${family}`;
+            ctx.textBaseline = "alphabetic";
+            for (const ch of chars) {
+                const m = ctx.measureText(ch);
+                const adv = m.width;
+                const asc = Math.ceil(m.actualBoundingBoxAscent || Math.round(px * dpr * 0.8));
+                const desc = Math.ceil(m.actualBoundingBoxDescent || Math.round(px * dpr * 0.25));
+                const right = Math.ceil(m.actualBoundingBoxRight || adv);
+                const cw = Math.max(Math.ceil(adv), right) + pad * 2;
+                const chh = asc + desc + pad * 2;
+                const base = { v, ch, cw, chh, advance: adv, asc };
+                cells.push({ ...base, halo: false });
+                if (GRAPH_GLYPH_HALO_VARIANTS.has(v)) cells.push({ ...base, halo: true });
+            }
+        }
+        // Shelf-pack.
+        let x = 0, y = 0, shelfH = 0, atlasW = 0;
+        for (const c of cells) {
+            if (x + c.cw > GRAPH_GLYPH_ATLAS_MAX) { x = 0; y += shelfH; shelfH = 0; }
+            c.x = x; c.y = y; x += c.cw; shelfH = Math.max(shelfH, c.chh);
+            atlasW = Math.max(atlasW, x);
+        }
+        cv.width = Math.min(GRAPH_GLYPH_ATLAS_MAX, atlasW);
+        cv.height = y + shelfH;
+        // Rasterize.
+        const metrics = new Map();
+        for (const c of cells) {
+            const { px, weight } = GRAPH_GLYPH_VARIANTS[c.v];
+            ctx.font = `${weight} ${Math.round(px * dpr)}px ${family}`;
+            ctx.textBaseline = "alphabetic";
+            const drawX = c.x + pad, drawY = c.y + pad + c.asc;   // pen origin in the cell
+            if (c.halo) {
+                ctx.strokeStyle = "#fff"; ctx.lineWidth = 3 * dpr; ctx.lineJoin = "round";
+                ctx.strokeText(c.ch, drawX, drawY);
+            } else {
+                ctx.fillStyle = "#fff"; ctx.fillText(c.ch, drawX, drawY);
+            }
+            const key = c.v * 0x10000 + c.ch.codePointAt(0);
+            const u0 = c.x / cv.width, v0 = c.y / cv.height;
+            const u1 = (c.x + c.cw) / cv.width, v1 = (c.y + c.chh) / cv.height;
+            const entry = metrics.get(key) || {
+                advance: c.advance / dpr, w: c.cw / dpr, h: c.chh / dpr,
+                padCss: pad / dpr, ascCss: c.asc / dpr };
+            if (c.halo) { entry.hu0 = u0; entry.hv0 = v0; entry.hu1 = u1; entry.hv1 = v1; }
+            else { entry.u0 = u0; entry.v0 = v0; entry.u1 = u1; entry.v1 = v1; }
+            metrics.set(key, entry);
+        }
+        // Upload to a GPUTexture. Prefer copyExternalImageToTexture; fall back to
+        // writeTexture(getImageData) under backends that reject the canvas source.
+        const dev = this.device;
+        this.glyphTex?.destroy();
+        this.glyphTex = dev.createTexture({
+            size: [cv.width, cv.height], format: "rgba8unorm",
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT });
+        // Upload via writeTexture(getImageData): reliable on every backend including
+        // headless SwiftShader, where copyExternalImageToTexture can silently produce a
+        // BLANK texture (it doesn't throw, so it can't be caught — only the missing text
+        // gives it away). The atlas is built rarely (once per dpr), so the getImageData
+        // copy is a non-issue. The canvas is in-process → not tainted → getImageData safe.
+        let uploadPath = "writeTexture";
+        const img = ctx.getImageData(0, 0, cv.width, cv.height);
+        dev.queue.writeTexture({ texture: this.glyphTex }, img.data, { bytesPerRow: cv.width * 4 }, [cv.width, cv.height, 1]);
+        this.glyph = { dpr, metrics, w: cv.width, h: cv.height, charset, uploadPath };
+    };
+
+    // Ensure the glyph atlas covers `charset` at the current dpr, building/rebuilding it
+    // if needed, and return its metrics map so the CPU can lay out glyph instances before
+    // uploadText. Idempotent — the common refresh (atlas already current) is a no-op.
+    P.ensureGlyphAtlas = function (charset) {
+        this._initGraphPipelines();
+        const covered = this.glyph && this.glyph.dpr === this.dpr &&
+            !Array.from(charset).some(c => !this.glyph.metrics.has(c.codePointAt(0)));
+        if (!covered) this._buildGlyphAtlas(this.dpr, GRAPH_GLYPH_BASE_CHARSET + charset);
+        return this.glyph.metrics;
+    };
+
+    // Upload this refresh's text as glyph instances. Unlike the scene cloud, text is NOT
+    // scale-retained — layout (tick positions, label collision) depends on the scales, so
+    // the CPU rebuilds the instances each refresh (counts are tiny, ≤ a few hundred). The
+    // atlas itself is cached and only rebuilt on a dpr change or a codepoint cache-miss.
+    // `instances` is a flat Float32Array already in the 3·vec4 (48 B) record layout;
+    // opts = { count, strings, charset }.
+    P.uploadText = function (instances, opts) {
+        this._initGraphPipelines();
+        const g = this.graph;
+        if (!g) return;
+        const dev = this.device;
+        // (Re)build the atlas if dpr changed or a requested codepoint isn't covered.
+        const needRebuild = !this.glyph || this.glyph.dpr !== this.dpr ||
+            (opts.charset && Array.from(opts.charset).some(c =>
+                !this.glyph.metrics.has(0 * 0x10000 + c.codePointAt(0))));
+        if (needRebuild) {
+            const charset = GRAPH_GLYPH_BASE_CHARSET + (opts.charset || "");
+            this._buildGlyphAtlas(this.dpr, charset);
+            g.glyphTexRef = null;             // force bind-group rebuild against the new texture
+        }
+        const count = opts.count | 0;
+        const bytes = Math.max(48, count * 48);
+        const grew = !g.bGlyph || g.bGlyph.size < ((bytes + 255) & ~255);
+        if (grew) {
+            g.bGlyph?.destroy();
+            g.bGlyph = dev.createBuffer({ size: Math.max(256, (bytes + 255) & ~255),
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+        }
+        if (count > 0) dev.queue.writeBuffer(g.bGlyph, 0, instances, 0, count * 12);
+        if (grew || g.glyphTexRef !== this.glyphTex || !g.glyphBindGroup) {
+            g.glyphBindGroup = dev.createBindGroup({ layout: this.glyphBgl, entries: [
+                { binding: 0, resource: { buffer: g.uScene } },
+                { binding: 1, resource: { buffer: g.bGlyph } },
+                { binding: 2, resource: this.glyphTex.createView() },
+                { binding: 3, resource: this.glyphSampler },
+            ] });
+            g.glyphTexRef = this.glyphTex;
+        }
+        g.glyphCount = count;
+        g.glyphStrings = opts.strings || null;
+        g.glyphCharset = opts.charset || "";
     };
 
     // Upload (or skip!) the scene. `key` is the SCALE-INDEPENDENT identity of the
@@ -655,6 +889,11 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             bHvScalar: null, uStair: null, uHv: null, uGraphCol: null,
             stairBindGroup: null, hvBindGroup: null,
             stairLineBindGroup: null, hvShadeBindGroup: null, frontBindGroup: null,
+            // G3: glyph text. bGlyph = instance buffer (3·vec4 per glyph); glyphBindGroup
+            // binds uScene + bGlyph + the atlas texture + sampler; glyphCount drives the
+            // draw; glyphStrings/glyphCharset feed the verify hook.
+            bGlyph: null, glyphCount: 0, glyphBindGroup: null,
+            glyphTexRef: null, glyphStrings: null, glyphCharset: null,
         });
         if (!g.uScene) {
             g.uScene = this.device.createBuffer({
@@ -981,6 +1220,17 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
         rp.setPipeline(this.pPoints);
     };
 
+    // G3: the glyph text — drawn LAST in present() (on top of everything). Tick labels
+    // + frontier names; halo+fill glyph instances composite via the premultiplied blend.
+    P._drawGraphText = function (rp) {
+        const g = this.graph;
+        if (!g || !(g.glyphCount > 0) || !g.glyphBindGroup) return;
+        rp.setPipeline(this.pSceneGlyph);
+        rp.setBindGroup(0, g.glyphBindGroup);
+        rp.draw(6, g.glyphCount);
+        rp.setPipeline(this.pPoints);
+    };
+
     // Drop the scene (clear() and any frame that leaves the gpuGraph path).
     // Buffers stay allocated — only the count/key reset, so re-entering the path
     // with the same identity still re-uploads (the key is gone) but without a
@@ -991,6 +1241,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
         g.count = 0;
         g.key = null;
         g.front = null;   // a keyed readback result must not outlive its scene
+        g.glyphCount = 0; // text must vanish when leaving the path
     };
 
     // destroy() hook: free the GPU objects with the renderer (device swap /
@@ -1002,8 +1253,9 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
                          "bOnFront", "bFrontIdx", "bCount", "uSky",
                          "bFrontSorted", "bFrontSortedIdx", "bStaircase", "bStairIndirect",
                          "bShadeIndirect", "bHv", "bFrontRadius", "bHvScalar",
-                         "uStair", "uHv", "uGraphCol"]) g[k]?.destroy();
+                         "uStair", "uHv", "uGraphCol", "bGlyph"]) g[k]?.destroy();
         for (const s of g.stage || []) s?.destroy();
+        this.glyphTex?.destroy(); this.glyphTex = null; this.glyph = null;
         this.graph = null;
     };
 
@@ -1130,6 +1382,35 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             }
         }
 
+        // ── G3 invariants: glyph instances, tick strings, atlas coverage. All CPU-side
+        // (no GPU readback): the instance count vs the ideal Σ-codepoints (×2 for halo'd
+        // labels), the GPU tick strings vs d3's default format, and every requested
+        // codepoint present in the atlas (no .notdef).
+        let glyphMis = -1, tickMis = -1, atlasMissing = -1, glyphCount = g.glyphCount || 0;
+        let glyphUploadPath = pointRenderer.glyph?.uploadPath ?? null;
+        let atlasW = pointRenderer.glyph?.w ?? null, atlasH = pointRenderer.glyph?.h ?? null;
+        if (g.glyphCount > 0) {
+            const txt = window.__bl2d_gpuGraphText;
+            glyphMis = txt ? Math.abs(g.glyphCount - txt.expected) : -1;
+            // Tick strings: re-derive d3's default format over the live scales and compare.
+            const tk = window.__bl2d_gpuGraphTicks;
+            if (tk && window.__bl2d_liveScales) {
+                const { xScale, yScale, nx, ny } = window.__bl2d_liveScales;
+                const rx = xScale.ticks(nx).map(xScale.tickFormat(nx));
+                const ry = yScale.ticks(ny).map(yScale.tickFormat(ny));
+                tickMis = 0;
+                if (rx.length !== tk.x.length || ry.length !== tk.y.length) tickMis = 999;
+                else { for (let i = 0; i < rx.length; i++) if (rx[i] !== tk.x[i]) tickMis++;
+                       for (let i = 0; i < ry.length; i++) if (ry[i] !== tk.y[i]) tickMis++; }
+            }
+            // Atlas coverage: every codepoint in the uploaded charset has a (variant-0) cell.
+            const cs = g.glyphCharset || "";
+            atlasMissing = 0;
+            const met = pointRenderer.glyph?.metrics;
+            for (const ch of new Set(Array.from(cs)))
+                if (!met || !met.has(ch.codePointAt(0))) atlasMissing++;
+        }
+
         return {
             dotCount: g.count,
             expectedN: window.__bl2d_gpuGraphN ?? null,
@@ -1137,6 +1418,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             skylineMis, refFrontSize,
             frontMis, frontCount, cardPidsMatch,
             stairVertMis, hvMis, hvMaxRel, radiusMis, shadeQuadrant,
+            glyphCount, glyphMis, tickMis, atlasMissing, glyphUploadPath, atlasW, atlasH,
             frontReads: g.frontReads,
             uploads: g.uploads,
             key: g.key,
