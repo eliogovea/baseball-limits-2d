@@ -368,6 +368,35 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(col, aa * i.fade);
 }`;
 
+// G4c depth SHADE: the faint nested dominated-region fills (SVG .depth-shade, 0.06
+// fill-opacity, stacked so nested layers darken). Geometry is identical to the G2 HV
+// shade — a triangle fan from the anti-ideal apex over a layer's staircase — but the
+// fragment is FLAT (one colour+alpha from gc.shade), not the gradient. Drawn per deeper
+// layer at 0.06 alpha; src-over stacking reproduces the SVG's darkening toward the core.
+const WEBGPU_DEPTHSHADE_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+struct Col { stair: vec4<f32>, shade: vec4<f32>, front: vec4<f32> };
+struct Stair { n: u32, xSign: f32, ySign: f32, antiX: f32, antiY: f32 };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> staircase: array<vec2<f32>>;
+@group(0) @binding(2) var<uniform> gc: Col;
+@group(0) @binding(3) var<uniform> st: Stair;
+fn toPx(p: vec2<f32>) -> vec2<f32> { return vec2<f32>(sc.ab.x * p.x + sc.ab.y, sc.ab.z * p.y + sc.ab.w); }
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+  let t = vi / 3u;
+  let c = vi % 3u;
+  let antiData = vec2<f32>(st.antiX * st.xSign, st.antiY * st.ySign);
+  var p: vec2<f32>;
+  if (c == 0u) { p = antiData; }
+  else if (c == 1u) { p = staircase[t]; }
+  else { p = staircase[t + 1u]; }
+  let px = toPx(p);
+  return vec4<f32>(px.x / sc.vp.x * 2.0 - 1.0, 1.0 - px.y / sc.vp.y * 2.0, 0.0, 1.0);
+}
+@fragment
+fn fs() -> @location(0) vec4<f32> { return vec4<f32>(gc.shade.rgb, gc.shade.a); }`;
+
 // ── G2: staircase, hypervolume contributions, shade ──────────────────────────
 // Frontier-dot radius range — the on-screen size encodes a point's HV contribution,
 // matching the CPU's radiusFor (script.js: FRONTIER_R_MIN/MAX + sqrt(contrib/max)).
@@ -895,6 +924,13 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             vertex: { module: depthDotsMod, entryPoint: "vs" },
             fragment: { module: depthDotsMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
             primitive: { topology: "triangle-list" } });
+        // G4c depth shade: flat per-layer dominated-region fan (reuses hvShadeBgl).
+        const depthShadeMod = dev.createShaderModule({ code: WEBGPU_DEPTHSHADE_WGSL });
+        this.pDepthShade = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.hvShadeBgl] }),
+            vertex: { module: depthShadeMod, entryPoint: "vs" },
+            fragment: { module: depthShadeMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
     };
 
     // Build (or rebuild) the Canvas2D glyph atlas at the given dpr covering `charset`.
@@ -1085,7 +1121,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             // verify hook's per-layer staircase vertex count.
             bDepthIdx: [], bDepthCount: [], bDepthSorted: [], bDepthSortedIdx: [],
             bDepthStair: [], bDepthIndirect: [], bDepthShadeIndirect: [], uDepthCol: [],
-            depthStairBG: [], depthCompactBG: [], depthStairLineBG: [],
+            depthStairBG: [], depthCompactBG: [], depthStairLineBG: [], depthShadeBG: [],
             uDepthDots: null, depthDotsBindGroup: null,
         });
         if (!g.uScene) {
@@ -1190,6 +1226,12 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
                     { binding: 0, resource: { buffer: g.uScene } },
                     { binding: 1, resource: { buffer: g.bDepthStair[L] } },
                     { binding: 2, resource: { buffer: g.uDepthCol[L] } },
+                ] });
+                g.depthShadeBG[L] = this.device.createBindGroup({ layout: this.hvShadeBgl, entries: [
+                    { binding: 0, resource: { buffer: g.uScene } },
+                    { binding: 1, resource: { buffer: g.bDepthStair[L] } },
+                    { binding: 2, resource: { buffer: g.uDepthCol[L] } },
+                    { binding: 3, resource: { buffer: g.uStair } },
                 ] });
             }
         }
@@ -1320,10 +1362,12 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
         ]));
         // Per deeper-layer stair colour = frontier rgb at the SVG's per-layer opacity
         // max(0.3, 0.9·0.72^L). Only .stair (binding read by the stair-line shader) matters.
+        // .stair = line colour at the per-layer fade; .shade = the dominated-region fill
+        // (frontier rgb at 0.06, the SVG .depth-shade fill-opacity — stacked draws darken).
         for (let L = 1; L < WEBGPU_GRAPH_MAX_DEPTH; L++) {
             const op = Math.max(0.3, 0.9 * Math.pow(0.72, L));
             this.device.queue.writeBuffer(g.uDepthCol[L], 0, new Float32Array([
-                dCol[0], dCol[1], dCol[2], op,  0, 0, 0, 0,  0, 0, 0, 0,
+                dCol[0], dCol[1], dCol[2], op,  dCol[0], dCol[1], dCol[2], 0.06,  0, 0, 0, 0,
             ]));
         }
         // The skyline runs HERE — i.e. only on scene-dirty frames, by
@@ -1530,6 +1574,13 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
     P._drawGraphDepth = function (rp) {
         const g = this.graph;
         if (!g || !(g.count > 0) || !(g.depth > 1)) return;
+        // Shades first (deepest-first; flat 0.06 fans, src-over stacking darkens the core),
+        // then the staircase lines on top — same paint order as the SVG depth-layers group.
+        for (let L = g.depth - 1; L >= 1; L--) {
+            rp.setPipeline(this.pDepthShade);
+            rp.setBindGroup(0, g.depthShadeBG[L]);
+            rp.drawIndirect(g.bDepthShadeIndirect[L], 0);
+        }
         for (let L = g.depth - 1; L >= 1; L--) {
             rp.setPipeline(this.pSceneStairLine);
             rp.setBindGroup(0, g.depthStairLineBG[L]);
