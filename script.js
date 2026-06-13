@@ -4202,6 +4202,8 @@ class WebGPURenderer {
         // G-track G4: depth (onion-peel) layers — faded staircases + dots, ABOVE the
         // cloud and UNDER the live frontier (matches the SVG depth-layers z-order).
         this._drawGraphDepth?.(rp);
+        // G-track G4d: era-B + ghost overlays (also under the live frontier).
+        this._drawGraphAux?.(rp);
         // The cloud sits at the background layer (behind trails, heads, frontier dots).
         // Phase-5 spring path: vertex-pull the SMOOTHED pos[] (pass 0 = non-front cloud);
         // the frontier dots (pass 1) + the GPU staircase are drawn LAST, on top. Phase-4
@@ -5478,6 +5480,18 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const legendGlobalEl = document.getElementById("legend-global");
     if (legendGlobalEl) legendGlobalEl.hidden = true;
 
+    // ── G-track gate (computed early — the depth/ghost/era-B SVG draws below read it). ──
+    const gpuGraph = !!(
+        pointRenderer instanceof WebGPURenderer &&
+        pointRenderer.graphMode &&
+        typeof pointRenderer.uploadScene === "function" &&
+        !filters.evt && !filters.smooth && !filters.groupCareer
+    );
+    window.__bl2d_gpuGraph = gpuGraph;
+    // G3: hide the SVG axis tick TEXT when the GPU draws it (keep the <text> nodes for
+    // a11y; tick MARKS + domain path keep their stroke). Class-gated in styles.css.
+    document.body.classList.toggle("gpugraph", gpuGraph);
+
     // Lite frame (playing/scrubbing): skip the interaction-only work — hypervolume
     // contributions, frontier cards, spotlight, isolation rings, regret/HV overlays,
     // and the hover quadtree — so the moving frame is as cheap as the standalone demo.
@@ -5684,6 +5698,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // and the cloud): a faint dashed staircase + muted dots marking the all-MLB
     // limit for the current universe, ignoring the attribute filters.
     if (globalResult && globalResult.frontier.length) {
+        if (!gpuGraph) {   // G4d: the GPU draws the ghost under gpuGraph
         const gLine = staircaseScreen(globalResult.frontier);
         g.append("path")
             .attr("class", "global-frontier-ghost")
@@ -5702,20 +5717,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             .attr("r", 2.5)
             .style("fill", "#8a93a6")
             .style("opacity", 0.65);
+        }
         if (legendGlobalEl) legendGlobalEl.hidden = false;
     }
-
-    // ── G-track gate (computed here, before the depth/staircase draws that read it). ──
-    const gpuGraph = !!(
-        pointRenderer instanceof WebGPURenderer &&
-        pointRenderer.graphMode &&
-        typeof pointRenderer.uploadScene === "function" &&
-        !filters.evt && !filters.smooth && !filters.groupCareer
-    );
-    window.__bl2d_gpuGraph = gpuGraph;
-    // G3: hide the SVG axis tick TEXT when the GPU draws it (keep the <text> nodes for
-    // a11y; tick MARKS + domain path keep their stroke). Class-gated in styles.css.
-    document.body.classList.toggle("gpugraph", gpuGraph);
 
     // Onion-peeling: draw the deeper Pareto layers (1…n) behind the live
     // frontier, fading outward. Non-interactive so the real frontier keeps its
@@ -5842,8 +5846,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // plus a coverage headline = how much of B's objective space the primary era
     // also dominates (grid-sampled, sign-aware so "lower is better" axes work).
     if (eraB && eraB.frontier.length) {
-        const bPts = staircaseScreen(eraB.frontier);
         const eg = g.append("g").attr("class", "era-b-layer");
+        if (!gpuGraph) {   // G4d: the GPU draws the era-B shade/staircase/dots under gpuGraph
+        const bPts = staircaseScreen(eraB.frontier);
         eg.append("path")
             .attr("class", "era-b-shade")
             .attr("d", "M " + xAnti + "," + yAnti + " L " + bPts.map(p => p.join(",")).join(" L ") + " Z");
@@ -5854,6 +5859,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             .data(eraB.frontier).enter().append("circle")
             .attr("class", "era-b-dot")
             .attr("cx", d => xScale(d.x)).attr("cy", d => yScale(d.y)).attr("r", 3.5);
+        }
 
         const domBy = (fr, cx, cy) => fr.some(a => a.x * xSign >= cx * xSign && a.y * ySign >= cy * ySign);
         let covNum = 0, covDen = 0;
@@ -6020,6 +6026,39 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             panelColor: rgb01(getComputedStyle(document.documentElement).getPropertyValue("--panel").trim() || "#ffffff"),
         });
         pointRenderer.writeSceneScale(xScale, yScale, margin, width, height, xSign, ySign);
+        // G4d era-B + ghost overlays: lay each CPU oracle frontier into a data-space
+        // staircase (via xScale.invert of the screen staircase, so it rides the uScene
+        // affine) + a SCREEN-space cumulative arc length (zoom-stable dashing) + dot
+        // positions, then upload for the GPU to draw. The SVG era-B/ghost are suppressed.
+        const overlayGeom = (frontier) => {
+            const screen = staircaseScreen(frontier);
+            const stair = new Float32Array(screen.length * 2);
+            const arc = new Float32Array(screen.length);
+            let acc = 0;
+            for (let i = 0; i < screen.length; i++) {
+                const sx = screen[i][0], sy = screen[i][1];
+                if (i > 0) acc += Math.hypot(sx - screen[i - 1][0], sy - screen[i - 1][1]);
+                arc[i] = acc;
+                stair[i * 2] = xScale.invert(sx); stair[i * 2 + 1] = yScale.invert(sy);
+            }
+            const dots = new Float32Array(frontier.length * 2);
+            for (let i = 0; i < frontier.length; i++) { dots[i * 2] = frontier[i].x; dots[i * 2 + 1] = frontier[i].y; }
+            return { stair, arc, dots };
+        };
+        const panelRgb = rgb01(getComputedStyle(document.documentElement).getPropertyValue("--panel").trim() || "#ffffff");
+        const eraGeom = (eraB && eraB.frontier.length) ? overlayGeom(eraB.frontier) : null;
+        const ghostGeom = (globalResult && globalResult.frontier.length) ? overlayGeom(globalResult.frontier) : null;
+        pointRenderer.uploadOverlays?.({
+            era: eraGeom ? { ...eraGeom, period: 10, dashFrac: 0.6,
+                line: [...rgb01("#0ea5a4"), 0.9], shade: [...rgb01("#0ea5a4"), 0.12],
+                dotFill: [...rgb01("#0ea5a4"), 1], dotRing: [...panelRgb, 1] } : null,
+            ghost: ghostGeom ? { ...ghostGeom, period: 9, dashFrac: 5 / 9,
+                line: [...rgb01("#8a93a6"), 0.7], dotFill: [...rgb01("#8a93a6"), 0.65] } : null,
+        });
+        window.__bl2d_overlayExpect = {
+            eraFront: eraGeom ? eraB.frontier.length : 0,
+            ghostFront: ghostGeom ? globalResult.frontier.length : 0,
+        };
         // The pixel-space bg instances must not double-draw under the scene, and
         // a later non-graph frame must rebuild them (sentinel ≠ any real bgKey).
         pointRenderer.count.bg = 0;

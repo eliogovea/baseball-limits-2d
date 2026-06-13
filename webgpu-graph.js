@@ -397,6 +397,87 @@ fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 @fragment
 fn fs() -> @location(0) vec4<f32> { return vec4<f32>(gc.shade.rgb, gc.shade.a); }`;
 
+// G4d era-B + ghost overlays. Both reuse the CPU frontier oracles (eraB.frontier /
+// globalResult.frontier, script.js) laid out in DATA space and drawn via uScene — the
+// G3-text pattern, NOT a second GPU skyline (the design's "second frontier run" wording;
+// running O(n²) over a large unfiltered cloud per refresh isn't worth it when the CPU
+// already has the frontier). era-B = solid staircase (reuse pSceneStairLine) + flat shade
+// (reuse pDepthShade) + dots; ghost = dashed staircase + faint dots.
+
+// Plain instanced dots from a data-space position buffer (era-B + ghost frontier dots).
+// dd.x = radius, .y = ring px; fill rgba + ring rgb from the uniform. No per-instance
+// fade (unlike the depth dots) — every uploaded position draws.
+const WEBGPU_PLAINDOTS_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+struct DD { p: vec4<f32>, fill: vec4<f32>, ring: vec4<f32> };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> pos: array<vec2<f32>>;
+@group(0) @binding(2) var<uniform> dd: DD;
+struct VSOut {
+  @builtin(position) clip: vec4<f32>,
+  @location(0) off: vec2<f32>,
+  @location(1) @interpolate(flat) radius: f32,
+  @location(2) @interpolate(flat) ring: f32,
+};
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(-1.0,1.0),
+  vec2<f32>(-1.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>( 1.0,1.0));
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  let p = pos[ii];
+  let r = dd.p.x; let ring = dd.p.y; let ext = r + ring;
+  let px = sc.ab.x * p.x + sc.ab.y;
+  let py = sc.ab.z * p.y + sc.ab.w;
+  let cx = px / sc.vp.x * 2.0 - 1.0;
+  let cy = 1.0 - py / sc.vp.y * 2.0;
+  let corner = C[vi];
+  var o: VSOut;
+  o.clip = vec4<f32>(cx + corner.x * ext / sc.vp.x * 2.0, cy + corner.y * ext / sc.vp.y * 2.0, 0.0, 1.0);
+  o.off = corner * ext; o.radius = r; o.ring = ring;
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let dist = length(i.off);
+  let outer = i.radius + i.ring * 0.5;
+  let aa = 1.0 - smoothstep(outer - 0.75, outer + 0.75, dist);
+  if (aa <= 0.0) { discard; }
+  var rgb: vec3<f32>;
+  var a = dd.fill.a;
+  if (i.ring > 0.0 && dist > i.radius - i.ring * 0.5) { rgb = dd.ring.rgb; a = dd.ring.a; }
+  else { rgb = dd.fill.rgb; }
+  return vec4<f32>(rgb, aa * a);
+}`;
+
+// Dashed staircase line for the ghost. Vertex-pulls data-space staircase[] + a per-vertex
+// SCREEN-space cumulative arc length (CPU-computed from the live scales, so the dash stays
+// a constant pixel length under zoom — it re-derives on each re-upload). The varying arc
+// interpolates linearly between vertices = true screen distance (segments are straight),
+// so the fragment dashes by fract(arc/period).
+const WEBGPU_DASHLINE_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+struct Dash { period: f32, dashFrac: f32, _a: f32, _b: f32, color: vec4<f32> };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> staircase: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> arc: array<f32>;
+@group(0) @binding(3) var<uniform> u: Dash;
+struct VSOut { @builtin(position) clip: vec4<f32>, @location(0) a: f32 };
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
+  let p = staircase[vi];
+  let px = sc.ab.x * p.x + sc.ab.y;
+  let py = sc.ab.z * p.y + sc.ab.w;
+  var o: VSOut;
+  o.clip = vec4<f32>(px / sc.vp.x * 2.0 - 1.0, 1.0 - py / sc.vp.y * 2.0, 0.0, 1.0);
+  o.a = arc[vi];
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  if (fract(i.a / u.period) > u.dashFrac) { discard; }
+  return vec4<f32>(u.color.rgb, u.color.a);
+}`;
+
 // ── G2: staircase, hypervolume contributions, shade ──────────────────────────
 // Frontier-dot radius range — the on-screen size encodes a point's HV contribution,
 // matching the CPU's radiusFor (script.js: FRONTIER_R_MIN/MAX + sqrt(contrib/max)).
@@ -931,6 +1012,22 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             vertex: { module: depthShadeMod, entryPoint: "vs" },
             fragment: { module: depthShadeMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
             primitive: { topology: "triangle-list" } });
+
+        // ── G4d render: era-B + ghost overlays (CPU-laid geometry, GPU draw) ──
+        this.plainDotsBgl = dev.createBindGroupLayout({ entries: [ uV(0), sV(1), uV(2) ] });
+        const plainDotsMod = dev.createShaderModule({ code: WEBGPU_PLAINDOTS_WGSL });
+        this.pPlainDots = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.plainDotsBgl] }),
+            vertex: { module: plainDotsMod, entryPoint: "vs" },
+            fragment: { module: plainDotsMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+        this.dashLineBgl = dev.createBindGroupLayout({ entries: [ uV(0), sV(1), sV(2), uV(3) ] });
+        const dashLineMod = dev.createShaderModule({ code: WEBGPU_DASHLINE_WGSL });
+        this.pDashLine = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.dashLineBgl] }),
+            vertex: { module: dashLineMod, entryPoint: "vs" },
+            fragment: { module: dashLineMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "line-strip" } });
     };
 
     // Build (or rebuild) the Canvas2D glyph atlas at the given dpr covering `charset`.
@@ -1074,6 +1171,79 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
         g.glyphCharset = opts.charset || "";
     };
 
+    // G4d: upload the era-B + ghost overlay geometry (CPU-laid, data-space). Re-uploaded
+    // each refresh (the frontiers change with filters); counts are tiny so bind groups
+    // just rebuild. `opts.era`/`opts.ghost` are null when that overlay is off.
+    //   era   = { stair: Float32Array(vec2 data, staircase), dots: Float32Array(vec2 data),
+    //             line:[r,g,b,a], shade:[r,g,b,a], dotFill:[r,g,b,a], dotRing:[r,g,b,a] }
+    //   ghost = { stair, arc: Float32Array(screen px per vertex), dots,
+    //             period, dashFrac, line:[r,g,b,a], dotFill:[r,g,b,a] }
+    P.uploadOverlays = function (opts) {
+        this._initGraphPipelines();
+        const g = this.graph;
+        if (!g) return;
+        const dev = this.device;
+        const ST = GPUBufferUsage.STORAGE, CD = GPUBufferUsage.COPY_DST, UNI = GPUBufferUsage.UNIFORM;
+        const ensure = (buf, bytes) => {
+            const size = Math.max(256, (bytes + 255) & ~255);
+            if (buf && buf.size >= size) return buf;
+            buf?.destroy();
+            return dev.createBuffer({ size, usage: ST | CD });
+        };
+        const mkU = (buf, n) => buf || dev.createBuffer({ size: n, usage: UNI | CD });
+        const bg = (buf) => ({ buffer: buf });
+
+        // ── era-B (dashed teal staircase + flat shade + dots) ──
+        const e = opts.era;
+        if (e && e.stair && e.stair.length >= 4) {
+            g.bEraStair = ensure(g.bEraStair, e.stair.byteLength);
+            g.bEraArc   = ensure(g.bEraArc, e.arc.byteLength);
+            g.bEraDots  = ensure(g.bEraDots, Math.max(8, e.dots.byteLength));
+            g.uEraDash = mkU(g.uEraDash, 32); g.uEraShade = mkU(g.uEraShade, 48); g.uEraDot = mkU(g.uEraDot, 48);
+            dev.queue.writeBuffer(g.bEraStair, 0, e.stair);
+            dev.queue.writeBuffer(g.bEraArc, 0, e.arc);
+            if (e.dots.length) dev.queue.writeBuffer(g.bEraDots, 0, e.dots);
+            dev.queue.writeBuffer(g.uEraDash, 0, new Float32Array([
+                e.period, e.dashFrac, 0, 0, e.line[0], e.line[1], e.line[2], e.line[3] ]));
+            dev.queue.writeBuffer(g.uEraShade, 0, new Float32Array([   // Col: .shade is the flat fill
+                0, 0, 0, 0, e.shade[0], e.shade[1], e.shade[2], e.shade[3], 0, 0, 0, 0 ]));
+            dev.queue.writeBuffer(g.uEraDot, 0, new Float32Array([
+                3.5, 1.2, 0, 0, e.dotFill[0], e.dotFill[1], e.dotFill[2], e.dotFill[3],
+                e.dotRing[0], e.dotRing[1], e.dotRing[2], e.dotRing[3] ]));
+            g.eraLineBG = dev.createBindGroup({ layout: this.dashLineBgl, entries: [
+                { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bEraStair) },
+                { binding: 2, resource: bg(g.bEraArc) }, { binding: 3, resource: bg(g.uEraDash) } ] });
+            g.eraShadeBG = dev.createBindGroup({ layout: this.hvShadeBgl, entries: [
+                { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bEraStair) },
+                { binding: 2, resource: bg(g.uEraShade) }, { binding: 3, resource: bg(g.uStair) } ] });
+            g.eraDotsBG = dev.createBindGroup({ layout: this.plainDotsBgl, entries: [
+                { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bEraDots) }, { binding: 2, resource: bg(g.uEraDot) } ] });
+            g.eraStairN = e.stair.length / 2; g.eraDotN = e.dots.length / 2;
+        } else { g.eraStairN = 0; g.eraDotN = 0; }
+
+        // ── ghost ──
+        const gh = opts.ghost;
+        if (gh && gh.stair && gh.stair.length >= 4) {
+            g.bGhostStair = ensure(g.bGhostStair, gh.stair.byteLength);
+            g.bGhostArc   = ensure(g.bGhostArc, gh.arc.byteLength);
+            g.bGhostDots  = ensure(g.bGhostDots, Math.max(8, gh.dots.byteLength));
+            g.uGhostDash = mkU(g.uGhostDash, 32); g.uGhostDot = mkU(g.uGhostDot, 48);
+            dev.queue.writeBuffer(g.bGhostStair, 0, gh.stair);
+            dev.queue.writeBuffer(g.bGhostArc, 0, gh.arc);
+            if (gh.dots.length) dev.queue.writeBuffer(g.bGhostDots, 0, gh.dots);
+            dev.queue.writeBuffer(g.uGhostDash, 0, new Float32Array([
+                gh.period, gh.dashFrac, 0, 0, gh.line[0], gh.line[1], gh.line[2], gh.line[3] ]));
+            dev.queue.writeBuffer(g.uGhostDot, 0, new Float32Array([
+                2.5, 0.0, 0, 0, gh.dotFill[0], gh.dotFill[1], gh.dotFill[2], gh.dotFill[3], 0, 0, 0, 0 ]));
+            g.ghostLineBG = dev.createBindGroup({ layout: this.dashLineBgl, entries: [
+                { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bGhostStair) },
+                { binding: 2, resource: bg(g.bGhostArc) }, { binding: 3, resource: bg(g.uGhostDash) } ] });
+            g.ghostDotsBG = dev.createBindGroup({ layout: this.plainDotsBgl, entries: [
+                { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bGhostDots) }, { binding: 2, resource: bg(g.uGhostDot) } ] });
+            g.ghostStairN = gh.stair.length / 2; g.ghostDotN = gh.dots.length / 2;
+        } else { g.ghostStairN = 0; g.ghostDotN = 0; }
+    };
+
     // Upload (or skip!) the scene. `key` is the SCALE-INDEPENDENT identity of the
     // point set — filters/mode/axes/colors but NOT the scale domain, viewport, or
     // dpr. Same key ⇒ the resident buffers are already correct ⇒ this returns
@@ -1123,6 +1293,13 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             bDepthStair: [], bDepthIndirect: [], bDepthShadeIndirect: [], uDepthCol: [],
             depthStairBG: [], depthCompactBG: [], depthStairLineBG: [], depthShadeBG: [],
             uDepthDots: null, depthDotsBindGroup: null,
+            // G4d era-B + ghost overlays (CPU-laid data-space geometry, re-uploaded each
+            // refresh — small vertex counts). era* = solid staircase + flat shade + dots;
+            // ghost* = dashed staircase (per-vertex screen arc length) + faint dots.
+            bEraStair: null, bEraArc: null, bEraDots: null, uEraDash: null, uEraShade: null,
+            uEraDot: null, eraStairN: 0, eraDotN: 0, eraLineBG: null, eraShadeBG: null, eraDotsBG: null,
+            bGhostStair: null, bGhostArc: null, bGhostDots: null, uGhostDash: null, uGhostDot: null,
+            ghostStairN: 0, ghostDotN: 0, ghostLineBG: null, ghostDotsBG: null,
         });
         if (!g.uScene) {
             g.uScene = this.device.createBuffer({
@@ -1592,6 +1769,28 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
         rp.setPipeline(this.pPoints);
     };
 
+    // G4d: era-B + ghost overlays. Ghost first (faint dashed reference, under), then
+    // era-B (shade → solid staircase → dots). Drawn after the cloud/depth, under the
+    // live frontier — matching the SVG overlay layering. No-op when an overlay is off.
+    P._drawGraphAux = function (rp) {
+        const g = this.graph;
+        if (!g || !(g.count > 0)) return;
+        if (g.ghostStairN > 1) {
+            rp.setPipeline(this.pDashLine); rp.setBindGroup(0, g.ghostLineBG); rp.draw(g.ghostStairN);
+        }
+        if (g.ghostDotN > 0) {
+            rp.setPipeline(this.pPlainDots); rp.setBindGroup(0, g.ghostDotsBG); rp.draw(6, g.ghostDotN);
+        }
+        if (g.eraStairN > 1) {
+            rp.setPipeline(this.pDepthShade); rp.setBindGroup(0, g.eraShadeBG); rp.draw(3 * (g.eraStairN - 1));
+            rp.setPipeline(this.pDashLine);   rp.setBindGroup(0, g.eraLineBG);  rp.draw(g.eraStairN);
+        }
+        if (g.eraDotN > 0) {
+            rp.setPipeline(this.pPlainDots); rp.setBindGroup(0, g.eraDotsBG); rp.draw(6, g.eraDotN);
+        }
+        rp.setPipeline(this.pPoints);
+    };
+
     // G3: the glyph text — drawn LAST in present() (on top of everything). Tick labels
     // + frontier names; halo+fill glyph instances composite via the premultiplied blend.
     P._drawGraphText = function (rp) {
@@ -1614,6 +1813,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
         g.key = null;
         g.front = null;   // a keyed readback result must not outlive its scene
         g.glyphCount = 0; // text must vanish when leaving the path
+        g.eraStairN = 0; g.eraDotN = 0; g.ghostStairN = 0; g.ghostDotN = 0;   // G4d overlays off
     };
 
     // destroy() hook: free the GPU objects with the renderer (device swap /
@@ -1626,7 +1826,9 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
                          "bFrontSorted", "bFrontSortedIdx", "bStaircase", "bStairIndirect",
                          "bShadeIndirect", "bHv", "bFrontRadius", "bHvScalar",
                          "uStair", "uHv", "uGraphCol", "bGlyph",
-                         "bPeeled", "bLayerOf", "bOnTmp", "uDepth", "uDepthDots"]) g[k]?.destroy();
+                         "bPeeled", "bLayerOf", "bOnTmp", "uDepth", "uDepthDots",
+                         "bEraStair", "bEraArc", "bEraDots", "uEraDash", "uEraShade", "uEraDot",
+                         "bGhostStair", "bGhostArc", "bGhostDots", "uGhostDash", "uGhostDot"]) g[k]?.destroy();
         for (const arr of ["bDepthIdx", "bDepthCount", "bDepthSorted", "bDepthSortedIdx",
                            "bDepthStair", "bDepthIndirect", "bDepthShadeIndirect", "uDepthCol"])
             for (const b of g[arr] || []) b?.destroy();
@@ -1817,6 +2019,15 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             stairVertMis, hvMis, hvMaxRel, radiusMis, shadeQuadrant,
             glyphCount, glyphMis, tickMis, atlasMissing, glyphUploadPath, atlasW, atlasH,
             depthMis, depthLayersGpu, depthStairMis, depth: g.depth,
+            // G4d: overlay staircase/dot counts == 2K+1 / K of the CPU oracle frontiers.
+            overlayMis: (() => {
+                const oe = window.__bl2d_overlayExpect || {};
+                let m = 0;
+                if (g.eraStairN)   m += Math.abs(g.eraStairN - (1 + 2 * (oe.eraFront || 0))) + Math.abs(g.eraDotN - (oe.eraFront || 0));
+                if (g.ghostStairN) m += Math.abs(g.ghostStairN - (1 + 2 * (oe.ghostFront || 0))) + Math.abs(g.ghostDotN - (oe.ghostFront || 0));
+                return m;
+            })(),
+            eraStairN: g.eraStairN, ghostStairN: g.ghostStairN,
             frontReads: g.frontReads,
             uploads: g.uploads,
             key: g.key,
