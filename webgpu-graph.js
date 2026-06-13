@@ -292,6 +292,82 @@ fn peelMark(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (onTmp[i] != 0u) { layerOf[i] = U.layer; peeled[i] = 1u; }
 }`;
 
+// G4 render: per-layer compact (gather a peel layer's members for the staircase) +
+// faded depth dots. compactLayer mirrors the G1 `compact`, but selects by layerOf==L
+// (the peel output) instead of onFront — feeding the SHARED ranksort/emit pipelines
+// per layer (via per-layer bind groups) so each deeper layer gets a sorted, capped
+// staircase in data space. The dots pass draws one instanced quad per cloud point on a
+// peel layer 1..depth-1, faded per layer (max(0.3, 0.9·0.72^L), matching the SVG).
+const WEBGPU_DEPTHCOMPACT_WGSL = `
+const MAX_FRONT : u32 = ${WEBGPU_GRAPH_MAX_FRONT}u;
+struct Dp { n: u32, xSign: f32, ySign: f32, layer: u32 };
+@group(0) @binding(0) var<uniform>             U:       Dp;
+@group(0) @binding(1) var<storage, read>       layerOf: array<u32>;
+@group(0) @binding(2) var<storage, read_write> idx:     array<u32>;
+@group(0) @binding(3) var<storage, read_write> count:   array<atomic<u32>>;
+@compute @workgroup_size(64)
+fn compactLayer(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= U.n) { return; }
+  if (layerOf[i] == U.layer) {
+    let k = atomicAdd(&count[0], 1u);
+    if (k < MAX_FRONT) { idx[k] = i; }
+  }
+}`;
+
+const WEBGPU_DEPTHDOTS_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+// dd.x = depth (cap), .y = radius px, .z = ring px; fill = frontier rgb, ring = panel rgb.
+struct DD { p: vec4<f32>, fill: vec4<f32>, ring: vec4<f32> };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> pos: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> layerOf: array<u32>;
+@group(0) @binding(3) var<uniform> dd: DD;
+struct VSOut {
+  @builtin(position) clip: vec4<f32>,
+  @location(0) off: vec2<f32>,
+  @location(1) @interpolate(flat) radius: f32,
+  @location(2) @interpolate(flat) ring: f32,
+  @location(3) @interpolate(flat) fade: f32,
+};
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(-1.0,1.0),
+  vec2<f32>(-1.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>( 1.0,1.0));
+fn degenerate() -> VSOut {
+  var o: VSOut; o.clip = vec4<f32>(2.0, 2.0, 0.0, 1.0);
+  o.off = vec2<f32>(0.0); o.radius = 0.0; o.ring = 0.0; o.fade = 0.0; return o;
+}
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  let L = layerOf[ii];
+  if (L == 0u || L >= u32(dd.p.x)) { return degenerate(); }   // layer 0 = the live frontier (drawn elsewhere)
+  let p = pos[ii];
+  let r = dd.p.y; let ring = dd.p.z;
+  let ext = r + ring;
+  let px = sc.ab.x * p.x + sc.ab.y;
+  let py = sc.ab.z * p.y + sc.ab.w;
+  let cx = px / sc.vp.x * 2.0 - 1.0;
+  let cy = 1.0 - py / sc.vp.y * 2.0;
+  let corner = C[vi];
+  var o: VSOut;
+  o.clip = vec4<f32>(cx + corner.x * ext / sc.vp.x * 2.0, cy + corner.y * ext / sc.vp.y * 2.0, 0.0, 1.0);
+  o.off = corner * ext;
+  o.radius = r; o.ring = ring;
+  o.fade = max(0.3, 0.9 * pow(0.72, f32(L)));
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let dist = length(i.off);
+  let outer = i.radius + i.ring * 0.5;
+  let aa = 1.0 - smoothstep(outer - 0.75, outer + 0.75, dist);
+  if (aa <= 0.0) { discard; }
+  var col: vec3<f32>;
+  if (dist > i.radius - i.ring * 0.5) { col = dd.ring.rgb; }   // panel-coloured ring
+  else { col = dd.fill.rgb; }
+  return vec4<f32>(col, aa * i.fade);
+}`;
+
 // ── G2: staircase, hypervolume contributions, shade ──────────────────────────
 // Frontier-dot radius range — the on-screen size encodes a point's HV contribution,
 // matching the CPU's radiusFor (script.js: FRONTIER_R_MIN/MAX + sqrt(contrib/max)).
@@ -735,6 +811,18 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
         this.pDepthInit = dev.createComputePipeline({ layout: depthLayout, compute: { module: depthMod, entryPoint: "peelInit" } });
         this.pDepthSky  = dev.createComputePipeline({ layout: depthLayout, compute: { module: depthMod, entryPoint: "peelSky" } });
         this.pDepthMark = dev.createComputePipeline({ layout: depthLayout, compute: { module: depthMod, entryPoint: "peelMark" } });
+        // G4 render: per-layer compact (selects layerOf==L into a per-layer idx buffer,
+        // feeding the shared ranksort/emit for each deeper layer's staircase).
+        this.depthCompactBgl = dev.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform", hasDynamicOffset: true } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+            { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+            { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        ] });
+        const depthCompactMod = dev.createShaderModule({ code: WEBGPU_DEPTHCOMPACT_WGSL });
+        this.pDepthCompact = dev.createComputePipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.depthCompactBgl] }),
+            compute: { module: depthCompactMod, entryPoint: "compactLayer" } });
 
         // ── G2 compute: staircase (ranksort/emit) + HV (total/contrib/max/radius) ──
         const un = (b) => ({ binding: b, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } });
@@ -796,6 +884,17 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             fragment: { module: glyphMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
             primitive: { topology: "triangle-list" } });
         this.glyphSampler = dev.createSampler({ magFilter: "linear", minFilter: "linear" });
+
+        // ── G4 render: faded depth dots (vertex-pull pos + layerOf, drawn under the
+        // live frontier). uDepthDots carries depth/radius/ring + the frontier & panel
+        // colours; the shader fades each layer by max(0.3, 0.9·0.72^L) to match the SVG.
+        this.depthDotsBgl = dev.createBindGroupLayout({ entries: [ uV(0), sV(1), sV(2), uV(3) ] });
+        const depthDotsMod = dev.createShaderModule({ code: WEBGPU_DEPTHDOTS_WGSL });
+        this.pDepthDots = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.depthDotsBgl] }),
+            vertex: { module: depthDotsMod, entryPoint: "vs" },
+            fragment: { module: depthDotsMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
     };
 
     // Build (or rebuild) the Canvas2D glyph atlas at the given dpr covering `charset`.
@@ -980,6 +1079,14 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             // frontier only = no peeling). depthBindGroup binds them all.
             bPeeled: null, bLayerOf: null, bOnTmp: null, uDepth: null,
             depthBindGroup: null, depth: 1,
+            // G4 render: per deeper-layer staircase scratch (indexed 1..depth-1) reusing
+            // the shared ranksort/emit; uDepthCol[L] the faded stair colour; uDepthDots
+            // + depthDotsBindGroup the single faded-dots pass; depthStairVerts[L] the
+            // verify hook's per-layer staircase vertex count.
+            bDepthIdx: [], bDepthCount: [], bDepthSorted: [], bDepthSortedIdx: [],
+            bDepthStair: [], bDepthIndirect: [], bDepthShadeIndirect: [], uDepthCol: [],
+            depthStairBG: [], depthCompactBG: [], depthStairLineBG: [],
+            uDepthDots: null, depthDotsBindGroup: null,
         });
         if (!g.uScene) {
             g.uScene = this.device.createBuffer({
@@ -1061,6 +1168,30 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             g.uStair    = mk(32, GPUBufferUsage.UNIFORM | CD);
             g.uHv       = mk(32, GPUBufferUsage.UNIFORM | CD);
             g.uGraphCol = mk(48, GPUBufferUsage.UNIFORM | CD);
+            // G4 per deeper-layer staircase scratch + faded colour (slots 1..MAX_DEPTH-1;
+            // slot 0 unused — layer 0 is the live frontier with its own G2 staircase).
+            const IND = GPUBufferUsage.INDIRECT;
+            for (let L = 1; L < WEBGPU_GRAPH_MAX_DEPTH; L++) {
+                g.bDepthIdx[L]           = mk(WEBGPU_GRAPH_MAX_FRONT * 4, ST | CS);
+                g.bDepthCount[L]         = mk(16, ST | CD | CS);
+                g.bDepthSorted[L]        = mk(WEBGPU_GRAPH_MAX_FRONT * 8, ST | CS);
+                g.bDepthSortedIdx[L]     = mk(WEBGPU_GRAPH_MAX_FRONT * 4, ST | CS);
+                g.bDepthStair[L]         = mk((2 * WEBGPU_GRAPH_MAX_FRONT + 2) * 8, ST | CS);
+                g.bDepthIndirect[L]      = mk(16, ST | IND | CD | CS);
+                g.bDepthShadeIndirect[L] = mk(16, ST | IND | CD | CS);
+                g.uDepthCol[L]           = mk(48, GPUBufferUsage.UNIFORM | CD);
+            }
+            g.uDepthDots = mk(48, GPUBufferUsage.UNIFORM | CD);
+            // Stair-line bind groups bind only fixed buffers (uScene/staircase/colour) →
+            // built once. Compute + dots bind groups touch growable pos/layerOf → rebuilt
+            // on grow below.
+            for (let L = 1; L < WEBGPU_GRAPH_MAX_DEPTH; L++) {
+                g.depthStairLineBG[L] = this.device.createBindGroup({ layout: this.stairLineBgl, entries: [
+                    { binding: 0, resource: { buffer: g.uScene } },
+                    { binding: 1, resource: { buffer: g.bDepthStair[L] } },
+                    { binding: 2, resource: { buffer: g.uDepthCol[L] } },
+                ] });
+            }
         }
         const grew = g.bPos !== oldPos || g.bCol !== oldCol || g.bSize !== oldSize ||
                      g.bOnFront !== oldFront || g.bFrontRadius !== oldRad || g.bLayerOf !== oldLayer;
@@ -1119,6 +1250,26 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
                 { binding: 2, resource: bg(g.bPeeled) }, { binding: 3, resource: bg(g.bLayerOf) },
                 { binding: 4, resource: bg(g.bOnTmp) },
             ] });
+            g.depthDotsBindGroup = this.device.createBindGroup({ layout: this.depthDotsBgl, entries: [
+                { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bPos) },
+                { binding: 2, resource: bg(g.bLayerOf) }, { binding: 3, resource: bg(g.uDepthDots) },
+            ] });
+            // Per deeper-layer compute bind groups: compactLayer (layerOf→idx/count) and
+            // the shared ranksort/emit (idx→sorted→staircase) over per-layer buffers.
+            for (let L = 1; L < WEBGPU_GRAPH_MAX_DEPTH; L++) {
+                g.depthCompactBG[L] = this.device.createBindGroup({ layout: this.depthCompactBgl, entries: [
+                    { binding: 0, resource: { buffer: g.uDepth, offset: 0, size: 16 } },
+                    { binding: 1, resource: bg(g.bLayerOf) },
+                    { binding: 2, resource: bg(g.bDepthIdx[L]) }, { binding: 3, resource: bg(g.bDepthCount[L]) },
+                ] });
+                g.depthStairBG[L] = this.device.createBindGroup({ layout: this.stairBgl, entries: [
+                    { binding: 0, resource: bg(g.uStair) }, { binding: 1, resource: bg(g.bPos) },
+                    { binding: 2, resource: bg(g.bDepthIdx[L]) }, { binding: 3, resource: bg(g.bDepthCount[L]) },
+                    { binding: 4, resource: bg(g.bDepthSorted[L]) }, { binding: 5, resource: bg(g.bDepthSortedIdx[L]) },
+                    { binding: 6, resource: bg(g.bDepthStair[L]) }, { binding: 7, resource: bg(g.bDepthIndirect[L]) },
+                    { binding: 8, resource: bg(g.bDepthShadeIndirect[L]) },
+                ] });
+            }
         }
         g.count = w;
         g.key = opts.key;
@@ -1158,6 +1309,23 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             hc[0], hc[1], hc[2], 0,
             fo[0], fo[1], fo[2], fo[3] ?? 0,
         ]));
+        // G4 depth render colours. The depth overlay always uses --frontier-color (not the
+        // worst-mode purple override), matching the SVG .depth-* CSS; the dot ring is --panel.
+        const dCol = opts.depthColor || [0.06, 0.09, 0.16];
+        const dPanel = opts.panelColor || [1, 1, 1];
+        this.device.queue.writeBuffer(g.uDepthDots, 0, new Float32Array([
+            g.depth, 3.0, 1.0, 0,            // depth cap, dot radius, ring px
+            dCol[0], dCol[1], dCol[2], 1,
+            dPanel[0], dPanel[1], dPanel[2], 1,
+        ]));
+        // Per deeper-layer stair colour = frontier rgb at the SVG's per-layer opacity
+        // max(0.3, 0.9·0.72^L). Only .stair (binding read by the stair-line shader) matters.
+        for (let L = 1; L < WEBGPU_GRAPH_MAX_DEPTH; L++) {
+            const op = Math.max(0.3, 0.9 * Math.pow(0.72, L));
+            this.device.queue.writeBuffer(g.uDepthCol[L], 0, new Float32Array([
+                dCol[0], dCol[1], dCol[2], op,  0, 0, 0, 0,  0, 0, 0, 0,
+            ]));
+        }
         // The skyline runs HERE — i.e. only on scene-dirty frames, by
         // construction (this point is only reached when the key changed). The
         // submit lands on the queue BEFORE present()'s, so the same-frame cloud
@@ -1231,6 +1399,19 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             };
             dpass(this.pDepthInit, 0);
             for (let L = 0; L < g.depth; L++) { dpass(this.pDepthSky, L); dpass(this.pDepthMark, L); }
+            // Per deeper layer: gather its members (compactLayer) then reuse the shared
+            // ranksort/emit to sort + emit its staircase into the per-layer buffer.
+            for (let L = 1; L < g.depth; L++) {
+                dev.queue.writeBuffer(g.bDepthCount[L], 0, new Uint32Array(4));
+                dev.queue.writeBuffer(g.bDepthIndirect[L], 0, new Uint32Array([0, 1, 0, 0]));
+                dev.queue.writeBuffer(g.bDepthShadeIndirect[L], 0, new Uint32Array([0, 1, 0, 0]));
+                { const cp = enc.beginComputePass(); cp.setPipeline(this.pDepthCompact);
+                  cp.setBindGroup(0, g.depthCompactBG[L], [L * 256]); cp.dispatchWorkgroups(wg); cp.end(); }
+                for (const pipe of [this.pSceneRanksort, this.pSceneEmit]) {
+                    const cp = enc.beginComputePass();
+                    cp.setPipeline(pipe); cp.setBindGroup(0, g.depthStairBG[L]); cp.dispatchWorkgroups(wgF); cp.end();
+                }
+            }
         }
         // Pick a free staging buffer (double-buffered: a still-mapped buffer
         // from a previous scene-dirty frame must not be re-targeted). At
@@ -1342,6 +1523,24 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
         rp.setPipeline(this.pPoints);
     };
 
+    // G4: depth (onion-peel) layers. Deepest-first staircases (so shallower layers end
+    // up on top), then ONE faded-dots pass over the whole cloud (the shader degenerates
+    // every point not on a layer 1..depth-1). drawIndirect vertex counts came from emit,
+    // so a layer with no points (K==0) draws nothing. No-op at depth 1.
+    P._drawGraphDepth = function (rp) {
+        const g = this.graph;
+        if (!g || !(g.count > 0) || !(g.depth > 1)) return;
+        for (let L = g.depth - 1; L >= 1; L--) {
+            rp.setPipeline(this.pSceneStairLine);
+            rp.setBindGroup(0, g.depthStairLineBG[L]);
+            rp.drawIndirect(g.bDepthIndirect[L], 0);
+        }
+        rp.setPipeline(this.pDepthDots);
+        rp.setBindGroup(0, g.depthDotsBindGroup);
+        rp.draw(6, g.count);
+        rp.setPipeline(this.pPoints);
+    };
+
     // G3: the glyph text — drawn LAST in present() (on top of everything). Tick labels
     // + frontier names; halo+fill glyph instances composite via the premultiplied blend.
     P._drawGraphText = function (rp) {
@@ -1376,7 +1575,10 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
                          "bFrontSorted", "bFrontSortedIdx", "bStaircase", "bStairIndirect",
                          "bShadeIndirect", "bHv", "bFrontRadius", "bHvScalar",
                          "uStair", "uHv", "uGraphCol", "bGlyph",
-                         "bPeeled", "bLayerOf", "bOnTmp", "uDepth"]) g[k]?.destroy();
+                         "bPeeled", "bLayerOf", "bOnTmp", "uDepth", "uDepthDots"]) g[k]?.destroy();
+        for (const arr of ["bDepthIdx", "bDepthCount", "bDepthSorted", "bDepthSortedIdx",
+                           "bDepthStair", "bDepthIndirect", "bDepthShadeIndirect", "uDepthCol"])
+            for (const b of g[arr] || []) b?.destroy();
         for (const s of g.stage || []) s?.destroy();
         this.glyphTex?.destroy(); this.glyphTex = null; this.glyph = null;
         this.graph = null;
@@ -1537,7 +1739,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
         // ── G4 invariant: GPU onion-peel layer sizes == the CPU oracle. Read layerOf[]
         // back, tally points per layer 0..depth-1, and compare to __bl2d_depthLayers
         // (script.js paretoLayers). depthMis -1 when depth==1 (no peeling requested).
-        let depthMis = -1, depthLayersGpu = null;
+        let depthMis = -1, depthLayersGpu = null, depthStairMis = -1;
         if (g.depth > 1) {
             const lo = await pointRenderer._readback(g.bLayerOf, g.count * 4, Uint32Array);
             depthLayersGpu = new Array(g.depth).fill(0);
@@ -1545,6 +1747,14 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             const cpu = window.__bl2d_depthLayers || [];
             depthMis = Math.abs(depthLayersGpu.length - cpu.length);
             for (let L = 0; L < g.depth; L++) depthMis += Math.abs((depthLayersGpu[L] || 0) - (cpu[L] || 0));
+            // Per deeper-layer staircase vertex count == 1 + 2·K_L (the CPU R sequence),
+            // read straight from each layer's emit-written indirect draw args.
+            depthStairMis = 0;
+            for (let L = 1; L < g.depth; L++) {
+                const ind = await pointRenderer._readback(g.bDepthIndirect[L], 16, Uint32Array);
+                const expect = 1 + 2 * (depthLayersGpu[L] || 0);
+                if (ind[0] !== expect) depthStairMis++;
+            }
         }
 
         return {
@@ -1555,7 +1765,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             frontMis, frontCount, cardPidsMatch,
             stairVertMis, hvMis, hvMaxRel, radiusMis, shadeQuadrant,
             glyphCount, glyphMis, tickMis, atlasMissing, glyphUploadPath, atlasW, atlasH,
-            depthMis, depthLayersGpu, depth: g.depth,
+            depthMis, depthLayersGpu, depthStairMis, depth: g.depth,
             frontReads: g.frontReads,
             uploads: g.uploads,
             key: g.key,

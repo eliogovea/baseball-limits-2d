@@ -4199,6 +4199,9 @@ class WebGPURenderer {
         // optional-chained no-ops when the file isn't loaded or the scene is empty.
         this._drawGraphShade?.(rp);
         this._drawGraphScene?.(rp);
+        // G-track G4: depth (onion-peel) layers — faded staircases + dots, ABOVE the
+        // cloud and UNDER the live frontier (matches the SVG depth-layers z-order).
+        this._drawGraphDepth?.(rp);
         // The cloud sits at the background layer (behind trails, heads, frontier dots).
         // Phase-5 spring path: vertex-pull the SMOOTHED pos[] (pass 0 = non-front cloud);
         // the frontier dots (pass 1) + the GPU staircase are drawn LAST, on top. Phase-4
@@ -5702,10 +5705,22 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         if (legendGlobalEl) legendGlobalEl.hidden = false;
     }
 
+    // ── G-track gate (computed here, before the depth/staircase draws that read it). ──
+    const gpuGraph = !!(
+        pointRenderer instanceof WebGPURenderer &&
+        pointRenderer.graphMode &&
+        typeof pointRenderer.uploadScene === "function" &&
+        !filters.evt && !filters.smooth && !filters.groupCareer
+    );
+    window.__bl2d_gpuGraph = gpuGraph;
+    // G3: hide the SVG axis tick TEXT when the GPU draws it (keep the <text> nodes for
+    // a11y; tick MARKS + domain path keep their stroke). Class-gated in styles.css.
+    document.body.classList.toggle("gpugraph", gpuGraph);
+
     // Onion-peeling: draw the deeper Pareto layers (1…n) behind the live
     // frontier, fading outward. Non-interactive so the real frontier keeps its
     // clicks, tooltips, and cards. Deepest first so layer 0 ends up on top.
-    if (depthLayers.length > 1) {
+    if (depthLayers.length > 1 && !gpuGraph) {   // G4: the GPU draws depth layers under gpuGraph
         const dg = g.append("g").attr("class", "depth-layers");
         for (let i = depthLayers.length - 1; i >= 1; i--) {
             const layer = depthLayers[i];
@@ -5787,17 +5802,6 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // this gate and gpuCloud are mutually exclusive (gpuCloud requires filters.evt).
     // The uploadScene typeof check makes the gate falsy if webgpu-graph.js didn't
     // load (e.g. an old bundle) — the Phase-3 instanced path then runs unchanged.
-    const gpuGraph = !!(
-        pointRenderer instanceof WebGPURenderer &&
-        pointRenderer.graphMode &&
-        typeof pointRenderer.uploadScene === "function" &&
-        !filters.evt && !filters.smooth && !filters.groupCareer
-    );
-    window.__bl2d_gpuGraph = gpuGraph;
-    // G3: hide the SVG axis tick TEXT when the GPU draws it (keep the <text> nodes for
-    // a11y; tick MARKS + domain path keep their stroke). Class-gated in styles.css.
-    document.body.classList.toggle("gpugraph", gpuGraph);
-
     // Group-career suppresses the staircase + HV shade: with only a handful of
     // career dots tracing trajectories, the Pareto envelope clutters more than it
     // clarifies — the focus is the trails + heads.
@@ -6010,6 +6014,10 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             xDomain: xScale.domain(), yDomain: yScale.domain(),
             stairColor: [...stairRgb, 0.55], hvColor: hvRgb, frontOverride,
             depth: peelDepth,   // G4: GPU onion-peel layer count (1 = frontier only)
+            // Depth overlay always uses --frontier-color (not the worst-mode purple) + a
+            // --panel dot ring, matching the SVG .depth-* CSS.
+            depthColor: rgb01(frontierCss),
+            panelColor: rgb01(getComputedStyle(document.documentElement).getPropertyValue("--panel").trim() || "#ffffff"),
         });
         pointRenderer.writeSceneScale(xScale, yScale, margin, width, height, xSign, ySign);
         // The pixel-space bg instances must not double-draw under the scene, and
