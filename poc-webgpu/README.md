@@ -1,5 +1,10 @@
 # poc-webgpu — browser WebGPU twin of poc-vulkan
 
+> **Historical note (S3d):** this POC fetches the `.evt`/STEV stat files
+> (`../data/pbp/{hr,sb}.evt.gz`), which were **removed** when the main app migrated to the
+> BL2S stat layer (see `docs/ROADMAP.md` §S3). The POC was intentionally not ported;
+> recover the `.evt.gz` files (and `scripts/build_stat_streams.js`) from git history to run it.
+
 A standalone page that runs the same GPU event-streaming architecture as
 [`poc-vulkan/`](../poc-vulkan), but in the browser via **WebGPU + WASM**:
 

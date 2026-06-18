@@ -1,5 +1,10 @@
 # `poc-webgpu-spring` — GPU spring motion + GPU Pareto skyline + fully-GPU staircase (WebGPU)
 
+> **Historical note (S3d):** this POC fetches the `.evt`/STEV stat files
+> (`../data/pbp/{hr,sb}.evt.gz`), which were **removed** when the main app migrated to the
+> BL2S stat layer (see `docs/ROADMAP.md` §S3). The POC was intentionally not ported;
+> recover the `.evt.gz` files (and `scripts/build_stat_streams.js`) from git history to run it.
+
 The browser **WebGPU twin** of [`../poc-vulkan-spring`](../poc-vulkan-spring), and the spring
 evolution of [`../poc-webgpu`](../poc-webgpu). Same MLB **(HR, SB)** history sweep, but the motion
 and the frontier are now computed on the GPU — and, unlike the Vulkan twin, **the frontier staircase

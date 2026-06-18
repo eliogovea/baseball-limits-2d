@@ -1035,55 +1035,12 @@ function evtEligible(xDim, yDim) {
     // from Lahman data.points, open growing from .evt — pitching is all step events).
     return !!evtReg() && !!evtDimSpec(xDim) && !!evtDimSpec(yDim);
 }
-// Decode one STEV ("stat event") blob — a single counting stat's full-history per-player
-// event stream (data/pbp/<stat>.evt.gz, built by build_stat_streams.js). One file per
-// stat (HR, SB, …); buildEvtModel loads the two/few a chart needs. Layout:
-//   "STEV"                  4-byte magic
-//   version                 1 byte
-//   statName                u8 len + name bytes
-//   numDates, numSeasons    2× u16  — global date table size, #seasons
-//   seasons[numSeasons]     per season: u16 year, u16 #dates  (lets yearOf[] be rebuilt)
-//   doy[numDates]           u16 each — day-of-year per global date index
-//   P                       u32 — #players
-//   names[P]                per player: u8 len + name bytes
-//   players[P]              per player: varint n, then n×(varint dDate, varint dCum)
-// The two inner streams are DELTA-encoded and LEB128 varint-packed: dates and cumulative
-// values are both monotone, so storing successive DIFFERENCES keeps every number tiny
-// (1 byte each, usually) and the gzip layer compresses the rest. We prefix-sum the deltas
-// back (`gd += `, `run += `) into absolute global-date indices and absolute cumulative
-// totals as we read — so evtAsOf can binary-search a player's value as of any date.
-function decodeStev(buf) {
-    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-    const dec = new TextDecoder(); let off = 0;
-    if (dec.decode(buf.subarray(0, 4)) !== "STEV") throw new Error("bad STEV magic");
-    off = 4; off++;                                   // version
-    const snLen = buf[off++]; const stat = dec.decode(buf.subarray(off, off + snLen)); off += snLen;
-    const numDates = dv.getUint16(off, true); off += 2;
-    const numSeasons = dv.getUint16(off, true); off += 2;
-    const seasons = [];
-    for (let i = 0; i < numSeasons; i++) { const year = dv.getUint16(off, true); off += 2; const nD = dv.getUint16(off, true); off += 2; seasons.push({ year, nDates: nD }); }
-    const doy = new Uint16Array(numDates);
-    for (let i = 0; i < numDates; i++) { doy[i] = dv.getUint16(off, true); off += 2; }
-    const P = dv.getUint32(off, true); off += 4;
-    const names = new Array(P);
-    for (let i = 0; i < P; i++) { const nl = buf[off++]; names[i] = dec.decode(buf.subarray(off, off + nl)); off += nl; }
-    // LEB128 varint reader: 7 data bits per byte, high bit = "more bytes follow".
-    const rv = () => { let v = 0, s = 0, b; do { b = buf[off++]; v |= (b & 127) << s; s += 7; } while (b & 128); return v >>> 0; };
-    const byName = new Map();
-    for (let i = 0; i < P; i++) {
-        const n = rv(); const dates = new Uint16Array(n); const cum = new Uint16Array(n);
-        let gd = 0, run = 0;                          // running date index + running cumulative total
-        for (let k = 0; k < n; k++) { gd += rv(); run += rv(); dates[k] = gd; cum[k] = run; }  // un-delta
-        byName.set(names[i], { dates, cum });
-    }
-    return { stat, numDates, seasons, doy, byName };
-}
-// ── BL2S decoders (the normalized stat layer that supersedes STEV; see
+// ── BL2S decoders (the normalized stat layer that replaced the old STEV/.evt files; see
 // docs/data-formats.md §BL2S and scripts/decode_stat.py, the reference reader these
 // mirror). Three file kinds share the 'BL2S' magic: kind 0 = the shared player dimension,
 // kind 1 = one counting stat's per-player date-keyed timeline, kind 2 = the global
-// game-date table the cursor steps over. buildEvtModel stitches them into the same model
-// shape decodeStev used to feed, so everything downstream is unchanged.
+// game-date table the cursor steps over. buildEvtModel stitches them into the model shape
+// the smooth-mode pipeline expects, so everything downstream is unchanged.
 function bl2sHeader(buf, expectKind) {
     if (new TextDecoder().decode(buf.subarray(0, 4)) !== "BL2S") throw new Error("bad BL2S magic");
     const kind = buf[6];                              // [4]=major [5]=minor [6]=kind

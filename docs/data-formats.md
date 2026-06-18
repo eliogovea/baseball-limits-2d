@@ -15,7 +15,7 @@ regenerates from raw sources.
 | BL2D | player × season blob | inlined in `dist/index.html` | `build_bundle.py` | offline bundle | **live** |
 | BL2E | one play/event | `data/pbp/e1910..e2025.bl2e.gz` (76.8 MB) | `convert_retrosheet_events.py` | nothing at runtime (research/archival) | **archival** |
 | **BL2S** | one stat, star schema | `data/pbp/stat_*.bl2s.gz` (batting 20 + pitching 25 = 45 files, ~17 MB) | `build_stat_files.py` | nothing yet — S3 wires it in | **current target** |
-| `.evt` / STEV | one stat, sparse timeline | `data/pbp/*.evt.gz` (40 files, ~13 MB) | `build_stat_streams.js` | nothing — superseded by BL2S in S3b/S3c | **dead code — removed at S3d** |
+| ~~`.evt` / STEV~~ | one stat, sparse timeline | _removed in S3d_ (was `data/pbp/*.evt.gz`) | _removed_ (`build_stat_streams.js`) | — superseded by BL2S | **removed — git history only** |
 | BL2P | player × game | `data/pbp/b1920..b2025.bl2p.gz` (~12 MB, batting only) | `convert_retrosheet_pbp.py` | rate-stat smooth fallback, group-career animation | **deprecated — removed at S4** |
 
 **What the app reads today:** Lahman CSVs (static + season points), **BL2S** (smooth mode,
@@ -202,11 +202,13 @@ strips NTM rows, rewrites playerID → disambiguated display name via
 
 ## Deprecated formats (specs in git history)
 
-- **`.evt` / STEV** — single-stat sparse timeline (~2 MB resident decoded → instant
-  full-history scrubbing), built from `.bl2p` (so 1920–2025 AL/NL batting only).
-  Magic `"STEV"`; global date table + per-player varint `(dateDelta, count)` blocks.
-  The app's smooth mode today; replaced file-for-file by BL2S in S3b/S3c and deleted
-  in S3d. Full spec: `docs/pbp-evt-format.md` in git history (pre-consolidation).
+- **`.evt` / STEV** *(removed in S3d — data + code in git history)* — single-stat
+  sparse timeline (~2 MB resident decoded → instant full-history scrubbing), built from
+  `.bl2p` (so 1920–2025 AL/NL batting only). Magic `"STEV"`; global date table +
+  per-player varint `(dateDelta, count)` blocks. Was the app's smooth mode; replaced by
+  BL2S in S3b/S3c, then the 40 `*.evt.gz` files, `scripts/build_stat_streams.js`, the
+  `decodeStev` reader, and the `evt-demo.html`/`.js` standalone demo were deleted in S3d.
+  Full spec: `docs/pbp-evt-format.md` in git history (pre-consolidation).
 - **BL2P** — per-game counting-stat deltas, bit-packed sparse columnar, one gzipped
   file per season (~150 KB batting). Its remaining consumers (`.evt` builder,
   rate-stat-pair fallback, group-career animation) migrate or retire in S3/S4. Full

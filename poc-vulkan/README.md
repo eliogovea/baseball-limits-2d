@@ -2,8 +2,9 @@
 
 A small, self-contained native C + **Vulkan** proof-of-concept that animates every
 MLB batter as a point in **(HR, SB)** space, sweeping through history with the whole
-computation on the GPU. It's the native port of the project's `.evt` HR×SB animation
-idea (see the main D3 app's `evt-demo.html`).
+computation on the GPU. It's the native port of the project's HR×SB animation idea
+(originally prototyped in the standalone `evt-demo.html`, removed in S3d — see git history;
+the main D3 app's smooth mode is the production version, now BL2S-backed).
 
 ## What it does
 

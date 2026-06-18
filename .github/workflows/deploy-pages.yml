@@ -22,10 +22,11 @@ name: Deploy Pages (main + branch previews)
 #
 # ── ASSET POLICY ─────────────────────────────────────────────────────────────────────
 #   Only runtime web assets ship (see the rsync excludes below): the HTML/CSS/JS, vendor
-#   d3, icons, and the data the app actually fetches (the *_limits_*/people CSVs and the
-#   .bl2p.gz/.evt.gz play-by-play streams). Build scripts, docs, the raw Lahman source
-#   CSVs + zip, and the unused .bl2e.gz/.bl2s.gz formats are excluded. A branch with no
-#   index.html at its root (e.g. a native POC) is skipped, not deployed empty.
+#   d3, icons, and the data the app actually fetches (the *_limits_*/people CSVs, the
+#   .bl2p.gz play-by-play streams, and the .bl2s.gz stat layer that drives smooth mode).
+#   Build scripts, docs, the raw Lahman source CSVs + zip, and the archival .bl2e.gz corpus
+#   are excluded. A branch with no index.html at its root (e.g. a native POC) is skipped,
+#   not deployed empty.
 
 on:
   push:
@@ -76,7 +77,6 @@ jobs:
             --exclude 'data/pitching_lahman_*.csv' \
             --exclude 'data/halloffame_lahman_*.csv' \
             --exclude 'data/pbp/*.bl2e.gz' \
-            --exclude 'data/pbp/*.bl2s.gz' \
             ./ _site/
           # GitHub Pages must not run Jekyll over our underscore-free static tree.
           touch _site/.nojekyll

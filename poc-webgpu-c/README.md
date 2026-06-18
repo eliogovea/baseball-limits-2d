@@ -1,5 +1,11 @@
 # poc-webgpu-c — the "full WASM" POC (all-C WebGPU twin of poc-vulkan)
 
+> **Historical note (S3d):** this POC bundles the `.evt`/STEV stat files
+> (`../data/pbp/{hr,sb}.evt.gz`) into `app.data`; those files were **removed** when the main
+> app migrated to the BL2S stat layer (see `docs/ROADMAP.md` §S3). The POC was intentionally
+> not ported; recover the `.evt.gz` files (and `scripts/build_stat_streams.js`) from git
+> history to rebuild it.
+
 **Option 2** from [`docs/rendering.md`](../docs/rendering.md) (original POC design: `poc-webgpu-design.md`, git history): the
 **whole app, including the WebGPU orchestration, written in C** against
 `<webgpu/webgpu.h>` and compiled to WASM via emcc + the **emdawnwebgpu** port.

@@ -47,7 +47,7 @@ now finishes the in-flight render track, then returns to the (still-unstarted) d
 | # | Track | Phases | Status | Who can do it |
 |---|---|---|---|---|
 | 1 | **G6** — graduate the G-track | G6a–G6f (detail in [`rendering.md`](rendering.md) §"G6") | ◑ in progress (GPU-default shipped) | G6a + G6b-flip need a **human/browser MANUAL**; G6c–G6f are agent-doable headless |
-| 2 | **S3** — app onto BL2S, remove `.evt` | S3a–S3e | ◑ S3a–S3c shipped (builder + batting & pitching swap); S3d (removal) next | fully agent-doable |
+| 2 | **S3** — app onto BL2S, remove `.evt` | S3a–S3e | ✅ S3a–S3d shipped (builder + batting & pitching swap + `.evt` removal); S3e optional | fully agent-doable |
 | 3 | **S4** — retire BL2P | S4a–S4b | ☐ not started | fully agent-doable |
 | 4 | **S-track** — GPU season animation (folds in G5i) | SA0–SA4 | ☐ design only | agent-doable; SA2 motion needs a MANUAL |
 | 5 | **S2** — Lahman complement | — | ☐ after S3/S4 | fully agent-doable |
@@ -62,10 +62,11 @@ Two independent entry points — pick based on whether a human is available to d
 - **If it's an unattended coding agent:** do the headless-doable G6 close-out —
   **G6c** (one-run parity matrix), **G6d** (device-loss recovery test), **G6e** (rotated
   Y-axis title on the GPU) — in any order; they don't depend on the MANUAL. *Or* continue
-  the data track at **S3d** (S3a builder + S3b/S3c app swap onto BL2S — batting AND pitching —
-  all shipped and verified; the `.evt` files + STEV path are now dead code). S3d deletes the
-  40 `.evt.gz`, `build_stat_streams.js`, and `decodeStev`, and drops the deploy-workflow
-  `*.bl2s.gz` exclude so the BL2S files actually ship.
+  the data track at **S4** (retire BL2P — S3a–S3d all shipped: the BL2S builder, the
+  batting+pitching app swap, and the `.evt`/STEV removal are done). S4 migrates the
+  remaining `.bl2p` readers (rate-pair smooth fallback + group-career) onto BL2S
+  components, then deletes the 106 `.bl2p.gz`. S3e (`qualDeps:["PA"]`) is an optional
+  one-file-load optimization that can come any time.
 
 _Resume at the first unticked phase of the chosen track. Update the checkbox + the
 progress-trail row + the README "Ideas & future work" entry in the SAME commit as each
@@ -141,15 +142,18 @@ the same Lahman-disambiguated `(b.YYYY)` names `.evt` used, so `metaFor()` is un
 - **Gate:** `ds=pitching` smooth view animates season steps; Ryan 5,714 SO on chart;
   ERA (rate) qualifier behavior unchanged.
 
-### [ ] S3d — removal + deploy
+### [x] S3d — removal + deploy *(shipped)*
 
-- Delete `data/pbp/*.evt.gz` (40 files), `scripts/build_stat_streams.js`, the now-dead
-  `decodeStev`/STEV path in script.js. `.github/workflows/deploy-pages.yml`: drop the
-  `*.bl2s.gz` exclude (~line 79) so `stat_*.bl2s.gz` ships; update its `.evt` comment
-  and the size note in §Infrastructure below. POC README notes (decision 3). README
-  backlog update (same commit).
-- **Gate:** zero `.evt` requests in a full session (server log); bundle builds;
-  `file://` bundle still falls back static.
+- Deleted `data/pbp/*.evt.gz` (40 files), `scripts/build_stat_streams.js`, the dead
+  `decodeStev`/STEV path in script.js, **and** the standalone `evt-demo.html`/`.js`
+  STEV demo (it only existed to demo the removed format; user-confirmed). Dropped the
+  `*.bl2s.gz` exclude in `.github/workflows/deploy-pages.yml` so `stat_*.bl2s.gz` ships,
+  and updated its asset-policy comment + the §Infrastructure note. POC README notes
+  (decision 3: `poc-webgpu`/`-spring`/`-c` parse `.evt` in their cores — not ported,
+  data in git history). README backlog updated (same commit).
+- **Gate:** zero `.evt` requests in a full session (verified — no `.evt`/STEV refs left
+  in script.js except historical comments); bundle builds (4.5 MB, never read `.evt`);
+  `file://` bundle still falls back to the static view.
 
 ### [ ] S3e (optional) — `qualDeps: ["PA"]`
 
@@ -163,7 +167,7 @@ the same Lahman-disambiguated `(b.YYYY)` names `.evt` used, so `metaFor()` is un
 | S3a builder (dates + pitching) | ✅ shipped | kind 2 `decode_dates`; `--dates-from-pa` (19,839 dates) + `--pitching` (12,134 players, 23 stats, epoch 1871). Gates: round-trip, dates==stat_pa, Cy Young 511 W / Ryan 5,714 SO / Rivera 652 SV |
 | S3b batting swap | ✅ shipped | decodeBl2sPlayers/Stat/Dates + loadEvtDim/Dates; buildEvtModel rebuilds yearOf/doy/season-boundaries from stat_dates + epoch-day→index, counts→cum. Gates: Bonds 762/514 + Henderson 296/1406, t=19980908 deep-link round-trips, before/after PNG byte-identical (desktop+mobile) |
 | S3c pitching swap | ✅ shipped | same prefix-generic loader (`stat_p_*`, epoch 1871). Ryan 5,714 SO / 324 W, Cy Young 511 W, Pedro ERA 2.93 / IP 2,827 (qualifier path), 1871–2025 |
-| S3d removal + deploy | ☐ not started | |
+| S3d removal + deploy | ✅ shipped | deleted 40 `.evt.gz` + `build_stat_streams.js` + `decodeStev` + `evt-demo.html/.js`; deploy workflow now ships `*.bl2s.gz`. POC READMEs noted |
 | S3e qualDeps opt (optional) | ☐ not started | |
 
 ---
@@ -289,8 +293,9 @@ additive; a `delete`-event job prunes a branch's folder):
 
 Key facts: a branch only deploys itself if `deploy-pages.yml` exists **on that branch**
 (workflows run from the pushed branch); only runtime assets ship (rsync excludes
-`scripts/`, `docs/`, `dist/`, `*.md`, raw Lahman CSVs, and currently the unused
-`*.bl2e.gz`/`*.bl2s.gz` — the BL2S exclude drops at S3d), ~43 MB/branch; a branch with
+`scripts/`, `docs/`, `dist/`, `*.md`, raw Lahman CSVs, and the archival `*.bl2e.gz`
+corpus — since S3d the `*.bl2s.gz` stat layer ships and the `*.evt.gz` files are gone),
+~45 MB/branch; a branch with
 no root `index.html` is skipped (native POCs produce no broken previews); web POCs get
 their own branch with the POC's `index.html` at the branch **root**. Deleted files
 linger until the branch-delete cleanup runs. Pages setting: Deploy from a branch →
