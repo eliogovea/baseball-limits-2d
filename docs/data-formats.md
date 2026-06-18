@@ -14,7 +14,7 @@ regenerates from raw sources.
 | Lahman CSVs | player × season | `data/*_limits_1871-2025.csv` | `convert_csv_lahman*.py` | app static views, season points, bundle | **live** (canonical seasons) |
 | BL2D | player × season blob | inlined in `dist/index.html` | `build_bundle.py` | offline bundle | **live** |
 | BL2E | one play/event | `data/pbp/e1910..e2025.bl2e.gz` (76.8 MB) | `convert_retrosheet_events.py` | nothing at runtime (research/archival) | **archival** |
-| **BL2S** | one stat, star schema | `data/pbp/stat_*.bl2s.gz` (19 files, 15.3 MB) | `build_stat_files.py` | nothing yet — S3 wires it in | **current target** |
+| **BL2S** | one stat, star schema | `data/pbp/stat_*.bl2s.gz` (batting 20 + pitching 25 = 45 files, ~17 MB) | `build_stat_files.py` | nothing yet — S3 wires it in | **current target** |
 | `.evt` / STEV | one stat, sparse timeline | `data/pbp/*.evt.gz` (40 files, ~13 MB) | `build_stat_streams.js` | the app's smooth mode today | **deprecated — removed at S3d** |
 | BL2P | player × game | `data/pbp/b1920..b2025.bl2p.gz` (~12 MB, batting only) | `convert_retrosheet_pbp.py` | rate-stat smooth fallback, group-career animation | **deprecated — removed at S4** |
 
@@ -72,16 +72,22 @@ game-date table the cursor steps over:
 epoch (as above) | u32 nDates | nDates × varint dateDelta
 ```
 
-**Pitching layer (S3a):** `stat_p_players` / `stat_p_<stat>` / `stat_p_dates`, built
-from Lahman season totals (`--pitching`; one season-end cell per player-season, date =
-Oct 1; **per-file epoch 1871-01-01** — the header carries epoch per file, so pitching
-keeps 1871–2025).
+**Pitching layer (S3a, shipped):** `stat_p_players` / 23 × `stat_p_<stat>` /
+`stat_p_dates` (epoch **1871-01-01**, so pitching keeps 1871–2025), built from Lahman
+season totals (`build_stat_files.py --pitching`; one season-end cell per player-season at
+Oct 1, stints summed; the 23 counting columns — BAOpp/ERA are client-side rate stats).
+The dimension's **retroID slot holds the opaque Lahman `playerID`** (stable identity) and
+its **handedness byte holds `throws`** (pitchers are colored by throwing arm), reusing the
+0=R/1=L/else=3 encoding the batting dimension uses for `bats`. Batting's own
+`stat_dates.bl2s.gz` (epoch 1910-04-14) is built `--dates-from-pa` (union of the committed
+`stat_pa` cell dates — no plays.csv re-download).
 
 ### Decoding
 
 `decode_players()` → `players[gpid] = (retroID, name, birthYear, bats)`.
 `decode_stat()` → `series[gpid] = [(date, count), …]`; prefix-sum the date-deltas for
-absolute days, map via the epoch to calendar dates. Rate stats (AVG/OBP/…) are computed
+absolute days, map via the epoch to calendar dates. `decode_dates()` → `{epoch, dates}`
+(the kind-2 global game-date table, prefix-summed epoch-days). Rate stats (AVG/OBP/…) are computed
 client-side from component counting-stat files. Value as of a cursor date = binary
 search for the last `date ≤ cursor`, summing counts. Player `displayName` comes from
 `build_retro_to_display` — the same Lahman-disambiguated `(b.YYYY)` names the app's

@@ -1,9 +1,10 @@
 """Decoder for the BL2S normalized stat layer (see docs/data-formats.md §BL2S).
 
-Two file kinds, both magic 'BL2S':
+Three file kinds, all magic 'BL2S':
   - PLAYERS (kind 0): the shared dimension — gpid -> retroID, display name, birthYear, bats.
   - STAT    (kind 1): one counting stat, per-player date-keyed timeline (player-grouped
     varint date-deltas). Date = days since the epoch stored in the file (1910-04-14).
+  - DATES   (kind 2): the global game-date table the cursor steps over (varint date-deltas).
 
     from decode_stat import decode_players, decode_stat
     dim = decode_players("data/pbp/stat_players.bl2s.gz")   # dim["players"][gpid] = (...)
@@ -72,10 +73,30 @@ def decode_stat(path):
     return {"name": name, "epoch": (ey, em, ed), "series": series}
 
 
+def decode_dates(path):
+    """Kind 2 — the global game-date table. Returns {"epoch": (y,m,d), "dates": [day,...]}
+    where day = days since epoch (prefix-summed from the stored varint deltas)."""
+    raw = gzip.decompress(Path(path).read_bytes())
+    major, minor, p = _header(raw, 2)
+    ey, em, ed = struct.unpack("<HBB", raw[p:p + 4]); p += 4
+    n, = struct.unpack("<I", raw[p:p + 4]); p += 4
+    dates = []
+    day = 0
+    for _ in range(n):
+        dd, p = _varint(raw, p); day += dd
+        dates.append(day)
+    return {"epoch": (ey, em, ed), "dates": dates}
+
+
 if __name__ == "__main__":
     import sys
     path = sys.argv[1]
-    if "players" in path:
+    if "dates" in path:
+        d = decode_dates(path)
+        ds = d["dates"]
+        print(f"BL2S dates: {len(ds):,} | epoch {d['epoch']} | "
+              f"range {ds[0] if ds else '-'}..{ds[-1] if ds else '-'}")
+    elif "players" in path:
         d = decode_players(path)
         print(f"BL2S players: {len(d['players']):,} | epoch {d['epoch']}")
         for rid, nm, by, bats in d["players"][:5]:

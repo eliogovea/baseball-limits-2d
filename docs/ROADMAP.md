@@ -47,7 +47,7 @@ now finishes the in-flight render track, then returns to the (still-unstarted) d
 | # | Track | Phases | Status | Who can do it |
 |---|---|---|---|---|
 | 1 | **G6** — graduate the G-track | G6a–G6f (detail in [`rendering.md`](rendering.md) §"G6") | ◑ in progress (GPU-default shipped) | G6a + G6b-flip need a **human/browser MANUAL**; G6c–G6f are agent-doable headless |
-| 2 | **S3** — app onto BL2S, remove `.evt` | S3a–S3e | ☐ not started | fully agent-doable |
+| 2 | **S3** — app onto BL2S, remove `.evt` | S3a–S3e | ◑ S3a shipped (builder); S3b next | fully agent-doable |
 | 3 | **S4** — retire BL2P | S4a–S4b | ☐ not started | fully agent-doable |
 | 4 | **S-track** — GPU season animation (folds in G5i) | SA0–SA4 | ☐ design only | agent-doable; SA2 motion needs a MANUAL |
 | 5 | **S2** — Lahman complement | — | ☐ after S3/S4 | fully agent-doable |
@@ -61,8 +61,10 @@ Two independent entry points — pick based on whether a human is available to d
   default). Both are detailed in `rendering.md` §"G6".
 - **If it's an unattended coding agent:** do the headless-doable G6 close-out —
   **G6c** (one-run parity matrix), **G6d** (device-loss recovery test), **G6e** (rotated
-  Y-axis title on the GPU) — in any order; they don't depend on the MANUAL. *Or* start
-  **S3a** (the BL2S builder), which is fully actionable and was the original priority.
+  Y-axis title on the GPU) — in any order; they don't depend on the MANUAL. *Or* continue
+  the data track at **S3b** (S3a — the BL2S builder, dates file + pitching layer — shipped;
+  the app-side swap is next). S3b wires `script.js` onto BL2S; it touches the app, so it
+  ends with the snap.js viewport suite.
 
 _Resume at the first unticked phase of the chosen track. Update the checkbox + the
 progress-trail row + the README "Ideas & future work" entry in the SAME commit as each
@@ -93,7 +95,7 @@ identical
 Player names: the BL2S dimension's displayName comes from `build_retro_to_display` —
 the same Lahman-disambiguated `(b.YYYY)` names `.evt` used, so `metaFor()` is unchanged.
 
-### [ ] S3a — builder: global date-table files + pitching layer
+### [x] S3a — builder: global date-table files + pitching layer *(shipped)*
 
 - **Why a dates file:** STEV carried a global game-date table (`numDates`/`seasons[]`/
   `doy[]`) the cursor steps over; BL2S stat files store per-player epoch-days only, and
@@ -157,7 +159,7 @@ the same Lahman-disambiguated `(b.YYYY)` names `.evt` used, so `metaFor()` is un
 
 | Phase | Status | Notes / commit |
 |---|---|---|
-| S3a builder (dates + pitching) | ☐ not started | |
+| S3a builder (dates + pitching) | ✅ shipped | kind 2 `decode_dates`; `--dates-from-pa` (19,839 dates) + `--pitching` (12,134 players, 23 stats, epoch 1871). Gates: round-trip, dates==stat_pa, Cy Young 511 W / Ryan 5,714 SO / Rivera 652 SV |
 | S3b batting swap | ☐ not started | |
 | S3c pitching swap | ☐ not started | |
 | S3d removal + deploy | ☐ not started | |

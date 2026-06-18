@@ -38,13 +38,27 @@ import gzip
 from decode_stat import decode_stat, decode_players
 from build_bl2e_corpus import fetch_season_csv
 from convert_retrosheet_events import build_retro_to_display, PEOPLE_PATH
+from _display_name import build_display_name_map
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "data" / "pbp"
 EPOCH_DATE = datetime.date(1910, 4, 14)
 EPOCH = EPOCH_DATE.toordinal()
-MAJOR, MINOR = 1, 0
+# Format MINOR 0->1 bump introduced by kind 2 (the dates file) in S3a. The decoder is
+# version-agnostic (reads minor, never enforces it), so the batting kind-0/1 files already
+# committed at MINOR 0 keep working unchanged until the next full plays.csv rebuild.
+MAJOR, MINOR = 1, 1
 BATS = {"R": 0, "L": 1, "B": 2}
+
+# --- Pitching layer (S3a): Lahman season totals, one season-end cell per player-season ---
+PITCHING_CSV = ROOT / "data" / "pitching_lahman_1871-2025.csv"
+PITCH_EPOCH_DATE = datetime.date(1871, 1, 1)   # per-file epoch -> pitching keeps 1871-2025
+# The 23 counting columns of Lahman Pitching (BAOpp/ERA are client-side rate stats, excluded).
+PITCH_STATS = ["W", "L", "G", "GS", "CG", "SHO", "SV", "IPouts", "H", "ER", "HR", "BB", "SO",
+               "IBB", "WP", "HBP", "BK", "BFP", "GF", "R", "SH", "SF", "GIDP"]
+# Pitchers are colored by THROWING arm, so the dimension's handedness byte holds `throws`
+# (same 0=R/1=L/else=3 encoding the batting dimension uses for `bats`).
+THROWS = {"R": 0, "L": 1}
 
 # stat -> the plays.csv column whose '1' (or value, for RBI) adds to the BATTER's total.
 # H is the sum of the four hit columns; G (appearances) is derived from PA afterward.
@@ -71,16 +85,6 @@ def varint(n):
         else:
             out.append(b)
             return bytes(out)
-
-
-def load_bio(path):
-    bio = {}
-    with open(path, encoding="utf-8-sig") as f:
-        for row in csv.DictReader(f):
-            r = (row.get("retroID") or "").strip()
-            if r:
-                bio[r] = (row.get("birthYear") or "", row.get("bats") or "")
-    return bio
 
 
 def gdate_of(yyyymmdd):
@@ -145,13 +149,13 @@ def cells_by_player(agg_stat):
     return by
 
 
-def write_stat_file(name, by_player):
+def write_stat_file(name, by_player, epoch_date=EPOCH_DATE):
     buf = io.BytesIO()
     buf.write(b"BL2S")
     buf.write(struct.pack("<BBB", MAJOR, MINOR, 1))
     nb = name.encode("utf-8")
     buf.write(struct.pack("<B", len(nb))); buf.write(nb)
-    buf.write(struct.pack("<HBB", EPOCH_DATE.year, EPOCH_DATE.month, EPOCH_DATE.day))
+    buf.write(struct.pack("<HBB", epoch_date.year, epoch_date.month, epoch_date.day))
     buf.write(struct.pack("<I", len(by_player)))
     prev_g = 0
     for g in sorted(by_player):
@@ -165,18 +169,46 @@ def write_stat_file(name, by_player):
     return gzip.compress(buf.getvalue(), 9)
 
 
-def write_player_dim(rows):
+def write_player_dim(rows, epoch_date=EPOCH_DATE, hand_map=BATS):
+    """rows = [(id, displayName, birthYear, hand), ...]. `hand` is bats for the batting
+    dimension, throws for pitching; `hand_map` maps it to the handedness byte (else 3)."""
     buf = io.BytesIO()
     buf.write(b"BL2S")
     buf.write(struct.pack("<BBB", MAJOR, MINOR, 0))
-    buf.write(struct.pack("<HBB", EPOCH_DATE.year, EPOCH_DATE.month, EPOCH_DATE.day))
+    buf.write(struct.pack("<HBB", epoch_date.year, epoch_date.month, epoch_date.day))
     buf.write(struct.pack("<I", len(rows)))
-    for rid, name, by, bats in rows:
+    for rid, name, by, hand in rows:
         rb = rid.encode("utf-8"); nmb = name.encode("utf-8")[:255]
         buf.write(struct.pack("<B", len(rb))); buf.write(rb)
         buf.write(struct.pack("<B", len(nmb))); buf.write(nmb)
-        buf.write(struct.pack("<HB", int(by) if by.isdigit() else 0, BATS.get(bats, 3)))
+        buf.write(struct.pack("<HB", int(by) if by.isdigit() else 0, hand_map.get(hand, 3)))
     return gzip.compress(buf.getvalue(), 9)
+
+
+def write_dates_file(dates, epoch_date=EPOCH_DATE):
+    """Kind 2 — the global game-date table the cursor steps over. `dates` = sorted distinct
+    epoch-days; same prefix-delta varint scheme as a stat file's per-player cell dates."""
+    buf = io.BytesIO()
+    buf.write(b"BL2S")
+    buf.write(struct.pack("<BBB", MAJOR, MINOR, 2))
+    buf.write(struct.pack("<HBB", epoch_date.year, epoch_date.month, epoch_date.day))
+    buf.write(struct.pack("<I", len(dates)))
+    prev = 0
+    for d in dates:
+        buf.write(varint(d - prev)); prev = d
+    return gzip.compress(buf.getvalue(), 9)
+
+
+def load_people_hand(path, key, hand_col):
+    """People.csv -> dict[key_col -> (birthYear, hand_col)] for a dimension's bio + handedness.
+    Batting keys by retroID/bats; pitching keys by playerID/throws."""
+    bio = {}
+    with open(path, encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            k = (row.get(key) or "").strip()
+            if k:
+                bio[k] = (row.get("birthYear") or "", row.get(hand_col) or "")
+    return bio
 
 
 def write_csv(by_player):
@@ -188,23 +220,113 @@ def write_csv(by_player):
     return gzip.compress(out.getvalue().encode(), 9)
 
 
+def build_dates_from_pa(out_dir):
+    """Emit stat_dates.bl2s.gz (kind 2) by unioning the dates in the committed stat_pa file.
+    Every game date has a PA, so this is the full game-date table without a plays.csv pass."""
+    pa = decode_stat(out_dir / "stat_pa.bl2s.gz")
+    dates = sorted({dt for cells in pa["series"].values() for dt, _ in cells})
+    data = write_dates_file(dates, EPOCH_DATE)
+    (out_dir / "stat_dates.bl2s.gz").write_bytes(data)
+    print(f"  stat_dates.bl2s.gz: {len(dates):,} dates, {len(data) / 1024:.1f} KB "
+          f"(epoch {EPOCH_DATE})")
+
+
+def build_pitching(out_dir, also_csv=False):
+    """Build the pitching BL2S family from Lahman season totals (stat_p_*). One season-end
+    cell per (player, season) at Oct 1; stints summed; per-file epoch 1871-01-01."""
+    epoch_ord = PITCH_EPOCH_DATE.toordinal()
+    display = build_display_name_map(str(PEOPLE_PATH))
+    bio = load_people_hand(PEOPLE_PATH, "playerID", "throws")
+    pid_to_gpid = {}
+
+    def intern(pid):
+        i = pid_to_gpid.get(pid)
+        if i is None:
+            i = len(pid_to_gpid); pid_to_gpid[pid] = i
+        return i
+
+    agg = {s: defaultdict(int) for s in PITCH_STATS}    # agg[stat][(gpid, day)] = season total
+    dates_set = set()
+    nrows = 0
+    with open(PITCHING_CSV, encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            pid = (row.get("playerID") or "").strip()
+            if not pid:
+                continue
+            g = intern(pid)
+            day = datetime.date(int(row["yearID"]), 10, 1).toordinal() - epoch_ord
+            dates_set.add(day)
+            for s in PITCH_STATS:
+                v = row.get(s, "")
+                if v and v != "0":
+                    try:
+                        agg[s][(g, day)] += int(v)
+                    except ValueError:
+                        pass                            # non-integer (shouldn't happen for counts)
+            nrows += 1
+
+    rows = [None] * len(pid_to_gpid)
+    for pid, i in pid_to_gpid.items():
+        by, throws = bio.get(pid, ("", ""))
+        rows[i] = (pid, display.get(pid, pid), by, throws)   # retroID slot = Lahman playerID
+    pdata = write_player_dim(rows, PITCH_EPOCH_DATE, THROWS)
+    (out_dir / "stat_p_players.bl2s.gz").write_bytes(pdata)
+    print(f"source: Lahman {PITCHING_CSV.name} | {nrows:,} rows -> {len(rows):,} players")
+    print(f"\n  stat_p_players.bl2s.gz: {len(rows):,} players, {len(pdata) / 1024:,.0f} KB")
+
+    total = len(pdata)
+    print(f"  {'stat':8} {'players':>8} {'cells':>10} {'total':>12} {'KB':>7}")
+    for s in PITCH_STATS:
+        by = defaultdict(list)
+        for (g, day), ct in agg[s].items():
+            by[g].append((day, ct))
+        for g in by:
+            by[g].sort()
+        data = write_stat_file(s, by, PITCH_EPOCH_DATE)
+        (out_dir / f"stat_p_{s.lower()}.bl2s.gz").write_bytes(data)
+        total += len(data)
+        if also_csv:
+            (out_dir / f"stat_p_{s.lower()}.csv.gz").write_bytes(write_csv(by))
+        tot = sum(c for v in by.values() for _, c in v)
+        print(f"  {s:8} {len(by):>8,} {sum(len(v) for v in by.values()):>10,} "
+              f"{tot:>12,} {len(data) / 1024:>7,.0f}")
+
+    dates = sorted(dates_set)
+    ddata = write_dates_file(dates, PITCH_EPOCH_DATE)
+    (out_dir / "stat_p_dates.bl2s.gz").write_bytes(ddata)
+    total += len(ddata)
+    print(f"  stat_p_dates.bl2s.gz: {len(dates):,} dates, {len(ddata) / 1024:.1f} KB "
+          f"(epoch {PITCH_EPOCH_DATE})")
+    print(f"  TOTAL binary: {total / 1024 / 1024:.1f} MB" + (" (+ CSVs)" if also_csv else ""))
+
+
 def main():
     ap = argparse.ArgumentParser(description="Build the BL2S stat layer from Retrosheet plays.csv")
     ap.add_argument("years", nargs="?", default="1910-2025", help="year or START-END (default 1910-2025)")
     ap.add_argument("--out", default=str(OUT_DIR))
     ap.add_argument("--csv", action="store_true", help="also write gzipped per-stat CSVs")
+    ap.add_argument("--dates-from-pa", action="store_true",
+                    help="emit stat_dates.bl2s.gz (kind 2) by unioning the committed stat_pa file")
+    ap.add_argument("--pitching", action="store_true",
+                    help="build the pitching family (stat_p_*) from Lahman season totals")
     args = ap.parse_args()
+    out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
+    if args.dates_from_pa:
+        build_dates_from_pa(out_dir)
+        return
+    if args.pitching:
+        build_pitching(out_dir, args.csv)
+        return
     if "-" in args.years:
         lo, hi = (int(x) for x in args.years.split("-", 1))
         years = range(lo, hi + 1)
     else:
         years = [int(args.years)]
-    out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
     print(f"source: Retrosheet plays.csv {years.start if isinstance(years, range) else years[0]}.. | stats: {STATS}")
 
     agg, retro_to_gpid = aggregate(years)
     retro_to_display = build_retro_to_display(PEOPLE_PATH)
-    bio = load_bio(PEOPLE_PATH)
+    bio = load_people_hand(PEOPLE_PATH, "retroID", "bats")
     rows = [None] * len(retro_to_gpid)
     for r, i in retro_to_gpid.items():
         by, bats = bio.get(r, ("", ""))
