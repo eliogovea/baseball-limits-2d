@@ -342,12 +342,13 @@ let smoothLite = false;        // while playing/scrubbing: skip interaction-only
 let smoothLiteTimer = null;    // debounce → full (interactive) render after the user stops scrubbing
 let playbackSpeed = 1;         // ▶ playback speed multiplier (1× = the default sweep pace); live-adjustable
 let pbpGranularity = "pbp";    // cursor granularity: "pbp" (game-by-game, full date) | "season" (year-by-year, year only)
-const evtStreamCache = new Map(); // `${dataset}:${stat}` -> Promise<decoded STEV>  (resident once loaded)
-// Per-dataset .evt registry. `stats` = raw streamed counting columns (committed as
-// data/pbp/<prefix><stat>.evt.gz); `derived` = axes computed per player from cumulative
-// components (rate:true → ratio needing the qualifier threshold + qualified axis lock;
-// rate:false → monotonic sum). `qual` = the playing-time total (PA / IP) for the
-// rate-axis threshold and axis-lock floor. Keep in sync with build_stat_streams.js.
+const evtStreamCache = new Map(); // `${dataset}:${stat}` -> Promise<decoded BL2S stat>; also `:__dim__`/`:__dates__` (resident once loaded)
+// Per-dataset smooth-mode registry. `stats` = raw counting columns available as BL2S
+// stat files (data/pbp/stat_<prefix><stat>.bl2s.gz); `derived` = axes computed per player
+// from cumulative components (rate:true → ratio needing the qualifier threshold + qualified
+// axis lock; rate:false → monotonic sum). `qual` = the playing-time total (PA / IP) for the
+// rate-axis threshold and axis-lock floor. Keep `stats` in sync with the built BL2S layer
+// (scripts/build_stat_files.py).
 const EVT_REGISTRY = {
     batting: {
         prefix: "", thresholdField: "PA", qualDeps: ["AB", "BB", "HBP", "SH", "SF"],
@@ -1077,14 +1078,99 @@ function decodeStev(buf) {
     }
     return { stat, numDates, seasons, doy, byName };
 }
+// ── BL2S decoders (the normalized stat layer that supersedes STEV; see
+// docs/data-formats.md §BL2S and scripts/decode_stat.py, the reference reader these
+// mirror). Three file kinds share the 'BL2S' magic: kind 0 = the shared player dimension,
+// kind 1 = one counting stat's per-player date-keyed timeline, kind 2 = the global
+// game-date table the cursor steps over. buildEvtModel stitches them into the same model
+// shape decodeStev used to feed, so everything downstream is unchanged.
+function bl2sHeader(buf, expectKind) {
+    if (new TextDecoder().decode(buf.subarray(0, 4)) !== "BL2S") throw new Error("bad BL2S magic");
+    const kind = buf[6];                              // [4]=major [5]=minor [6]=kind
+    if (kind !== expectKind) throw new Error(`BL2S expected kind ${expectKind}, got ${kind}`);
+    return 7;
+}
+// kind 0 — players[gpid] = { retroID, name (display), birthYear, bats }. gpid = array index.
+function decodeBl2sPlayers(buf) {
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const dec = new TextDecoder(); let off = bl2sHeader(buf, 0);
+    off += 4;                                         // epoch (u16 year, u8 month, u8 day) — unused here
+    const n = dv.getUint32(off, true); off += 4;
+    const players = new Array(n);
+    for (let i = 0; i < n; i++) {
+        const il = buf[off++]; const rid = dec.decode(buf.subarray(off, off + il)); off += il;
+        const nl = buf[off++]; const nm = dec.decode(buf.subarray(off, off + nl)); off += nl;
+        const by = dv.getUint16(off, true); off += 2; const bats = buf[off++];
+        players[i] = { retroID: rid, name: nm, birthYear: by, bats };
+    }
+    return { players };
+}
+// kind 2 — the global game-date table: sorted distinct days since the file's epoch
+// (prefix-summed from the stored varint deltas), plus the epoch itself.
+function decodeBl2sDates(buf) {
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    let off = bl2sHeader(buf, 2);
+    const ey = dv.getUint16(off, true); off += 2; const em = buf[off++], ed = buf[off++];
+    const n = dv.getUint32(off, true); off += 4;
+    const rv = () => { let v = 0, s = 0, b; do { b = buf[off++]; v |= (b & 127) << s; s += 7; } while (b & 128); return v >>> 0; };
+    const dates = new Int32Array(n); let day = 0;
+    for (let i = 0; i < n; i++) { day += rv(); dates[i] = day; }
+    return { epoch: [ey, em, ed], dates };
+}
+// kind 1 — one counting stat: series.get(gpid) = { dates: Int32Array (absolute days since
+// the file epoch), counts: Uint16Array (per-date increments — NOT cumulative; buildEvtModel
+// prefix-sums these into the model's `cum`) }. Player records are gpid-ascending (delta).
+function decodeBl2sStat(buf) {
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const dec = new TextDecoder(); let off = bl2sHeader(buf, 1);
+    const nl = buf[off++]; const stat = dec.decode(buf.subarray(off, off + nl)); off += nl;
+    const ey = dv.getUint16(off, true); off += 2; const em = buf[off++], ed = buf[off++];
+    const nP = dv.getUint32(off, true); off += 4;
+    const rv = () => { let v = 0, s = 0, b; do { b = buf[off++]; v |= (b & 127) << s; s += 7; } while (b & 128); return v >>> 0; };
+    const series = new Map(); let gpid = 0;
+    for (let i = 0; i < nP; i++) {
+        gpid += rv();
+        const nc = rv();
+        const dates = new Int32Array(nc); const counts = new Uint16Array(nc); let day = 0;
+        for (let k = 0; k < nc; k++) { day += rv(); dates[k] = day; counts[k] = rv(); }
+        series.set(gpid, { dates, counts });
+    }
+    return { stat, epoch: [ey, em, ed], series };
+}
+// One-time-per-dataset loads: the shared dimension and the global date table (cached in
+// evtStreamCache under sentinel keys so a chart only fetches them once).
+function loadEvtDim() {
+    const reg = evtReg();
+    const key = `${activeDatasetKey}:__dim__`;
+    if (evtStreamCache.has(key)) return evtStreamCache.get(key);
+    const p = fetch(`data/pbp/stat_${reg.prefix}players.bl2s.gz`).then(async (r) => {
+        if (!r.ok) return null;
+        const ds = r.body.pipeThrough(new DecompressionStream("gzip"));
+        return decodeBl2sPlayers(new Uint8Array(await new Response(ds).arrayBuffer()));
+    }).catch(() => null);
+    evtStreamCache.set(key, p);
+    return p;
+}
+function loadEvtDates() {
+    const reg = evtReg();
+    const key = `${activeDatasetKey}:__dates__`;
+    if (evtStreamCache.has(key)) return evtStreamCache.get(key);
+    const p = fetch(`data/pbp/stat_${reg.prefix}dates.bl2s.gz`).then(async (r) => {
+        if (!r.ok) return null;
+        const ds = r.body.pipeThrough(new DecompressionStream("gzip"));
+        return decodeBl2sDates(new Uint8Array(await new Response(ds).arrayBuffer()));
+    }).catch(() => null);
+    evtStreamCache.set(key, p);
+    return p;
+}
 function loadEvtStat(stat) {
     const reg = evtReg();
     const key = `${activeDatasetKey}:${stat}`;
     if (evtStreamCache.has(key)) return evtStreamCache.get(key);
-    const p = fetch(`data/pbp/${reg.prefix}${stat.toLowerCase()}.evt.gz`).then(async (r) => {
+    const p = fetch(`data/pbp/stat_${reg.prefix}${stat.toLowerCase()}.bl2s.gz`).then(async (r) => {
         if (!r.ok) return null;
         const ds = r.body.pipeThrough(new DecompressionStream("gzip"));
-        return decodeStev(new Uint8Array(await new Response(ds).arrayBuffer()));
+        return decodeBl2sStat(new Uint8Array(await new Response(ds).arrayBuffer()));
     }).catch(() => null);
     evtStreamCache.set(key, p);
     return p;
@@ -1097,32 +1183,62 @@ async function buildEvtModel(xDim, yDim) {
     const deps = new Set([...xs.deps, ...ys.deps]);
     if (usesQual) reg.qualDeps.forEach((d) => deps.add(d));
     const depList = [...deps];
-    const loaded = await Promise.all(depList.map(loadEvtStat));
-    if (loaded.some((s) => !s)) return null;
+    // BL2S: the shared dimension + the global date table (one-time) plus the per-stat
+    // files this axis pair needs. All three kinds must load for the model to be valid.
+    const [dim, dateTable, ...loaded] = await Promise.all([loadEvtDim(), loadEvtDates(), ...depList.map(loadEvtStat)]);
+    if (!dim || !dateTable || loaded.some((s) => !s)) return null;
     const streams = {}; depList.forEach((d, i) => streams[d] = loaded[i]);
-    const ref = loaded[0];
-    const numDates = ref.numDates;
-    const empty = { dates: new Uint16Array(0), cum: new Uint16Array(0) };
-    const yearOf = new Int16Array(numDates); let g = 0;
-    const seasonStartByYear = new Map();              // year → first global date index (for season-mode differencing)
-    for (const s of ref.seasons) { if (!seasonStartByYear.has(s.year)) seasonStartByYear.set(s.year, g); for (let i = 0; i < s.nDates && g < numDates; i++) yearOf[g++] = s.year; }
-    const seasonEndByYear = new Map();                // year → last global date index (for season-granularity snapping)
+
+    // Global date table → numDates + the per-index calendar tables (yearOf/doy) and the
+    // season boundaries the cursor steps over. STEV baked these into each stat file; BL2S
+    // factors them into stat_dates, so we rebuild them here from the epoch + day list.
+    // `dayToIdx` turns each stat cell's absolute epoch-day into a global date index (the
+    // unit every model consumer — evtAsOf, evtSeasonSnap, yearOf[], doy[] — speaks).
+    const absDays = dateTable.dates;                  // sorted distinct days since the epoch
+    const numDates = absDays.length;
+    const [ey, em, ed] = dateTable.epoch;
+    const epochMs = Date.UTC(ey, em - 1, ed);
+    const dayToIdx = new Map();
+    const yearOf = new Int16Array(numDates);          // calendar year per global date index
+    const doy = new Uint16Array(numDates);            // 1-based day-of-year (Jan 1 = 1), matching pbpDayToYmd
+    for (let i = 0; i < numDates; i++) {
+        dayToIdx.set(absDays[i], i);
+        const dt = new Date(epochMs + absDays[i] * 86400000);
+        const y = dt.getUTCFullYear(); yearOf[i] = y;
+        doy[i] = Math.round((Date.UTC(y, dt.getUTCMonth(), dt.getUTCDate()) - Date.UTC(y, 0, 1)) / 86400000) + 1;
+    }
+    // Season boundaries = calendar-year runs (the day list is sorted, so each year's dates
+    // are contiguous): first index of each year, and the last index before the next year.
+    const seasonStartByYear = new Map();              // year → first global date index (season-mode differencing)
+    for (let i = 0; i < numDates; i++) { const y = yearOf[i]; if (!seasonStartByYear.has(y)) seasonStartByYear.set(y, i); }
+    const seasonEndByYear = new Map();                // year → last global date index (season-granularity snapping)
     { const yrs = [...seasonStartByYear.keys()].sort((a, b) => a - b);
       for (let i = 0; i < yrs.length; i++) seasonEndByYear.set(yrs[i], (i + 1 < yrs.length ? seasonStartByYear.get(yrs[i + 1]) : numDates) - 1); }
 
-    // One record per player who appears in any needed stream: their component series,
-    // their debut/last year (debut → era colour; both → season-mode active-window skip),
-    // and a final-state value (for axis lock).
-    const names = new Set(); for (const d of depList) for (const k of streams[d].byName.keys()) names.add(k);
+    // One record per gpid that appears in any needed stream. Convert each BL2S cell list
+    // (absolute epoch-day + per-date count) into the model's (global-index + cumulative)
+    // component shape, carry debut/last year (debut → era colour; both → season-mode
+    // active-window skip), and track the career-end value for the axis lock.
+    const empty = { dates: new Uint16Array(0), cum: new Uint16Array(0) };
+    const gpids = new Set(); for (const d of depList) for (const g of streams[d].series.keys()) gpids.add(g);
     const players = [];
     let xMax = 0, yMax = 0;
     const cEnd = {};
-    for (const nm of names) {
+    for (const gpid of [...gpids].sort((a, b) => a - b)) {
         const comp = {}; let debut = numDates, last = 0;
-        for (const d of depList) { const s = streams[d].byName.get(nm) || empty; comp[d] = s; if (s.dates.length) { debut = Math.min(debut, s.dates[0]); last = Math.max(last, s.dates[s.dates.length - 1]); } }
-        const debutYear = debut < numDates ? yearOf[debut] : ref.seasons[0].year;
+        for (const d of depList) {
+            const cells = streams[d].series.get(gpid);
+            if (!cells || !cells.dates.length) { comp[d] = empty; continue; }
+            const nc = cells.dates.length;
+            const dates = new Uint16Array(nc), cum = new Uint16Array(nc); let run = 0;
+            for (let k = 0; k < nc; k++) { dates[k] = dayToIdx.get(cells.dates[k]); run += cells.counts[k]; cum[k] = run; }
+            comp[d] = { dates, cum };
+            debut = Math.min(debut, dates[0]); last = Math.max(last, dates[nc - 1]);
+        }
+        const name = (dim.players[gpid] && dim.players[gpid].name) || String(gpid);
+        const debutYear = debut < numDates ? yearOf[debut] : yearOf[0];
         const lastYear = yearOf[last] || debutYear;
-        players.push({ name: nm, comp, debutYear, lastYear });
+        players.push({ name, comp, debutYear, lastYear });
         // axis lock: career-end value; for rate axes only count players with enough PA
         // so a 3-for-3 cup-of-coffee 1.000 AVG doesn't blow out the frame.
         for (const d of depList) cEnd[d] = (comp[d].cum.length ? comp[d].cum[comp[d].cum.length - 1] : 0);
@@ -1133,8 +1249,8 @@ async function buildEvtModel(xDim, yDim) {
         if (isFinite(yv) && (!ys.rate || qual)) yMax = Math.max(yMax, yv);
     }
     return { xDim, yDim, xs, ys, usesQual, qual: reg.qual, thresholdField: reg.thresholdField, depList,
-             numDates, players, doy: ref.doy, yearOf, seasonStartByYear, seasonEndByYear,
-             xMax, yMax, minYear: ref.seasons[0].year, maxYear: ref.seasons[ref.seasons.length - 1].year };
+             numDates, players, doy, yearOf, seasonStartByYear, seasonEndByYear,
+             xMax, yMax, minYear: yearOf[0], maxYear: yearOf[numDates - 1] };
 }
 // Season granularity: snap a global date index to its season's LAST date (so the cursor
 // steps year-by-year and shows the full-season state).

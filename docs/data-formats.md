@@ -15,12 +15,14 @@ regenerates from raw sources.
 | BL2D | player × season blob | inlined in `dist/index.html` | `build_bundle.py` | offline bundle | **live** |
 | BL2E | one play/event | `data/pbp/e1910..e2025.bl2e.gz` (76.8 MB) | `convert_retrosheet_events.py` | nothing at runtime (research/archival) | **archival** |
 | **BL2S** | one stat, star schema | `data/pbp/stat_*.bl2s.gz` (batting 20 + pitching 25 = 45 files, ~17 MB) | `build_stat_files.py` | nothing yet — S3 wires it in | **current target** |
-| `.evt` / STEV | one stat, sparse timeline | `data/pbp/*.evt.gz` (40 files, ~13 MB) | `build_stat_streams.js` | the app's smooth mode today | **deprecated — removed at S3d** |
+| `.evt` / STEV | one stat, sparse timeline | `data/pbp/*.evt.gz` (40 files, ~13 MB) | `build_stat_streams.js` | nothing — superseded by BL2S in S3b/S3c | **dead code — removed at S3d** |
 | BL2P | player × game | `data/pbp/b1920..b2025.bl2p.gz` (~12 MB, batting only) | `convert_retrosheet_pbp.py` | rate-stat smooth fallback, group-career animation | **deprecated — removed at S4** |
 
-**What the app reads today:** Lahman CSVs (static + season points), `.evt` (smooth mode —
-auto-enabled for every eligible axis pair), `.bl2p` (rate-stat-pair fallback +
-group-career). BL2S is committed and verified but unread until S3b.
+**What the app reads today:** Lahman CSVs (static + season points), **BL2S** (smooth mode,
+batting + pitching — auto-enabled for every eligible counting-stat axis pair via the
+`decodeBl2s*` decoders + `buildEvtModel`, since S3b/S3c), `.bl2p` (rate-stat-pair fallback +
+group-career). The `.evt`/STEV path is dead code pending the S3d deletion. The `file://`
+bundle can't fetch `data/pbp/` so smooth falls back to the static view there (by design).
 
 **Serving note (applies to every `data/pbp/*.gz`):** the server must send `.gz` as raw
 bytes (Content-Type `application/gzip`, **no** `Content-Encoding`) so the browser's
