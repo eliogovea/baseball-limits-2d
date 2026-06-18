@@ -48,7 +48,7 @@ now finishes the in-flight render track, then returns to the (still-unstarted) d
 |---|---|---|---|---|
 | 1 | **G6** — graduate the G-track | G6a–G6f (detail in [`rendering.md`](rendering.md) §"G6") | ◑ in progress (GPU-default shipped) | G6a + G6b-flip need a **human/browser MANUAL**; G6c–G6f are agent-doable headless |
 | 2 | **S3** — app onto BL2S, remove `.evt` | S3a–S3e | ✅ S3a–S3d shipped (builder + batting & pitching swap + `.evt` removal); S3e optional | fully agent-doable |
-| 3 | **S4** — retire BL2P | S4a–S4b | ☐ not started | fully agent-doable |
+| 3 | **S4** — retire BL2P | S4a–S4b | ◑ S4a shipped (readers on BL2S); S4b (removal) next | fully agent-doable |
 | 4 | **S-track** — GPU season animation (folds in G5i) | SA0–SA4 | ☐ design only | agent-doable; SA2 motion needs a MANUAL |
 | 5 | **S2** — Lahman complement | — | ☐ after S3/S4 | fully agent-doable |
 
@@ -179,18 +179,24 @@ After S3d, `.bl2p`'s remaining consumers are the **rate-stat-pair smooth fallbac
 carries every batting counting component 1910–2025, so both can ride BL2S components
 instead, and the BL2P layer (~12 MB, 1920–2025 AL/NL batting only) retires.
 
-### [ ] S4a — migrate the remaining `.bl2p` readers to BL2S
+### [x] S4a — migrate the remaining `.bl2p` readers to BL2S *(shipped)*
 
-- Rate-pair smooth fallback: should largely disappear — post-S3 every batting counting
-  component is a BL2S file, so `EVT_DERIVED` eligibility covers the pairs that used to
-  fall back. Audit which pairs still hit the `.bl2p` path and route them through BL2S
-  component loads.
-- Group-career animation (`pbpBuildGroupCareer`): rebuild its per-player
-  career-cumulative as-of values from BL2S component series instead of per-season
-  `.bl2p` decode. Coverage *improves* (1910 vs 1920 start, + Negro/Federal).
-- **Gate:** group-career spot-check (a selected player's career-end dot == Lahman
-  career total on a counting axis; monotone trail); rate-pair smooth view parity
-  before/after; no `.bl2p` requests in a full session.
+- Rate-pair fallback: the audit found exactly one straggler — **RC** (Runs Created) was
+  the only offered dim not in `EVT_REGISTRY`, so RC charts fell to `.bl2p`. Added RC to
+  `batting.derived` (deps H/2B/3B/HR/AB/BB, rate:false, the same formula as
+  `aggregateCareer`), so every batting+pitching axis pair is now evt-eligible and the
+  `.bl2p` fallback is unreachable.
+- Group-career: kept the **hybrid** (user-chosen) — Lahman prior completed seasons (so
+  pre-1910 + exact career-end == Lahman survive) + the OPEN season's game-by-game partial
+  now sourced from a BL2S **all-components** model (`buildEvtModel(…, allComponents)` loads
+  every `reg.stats` file; new `evtBuildGroupCareer` replaces `pbpBuildGroupCareer`).
+  Group-career rides the `pbpEvt` cursor now, not the `.bl2p` timeline; `enableGroupCareer`
+  dropped `forceBl2p`.
+- **Gate (verified):** group-career career-end == Lahman — Bonds 762/514, Henderson
+  297/1406, Mays 660/339 (== the Lahman CSV's season-sum, matching the static career dot);
+  Bonds trail monotone; a full group-career session fetches **only `.bl2s`** (19 files),
+  zero `.bl2p`/`.evt`; RC chart loads via BL2S. The `.bl2p` engine is now dead code (S4b
+  removes it).
 
 ### [ ] S4b — removal
 

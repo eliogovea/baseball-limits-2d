@@ -365,6 +365,9 @@ const EVT_REGISTRY = {
             BABIP:{ deps: ["H", "HR", "AB", "SO", "SF"], rate: true, fn: (c) => { const d = c.AB - c.SO - c.HR + c.SF; return d > 0 ? (c.H - c.HR) / d : NaN; } },
             "BB%":{ deps: ["BB", "AB", "HBP", "SH", "SF"], rate: true, fn: (c) => { const pa = c.AB + c.BB + c.HBP + c.SH + c.SF; return pa > 0 ? c.BB / pa : NaN; } },
             "K%": { deps: ["SO", "AB", "BB", "HBP", "SH", "SF"], rate: true, fn: (c) => { const pa = c.AB + c.BB + c.HBP + c.SH + c.SF; return pa > 0 ? c.SO / pa : NaN; } },
+            // RC (Runs Created) is a volume stat (rate:false → no qualifier), recomputed from
+            // cumulative components so it matches aggregateCareer's career formula exactly.
+            RC:   { deps: ["H", "2B", "3B", "HR", "AB", "BB"], rate: false, fn: (c) => { const tb = c.H + c["2B"] + 2 * c["3B"] + 3 * c.HR; const den = c.AB + c.BB; return den > 0 ? (c.H + c.BB) * tb / den : NaN; } },
         },
     },
     pitching: {
@@ -962,7 +965,7 @@ function pbpComputeExtent(tl, xDim, yDim, filters, windowPoints, mode, datasetKe
 // all-player accumulating cloud.
 
 function groupCareerActive() {
-    return groupCareerMode && pbpTimeline && careerHighlights.size >= 1;
+    return groupCareerMode && (pbpEvt || pbpTimeline) && careerHighlights.size >= 1;
 }
 
 // The group's combined career span: earliest debut → latest final season, across
@@ -1015,6 +1018,51 @@ function pbpBuildGroupCareer(tl, resolved, xDim, yDim, filt, datasetKey) {
     window.__bl2d_groupCareerPoints = pts.map(p => ({ pid: p.playerID, x: p[xDim], y: p[yDim] }));
     window.__bl2d_groupCareerActive = true;
     return { points: pts, sY: tl.sYear, eY: openYear, pbpExtent };
+}
+
+// BL2S version of the group-career per-frame builder (the .bl2p one above is retired with
+// the BL2P layer in S4). Same hybrid: prior completed seasons at full Lahman totals (covers
+// pre-1910, which BL2S lacks until S2) + the OPEN season's game-by-game partial sourced from
+// the BL2S model (cumulative as-of the cursor minus the season's starting cumulative). The
+// model is built with allComponents, so the open-season row carries every counting stat
+// aggregateCareer sums. `d` is the model's global date index (the smooth-mode cursor).
+function evtBuildGroupCareer(model, d, xDim, yDim, filt, datasetKey) {
+    const cur = Math.max(0, Math.min(model.numDates - 1, d));
+    const O = model.yearOf[cur];
+    const start = model.seasonStartByYear.get(O);     // first global date index of the open year
+    const before = (start == null ? cur : start) - 1; // last index of year O-1 (evtAsOf → 0 at -1)
+    const group = new Set(careerHighlights.keys());
+    const seasonIndex = datasetState[datasetKey]?.playerIndex;
+    if (!model._byName) model._byName = new Map(model.players.map((p) => [p.name, p]));
+    const pts = [];
+    for (const pid of group) {
+        const seasons = (seasonIndex && seasonIndex.get(pid)) || [];
+        const priorFull = seasons.filter((s) => s.yearID < O);   // strict: open year only via its partial
+        const p = model._byName.get(pid);
+        let openRow = null;
+        if (p && start != null) {
+            const raw = { playerID: pid, yearID: String(O) };
+            let any = false;
+            for (const dep of model.depList) {
+                const v = evtAsOf(p.comp[dep], cur) - evtAsOf(p.comp[dep], before);
+                raw[dep] = v; if (v) any = true;
+            }
+            if (any) {                                  // ≥1 game in O by the cursor date
+                const s = seasons.find((r) => r.yearID === O);
+                raw.teamID = s ? s.teamID : "—"; raw.lgID = s ? s.lgID : "—";
+                openRow = (datasetKey === "pitching" ? parsePitchingRows([raw]) : parseBattingRows([raw]))[0];
+            }
+        }
+        const careerSeasons = openRow ? priorFull.concat(openRow) : priorFull;
+        if (!careerSeasons.length) continue;            // career not started by the cursor
+        careerSeasons.sort((a, b) => a.yearID - b.yearID);
+        pts.push(aggregateCareer(careerSeasons, datasetKey));
+    }
+    const pbpExtent = pbpComputeExtent({ dataset: datasetKey, sYear: model.winStartYear, eYear: model.winEndYear },
+        xDim, yDim, filt, datasetState[datasetKey].points, "career", datasetKey, group);
+    window.__bl2d_groupCareerPoints = pts.map((p) => ({ pid: p.playerID, x: p[xDim], y: p[yDim] }));
+    window.__bl2d_groupCareerActive = true;
+    return { points: pts, sY: model.winStartYear, eY: O, pbpExtent };
 }
 
 // ── .evt full-history mode (single counting-stat pair) ──────────────────────
@@ -1132,13 +1180,16 @@ function loadEvtStat(stat) {
     evtStreamCache.set(key, p);
     return p;
 }
-async function buildEvtModel(xDim, yDim) {
+async function buildEvtModel(xDim, yDim, allComponents = false) {
     const reg = evtReg();
     const xs = evtDimSpec(xDim), ys = evtDimSpec(yDim);
     if (!xs || !ys) return null;
     const usesQual = xs.rate || ys.rate;                  // a rate axis → need the qualifier (PA/IP) for the threshold
     const deps = new Set([...xs.deps, ...ys.deps]);
     if (usesQual) reg.qualDeps.forEach((d) => deps.add(d));
+    // Group-career needs every counting component (not just the axis pair) so each player's
+    // open-season partial row can feed aggregateCareer's full sum + rate recomputation.
+    if (allComponents) for (const s of reg.stats) deps.add(s);
     const depList = [...deps];
     // BL2S: the shared dimension + the global date table (one-time) plus the per-stat
     // files this axis pair needs. All three kinds must load for the model to be valid.
@@ -1569,7 +1620,14 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         let evtCareer = false, evtSeason = false;
         if (pbpEvt) {
             const cur = Math.max(pbpEvt.winStart, Math.min(pbpEvt.winEnd, pbpCursorIdx));
-            if (mode === "career") {
+            if (groupCareerActive()) {
+                // Group-career: one cumulative-career point per selected player (hybrid —
+                // Lahman priors + BL2S open-season partial). Drawn as moving heads + trails.
+                const built = evtBuildGroupCareer(pbpEvt, cur, xDim, yDim, { league, franchise }, activeDatasetKey);
+                points = built.points;
+                sY = built.sY; eY = built.eY; pbpExtent = built.pbpExtent;
+                groupCareer = true;
+            } else if (mode === "career") {
                 // Career: every player's cumulative (xDim,yDim) as of the cursor date —
                 // one point per player, all moving each frame. Axes lock to career maxima.
                 points = evtPointsAsOf(pbpEvt, cur);
@@ -2051,7 +2109,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         const xDim = document.getElementById("x-axis-select").value;
         const yDim = document.getElementById("y-axis-select").value;
         setPbpMsg("Loading…");
-        const model = await buildEvtModel(xDim, yDim);
+        const model = await buildEvtModel(xDim, yDim, groupCareerMode);   // group-career → all components
         // Guard a rapid axis/dataset change: if the selectors moved while we awaited,
         // a newer enableEvt is in flight — discard this stale model.
         if (document.getElementById("x-axis-select").value !== xDim ||
@@ -2149,10 +2207,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         groupCareerMode = true;
         groupTrailHistory.clear();
         if (pbpTimeline || pbpEvt) disableSmoothQuiet();
-        await enableSmooth(0, true);           // start at the group's earliest debut (.bl2p path)
-        // Warm the first few seasons so pressing play from the start doesn't stall on
-        // "Loading <year>…"; the per-frame pbpEnsureAhead keeps the rest loaded.
-        if (pbpTimeline) pbpEnsureAhead(pbpTimeline, 0, 5);
+        await enableSmooth(0);                 // start at the group's earliest debut (BL2S all-components model)
         syncGroupCareerToggle();
     }
     // Tear down the timeline without resetting groupCareerMode (used when rebuilding
