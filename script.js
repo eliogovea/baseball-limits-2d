@@ -3654,6 +3654,11 @@ class WebGPURenderer {
         // ON unless explicitly disabled with ?gpugraph=0 (the G6 graduation escape hatch).
         this.graphMode = new URLSearchParams(location.search).get("gpugraph") !== "0";
         this.graph = null;
+        // Per-frame: does the retained G-track scene own THIS frame? Set false while the
+        // career animation (spring/smooth) is active so present()'s _drawGraph* hooks don't
+        // re-draw the stale static scene over the animation. drawScatterPlot writes it each
+        // refresh (= gpuGraph); glide/interaction re-presents inherit the last value.
+        this.graphActive = false;
         // G5a — coalesced interaction re-present. Hover/pin overlays (G5b–e) want to
         // re-draw the GPU scene on every mousemove, but a synchronous present() per
         // mousemove would submit dozens of command buffers per frame for no visual gain
@@ -5622,6 +5627,13 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         !filters.evt && !filters.smooth && !filters.groupCareer
     );
     window.__bl2d_gpuGraph = gpuGraph;
+    // The retained G-track scene (this.graph) outlives a mode change — its buffers stay
+    // resident when we switch from a static view into the career animation (smooth), where
+    // gpuGraph goes false and uploadScene stops running. Without a per-frame signal the
+    // present() hooks would keep drawing that stale static cloud/frontier/staircase ON TOP
+    // of the animation. graphActive is that signal: the _drawGraph* hooks no-op unless the
+    // G-track owns THIS frame. (Set on the renderer, harmless on Canvas2D.)
+    if (pointRenderer) pointRenderer.graphActive = gpuGraph;
     // G3: hide the SVG axis tick TEXT when the GPU draws it (keep the <text> nodes for
     // a11y; tick MARKS + domain path keep their stroke). Class-gated in styles.css.
     document.body.classList.toggle("gpugraph", gpuGraph);

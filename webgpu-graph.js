@@ -1476,6 +1476,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
     // Draw the interaction overlays LAST in the frame (above text), so the hover/pin leader,
     // rings, and HV polygon sit on top of the whole chart. No-op when nothing is set.
     P._drawGraphInteraction = function (rp) {
+        if (!this.graphActive) return;       // suppress the retained scene during the animation
         const g = this.graph;
         if (!g) return;
         if (g.ringCount > 0 && g.ringsBG) {
@@ -1962,6 +1963,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
     // background layer (under trails / heads / frontier dots). Restores pPoints
     // because present()'s later drawPts calls assume it's still bound.
     P._drawGraphScene = function (rp) {
+        if (!this.graphActive) return;       // suppress the retained scene during the animation
         const g = this.graph;
         if (!g || !(g.count > 0)) return;
         rp.setPipeline(this.pSceneCloud);
@@ -1974,6 +1976,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
     // sits UNDER the dots (matching the SVG order: shade, then cloud, then dots). The
     // fan vertex count came from the GPU (bShadeIndirect), so a K==0 frame draws nothing.
     P._drawGraphShade = function (rp) {
+        if (!this.graphActive) return;       // suppress the retained scene during the animation
         const g = this.graph;
         if (!g || !(g.count > 0) || !g.bShadeIndirect) return;
         rp.setPipeline(this.pSceneHvShade);
@@ -1986,6 +1989,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
     // count from emit) then the GPU frontier dots (HV-sized, white-ringed; non-front
     // instances degenerate). Drawn AFTER the cloud + heads, mirroring drawFrontierDots.
     P._drawGraphOverlays = function (rp) {
+        if (!this.graphActive) return;       // suppress the retained scene during the animation
         const g = this.graph;
         if (!g || !(g.count > 0)) return;
         rp.setPipeline(this.pSceneStairLine);
@@ -2002,6 +2006,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
     // every point not on a layer 1..depth-1). drawIndirect vertex counts came from emit,
     // so a layer with no points (K==0) draws nothing. No-op at depth 1.
     P._drawGraphDepth = function (rp) {
+        if (!this.graphActive) return;       // suppress the retained scene during the animation
         const g = this.graph;
         if (!g || !(g.count > 0) || !(g.depth > 1)) return;
         // Shades first (deepest-first; flat 0.06 fans, src-over stacking darkens the core),
@@ -2026,6 +2031,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
     // era-B (shade → solid staircase → dots). Drawn after the cloud/depth, under the
     // live frontier — matching the SVG overlay layering. No-op when an overlay is off.
     P._drawGraphAux = function (rp) {
+        if (!this.graphActive) return;       // suppress the retained scene during the animation
         const g = this.graph;
         if (!g || !(g.count > 0)) return;
         if (g.ghostStairN > 1) {
@@ -2047,6 +2053,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
     // G3: the glyph text — drawn LAST in present() (on top of everything). Tick labels
     // + frontier names; halo+fill glyph instances composite via the premultiplied blend.
     P._drawGraphText = function (rp) {
+        if (!this.graphActive) return;       // suppress the retained scene during the animation
         const g = this.graph;
         if (!g || !(g.glyphCount > 0) || !g.glyphBindGroup) return;
         rp.setPipeline(this.pSceneGlyph);
