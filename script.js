@@ -3080,17 +3080,25 @@ const WEBGPU_SPRING_OMEGA = 12;
 // concurrent writers, so we bind the SAME buffers through a plain read-only array<u32> view
 // (a well-defined non-atomic read of atomic storage).
 const WEBGPU_SPRING_WGSL = `
-struct Spring { dt: f32, omega: f32, n: u32, _pad: u32 };
+struct Spring { dt: f32, omega: f32, n: u32, mode: u32 };   // mode: 0 career, 1 season (S-track)
 @group(0) @binding(0) var<uniform>             S:   Spring;
-@group(0) @binding(1) var<storage, read>       hr:  array<u32>;        // target X (the accumulated counter)
+@group(0) @binding(1) var<storage, read>       hr:  array<u32>;        // target X (the accumulated CAREER counter)
 @group(0) @binding(2) var<storage, read>       sb:  array<u32>;        // target Y
 @group(0) @binding(3) var<storage, read_write> pos: array<vec2<f32>>;  // rendered position (data units)
 @group(0) @binding(4) var<storage, read_write> vel: array<vec2<f32>>;  // motion state
+@group(0) @binding(5) var<storage, read>       baseHr: array<u32>;     // S-track season baseline: career X at the open season's start−1
+@group(0) @binding(6) var<storage, read>       baseSb: array<u32>;     // career Y at season start−1
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
   if (i >= S.n) { return; }
-  let tgt = vec2<f32>(f32(hr[i]), f32(sb[i]));   // 'target' is reserved in WGSL → tgt
+  var tgt = vec2<f32>(f32(hr[i]), f32(sb[i]));   // 'target' is reserved in WGSL → tgt
+  if (S.mode == 1u) {
+    // S-track season targeting: seasonValue = cum(d) − cum(seasonStart−1). The axis fn is
+    // linear with a zero intercept (evtGpuMonotone), so career-counter − baseline equals the
+    // within-season value exactly — clamp at 0 to absorb any pre-snapshot race.
+    tgt = max(tgt - vec2<f32>(f32(baseHr[i]), f32(baseSb[i])), vec2<f32>(0.0, 0.0));
+  }
   let x = pos[i];
   let v = vel[i];
   let wd = S.omega * S.dt;
@@ -3436,9 +3444,10 @@ class WebGPURenderer {
             layout: dev.createPipelineLayout({ bindGroupLayouts: [layout] }),
             compute: { module: dev.createShaderModule({ code }), entryPoint: entry } });
 
-        // spring: {uSpring, hr ro, sb ro, pos rw, vel rw}
+        // spring: {uSpring, hr ro, sb ro, pos rw, vel rw, baseHr ro, baseSb ro}
+        // (baseHr/baseSb are the S-track season baselines; ignored when uSpring.mode==0)
         this.springBgl = dev.createBindGroupLayout({ entries: [
-            un(0, C), ro(1, C), ro(2, C), rw(3, C), rw(4, C) ] });
+            un(0, C), ro(1, C), ro(2, C), rw(3, C), rw(4, C), ro(5, C), ro(6, C) ] });
         this.pSpring = mkPipe(WEBGPU_SPRING_WGSL, this.springBgl, "main");
         // skyline: {uSpring, onFront rw, pos ro}
         this.skylineBgl = dev.createBindGroupLayout({ entries: [ un(0, C), rw(1, C), ro(2, C) ] });
@@ -3650,7 +3659,13 @@ class WebGPURenderer {
             // debut year per player → packed era colour (rebuilt on a theme change).
             const debut = new Uint32Array(players);
             for (let i = 0; i < players; i++) debut[i] = model.players[i].debutYear | 0;
-            this.evt = { token, players, streamN: stream.n,
+            // S-track: prefix of stream events by global date. eventsByDate[g] = # events with
+            // date < g (the stream is date-sorted), so appliedAt(d) = eventsByDate[d+1] and the
+            // season baseline target = eventsByDate[seasonStart]. Built once per stream upload.
+            const eventsByDate = new Uint32Array(model.numDates + 1);
+            for (let i = 0; i < stream.n; i++) eventsByDate[stream.date[i] + 1]++;
+            for (let i = 0; i < model.numDates; i++) eventsByDate[i + 1] += eventsByDate[i];
+            this.evt = { token, players, streamN: stream.n, numDates: model.numDates, eventsByDate,
                 bEvents, bX, bY, bColor, uWin, uScale, bgAccum, bgCloud,
                 debut, colorTheme: null, zeros: new Uint32Array(players),
                 gpuApplied: null,   // how many stream events the counters reflect (null = none yet)
@@ -3677,6 +3692,13 @@ class WebGPURenderer {
         const stor = BU.STORAGE | BU.COPY_DST;
         const bPos = dev.createBuffer({ size: pos2, usage: stor | BU.COPY_SRC });   // COPY_SRC: verify readback
         const bVel = dev.createBuffer({ size: pos2, usage: stor });
+        // S-track season baselines: per-player career counter snapshot at the open season's
+        // start−1 (copyBufferToBuffer from bX/bY on a boundary cross). COPY_DST = copy target,
+        // COPY_SRC = verify readback. Allocated even in career mode (the spring BGL requires
+        // bindings 5/6 bound); the shader ignores them unless uSpring.mode==1.
+        const pbytes = Math.max(16, players * 4);
+        const bBaseX = dev.createBuffer({ size: pbytes, usage: stor | BU.COPY_SRC });
+        const bBaseY = dev.createBuffer({ size: pbytes, usage: stor | BU.COPY_SRC });
         const bOnFront = dev.createBuffer({ size: Math.max(16, players * 4), usage: stor | BU.COPY_SRC });
         // GPU-staircase scratch (frontier size bounded by WEBGPU_MAX_FRONT).
         const MF = WEBGPU_MAX_FRONT;
@@ -3693,9 +3715,9 @@ class WebGPURenderer {
             entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })) });
         e.spring = {
             bPos, bVel, bOnFront, bFrontIdx, bFrontSorted, bCount, bStaircase, bIndirect,
-            uSpring, uSpringScale0, uSpringScale1,
+            uSpring, uSpringScale0, uSpringScale1, baseX: bBaseX, baseY: bBaseY,
             zerosVec2: new Float32Array(players * 2),
-            bgSpring:       bg(this.springBgl,      [uSpring, e.bX, e.bY, bPos, bVel]),
+            bgSpring:       bg(this.springBgl,      [uSpring, e.bX, e.bY, bPos, bVel, bBaseX, bBaseY]),
             bgSkyline:      bg(this.skylineBgl,     [uSpring, bOnFront, bPos]),
             bgStair:        bg(this.stairBgl,       [uSpring, bOnFront, bPos, bFrontIdx, bFrontSorted, bCount, bStaircase, bIndirect]),
             bgSpringCloud0: bg(this.springCloudBgl, [uSpringScale0, bPos, e.bColor, bOnFront]),
@@ -3871,12 +3893,111 @@ class WebGPURenderer {
         return { springMis, skylineMis, frontierSize, maxX, maxY, x, y, pos, onFront, players: n };
     }
 
+    // ── S-track SA1: GPU season-targeting oracle (one-shot, never in renderAt) ────────────
+    // Proves the season-mode spring target — seasonValue = career − baseline — is computed
+    // correctly on the GPU across the three motion classes the live loop will hit: a fresh
+    // jump (full replay), a forward boundary cross (accumulate-to-boundary → snapshot →
+    // accumulate-rest), and a backward scrub (replay from 0). For each probe {d, O, start} it
+    // drives the resident counters/baseline the same way the live loop would, settles the
+    // season spring (mode=1, huge dt ⇒ pos snaps to the integer target), reads pos[] back, and
+    // compares to the CPU oracle evtOpenSeasonPoints(model, d, O). Returns per-probe seasonMis
+    // (mismatched players) + spotlight player season values. Headless-safe (compute + buffer
+    // readback only, no canvas).
+    async verifySeason(model, probes, spotlight = []) {
+        const e = this.evt, s = e && e.spring;
+        if (!e || !s || !e.eventsByDate) return null;
+        const dev = this.device, n = e.players;
+        const ebd = e.eventsByDate;
+        const appliedAt = (d) => ebd[Math.max(0, Math.min(e.numDates - 1, d)) + 1];   // events with date ≤ d
+        const bytes = n * 4;
+        // Each accumulate range is its own submit: the pAccum pass reads uWin at execution
+        // time, and multiple writeBuffers to one uWin before a single submit would collapse to
+        // the last — so one submit per range keeps the windows distinct (ordering is preserved
+        // on the queue). Perf is irrelevant here (one-shot verify).
+        const accum = (lo, count) => {
+            if (count <= 0) return;
+            dev.queue.writeBuffer(e.uWin, 0, new Uint32Array([lo >>> 0, count >>> 0, 0, 0]));
+            const enc = dev.createCommandEncoder();
+            const cp = enc.beginComputePass(); cp.setPipeline(this.pAccum); cp.setBindGroup(0, e.bgAccum);
+            cp.dispatchWorkgroups(Math.ceil(count / 64)); cp.end();
+            dev.queue.submit([enc.finish()]);
+        };
+        const snapshot = () => {                       // bX/bY (at season start−1) → baseX/baseY
+            const enc = dev.createCommandEncoder();
+            enc.copyBufferToBuffer(e.bX, 0, s.baseX, 0, bytes);
+            enc.copyBufferToBuffer(e.bY, 0, s.baseY, 0, bytes);
+            dev.queue.submit([enc.finish()]);
+        };
+        let gpuApplied = 0, baseTarget = -1;
+        dev.queue.writeBuffer(e.bX, 0, e.zeros);
+        dev.queue.writeBuffer(e.bY, 0, e.zeros);
+        const out = [];
+        for (const probe of probes) {
+            const desiredBase = appliedAt(probe.start - 1);   // events strictly before the open year
+            const target = appliedAt(probe.d);
+            if (baseTarget < 0 || target < gpuApplied || desiredBase < baseTarget) {
+                // fresh / backward seek: replay the career counters from 0, snapshot at the boundary.
+                dev.queue.writeBuffer(e.bX, 0, e.zeros);
+                dev.queue.writeBuffer(e.bY, 0, e.zeros);
+                accum(0, desiredBase);
+                snapshot();
+                accum(desiredBase, target - desiredBase);
+            } else if (desiredBase > baseTarget) {
+                // forward across a season boundary: split the window at the boundary, snapshot there.
+                accum(gpuApplied, desiredBase - gpuApplied);
+                snapshot();
+                accum(desiredBase, target - desiredBase);
+            } else {
+                // forward within the same open season: baseline unchanged, just extend the counters.
+                accum(gpuApplied, target - gpuApplied);
+            }
+            gpuApplied = target; baseTarget = desiredBase;
+            // Settle the season spring from rest: mode=1, huge dt ⇒ pos = max(career − base, 0).
+            dev.queue.writeBuffer(s.bPos, 0, s.zerosVec2);
+            dev.queue.writeBuffer(s.bVel, 0, s.zerosVec2);
+            const us = new ArrayBuffer(16);
+            new Float32Array(us, 0, 2).set([1000, WEBGPU_SPRING_OMEGA]);
+            new Uint32Array(us, 8, 2).set([n, 1]);     // n, mode=1 (season)
+            dev.queue.writeBuffer(s.uSpring, 0, us);
+            const enc = dev.createCommandEncoder();
+            const cp = enc.beginComputePass(); cp.setPipeline(this.pSpring); cp.setBindGroup(0, s.bgSpring);
+            cp.dispatchWorkgroups(Math.ceil(n / 64)); cp.end();
+            dev.queue.submit([enc.finish()]);
+            const pos = await this._readback(s.bPos, n * 8, Float32Array);
+            // CPU oracle, computed PER INDEX (not by name): seasonValue = evtAsOf(d) −
+            // evtAsOf(start−1) per component, mapped through the axis fn. evtAsOf is an
+            // independent binary-search path over each player's own series, so this is a true
+            // cross-check of the GPU event-stream accumulation. Index-keyed because the display
+            // name is NOT unique — two distinct Lahman players can share a `(b.YYYY)` tag (e.g.
+            // two "Luis Garcia (b.1975)"), which a name-keyed map would conflate.
+            const c = {}, before = probe.start - 1;
+            let seasonMis = 0, active = 0; const misDetail = [];
+            for (let i = 0; i < n; i++) {
+                const comp = model.players[i].comp;
+                for (const dep of model.depList) { const sr = comp[dep]; c[dep] = sr ? evtAsOf(sr, probe.d) - evtAsOf(sr, before) : 0; }
+                let ex = model.xs.fn(c), ey = model.ys.fn(c);
+                if (!isFinite(ex) || ex < 0) ex = 0;
+                if (!isFinite(ey) || ey < 0) ey = 0;
+                if (ex || ey) active++;
+                if (Math.abs(pos[i * 2] - ex) > 0.5 || Math.abs(pos[i * 2 + 1] - ey) > 0.5) {
+                    seasonMis++;
+                    if (misDetail.length < 5) misDetail.push({ i, name: model.players[i].name, gpu: [pos[i * 2], pos[i * 2 + 1]], cpu: [ex, ey] });
+                }
+            }
+            const records = {};
+            for (const nm of spotlight) { const i = model.players.findIndex(p => p.name === nm); if (i >= 0) records[nm] = { x: pos[i * 2], y: pos[i * 2 + 1] }; }
+            out.push({ year: probe.O, seasonMis, active, records, misDetail });
+        }
+        e.gpuApplied = gpuApplied;   // leave live bookkeeping consistent (counters reflect this)
+        return out;
+    }
+
     _destroyEvt() {
         const e = this.evt; if (!e) return;
         for (const k of ["bEvents", "bX", "bY", "bColor", "uWin", "uScale"]) e[k]?.destroy();
         if (e.spring) {
             for (const k of ["bPos", "bVel", "bOnFront", "bFrontIdx", "bFrontSorted", "bCount",
-                "bStaircase", "bIndirect", "uSpring", "uSpringScale0", "uSpringScale1"]) e.spring[k]?.destroy();
+                "bStaircase", "bIndirect", "uSpring", "uSpringScale0", "uSpringScale1", "baseX", "baseY"]) e.spring[k]?.destroy();
         }
         this.evt = null;
     }
@@ -4339,6 +4460,34 @@ window.__bl2d_verifySpring = async (names = ["Barry Bonds", "Rickey Henderson"])
     return { springMis: r.springMis, skylineMis: r.skylineMis, frontierSize: r.frontierSize, maxX: r.maxX, maxY: r.maxY, players: r.players, records };
 };
 window.__bl2d_springMode = () => pointRenderer instanceof WebGPURenderer && !!pointRenderer.springMode;
+
+// S-track SA1 invariant probe (the GPU season-targeting oracle). Requires the spring engine
+// (?gpustream≠0) and a resident .evt model. Drives a cursor sequence that exercises every
+// motion class — a fresh jump, a forward season-boundary cross, a backward scrub, a
+// within-season step — and asserts the GPU season value (career − baseline) equals the CPU
+// oracle evtOpenSeasonPoints per player. seasonMis must be 0 at every probe. The default
+// spotlight spot-checks Barry Bonds 2001 (73 HR, the single-season record) when the axes are
+// HR/SB. One-shot, headless-safe (compute + buffer readback only).
+window.__bl2d_verifySeason = async (years = [1998, 2001, 2002], spotlight = ["Barry Bonds"]) => {
+    if (!(pointRenderer instanceof WebGPURenderer) || !pointRenderer.springMode || !pbpEvt) return null;
+    const m = pbpEvt;
+    if (m.xs.rate || m.ys.rate || !evtGpuMonotone(m).ok) return { skipped: "axes not GPU-season-eligible (rate / non-monotone)" };
+    pointRenderer.uploadEvtStream(m);
+    const yr = years.filter(y => m.seasonStartByYear.has(y));
+    if (yr.length < 2) return { skipped: "need ≥2 covered years" };
+    const endOf = (y) => Math.min(m.winEnd ?? (m.numDates - 1), m.seasonEndByYear.get(y));
+    const probe = (y, d) => ({ O: y, start: m.seasonStartByYear.get(y), d: d ?? endOf(y) });
+    // Sequence: replay(yr0) → cross(yr1) → cross(yr2) → backward(yr1) → backward-within(mid yr1)
+    // → forward-within(end yr1). Covers full-replay, forward-cross, backward-replay, and the
+    // same-season extend branch.
+    const midY1 = Math.floor((m.seasonStartByYear.get(yr[1]) + endOf(yr[1])) / 2);
+    const seq = [probe(yr[0]), probe(yr[1]), probe(yr[2] ?? yr[1]),
+                 probe(yr[1]), probe(yr[1], midY1), probe(yr[1])];
+    const res = await pointRenderer.verifySeason(m, seq, spotlight);
+    if (!res) return null;
+    const totalMis = res.reduce((a, r) => a + r.seasonMis, 0);
+    return { axes: `${m.xDim}×${m.yDim}`, totalMis, allGreen: totalMis === 0, probes: res };
+};
 
 function recordPbpFrameTiming(totalMs, modelMs, renderMs, enabled) {
     if (!enabled) return;

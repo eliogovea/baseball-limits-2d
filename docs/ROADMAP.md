@@ -24,8 +24,10 @@ source of truth for *shipped* status of individual features.
 
 **Update 2026-06-19:** the data layer is done — **S3 (S3a–S3d) and S4 (S4a–S4b) all
 shipped.** BL2S is the single app-facing stat layer; `.evt`/STEV and BL2P are deleted (git
-history). Only S3e (optional) and the S-track/S2 (not started) remain on the data side. The
-G-track snapshot below is unchanged.
+history). On the render side, **S-track SA1 (GPU season-targeting correctness core) is now
+shipped** — the spring shader targets `max(career − per-player baseline, 0)` and a new
+`__bl2d_verifySeason` oracle proves `seasonMis 0` (see the S-track section); SA0/SA2–SA4 and
+S3e (optional) + S2 remain. The G-track snapshot below is unchanged.
 
 The G-track (full-GPU rendering) is the bulk of recent work and is nearly done; the data
 tracks (S3/S4) have NOT been started yet. Concretely:
@@ -71,11 +73,36 @@ now finishes the in-flight render track, then returns to the (still-unstarted) d
 | 1 | **G6** — graduate the G-track | G6a–G6f (detail in [`rendering.md`](rendering.md) §"G6") | ◑ in progress (**all agent-doable phases shipped**: GPU-default + G6c parity-matrix + G6d device-loss + G6e rotated-title + **G6f hatch-cleanup/docs**) | only **G6a + G6b-flip** remain — both need a **human/browser MANUAL** |
 | 2 | **S3** — app onto BL2S, remove `.evt` | S3a–S3e | ✅ S3a–S3d shipped (builder + batting & pitching swap + `.evt` removal); S3e optional | fully agent-doable |
 | 3 | **S4** — retire BL2P | S4a–S4b | ✅ S4a+S4b shipped (readers on BL2S; BL2P deleted) | fully agent-doable |
-| 4 | **S-track** — GPU season animation (folds in G5i) | SA0–SA4 | ☐ design only | agent-doable; SA2 motion needs a MANUAL |
+| 4 | **S-track** — GPU season animation (folds in G5i) | SA0–SA4 | ◑ **SA1 shipped** (GPU season-targeting correctness core + `__bl2d_verifySeason` oracle, `seasonMis 0`); SA0/SA2–SA4 pending | SA0 agent-doable; SA2 motion needs a MANUAL |
 | 5 | **S2** — Lahman complement | — | ☐ after S3/S4 | fully agent-doable |
 
 ### ▶ RESUME HERE (next session)
 
+> **Session handoff (2026-06-19, later) — S-track SA1 shipped on `feat/event-level-pbp`.**
+> The GPU **season-targeting correctness core** is in: the spring shader gained a `mode` flag
+> + per-player `baseHr`/`baseSb` baseline buffers, target = `max(career − baseline, 0)` (exact
+> ∵ each axis is linear/zero-intercept over counting components). Baseline snapshot via
+> `copyBufferToBuffer` at `appliedAt(seasonStart−1)`; `uploadEvtStream` precomputes the
+> `eventsByDate` prefix for O(1) `appliedAt`. New one-shot oracle `window.__bl2d_verifySeason`
+> (+ `WebGPURenderer.verifySeason`) drives the resident counters through full-replay /
+> forward-boundary-cross / backward-scrub / within-season-extend and cross-checks each player's
+> settled `pos[]` against an independent `evtAsOf` oracle **per index** (the `(b.YYYY)` name is
+> not unique — caught two "Luis Garcia (b.1975)"). Verified headless on the **dev server** via
+> `scripts/snap-gpu.js` (`?webgpuHeadless=1&renderer=webgpu&gpustream=1`): **`seasonMis 0`**
+> across HR×SB / TB×R / H×BB / SO×W incl. boundary cross + backward scrub; Bonds 2001 = 73 HR /
+> 411 TB / 156 H / 177 BB. Career `__bl2d_verifySpring` still green (Bonds 762/514). The live
+> season render is UNCHANGED (still CPU cloud) — zero regression. **Next on the S-track:** SA0
+> (route season → the spring path: per-frame baseline management mirroring `verifySeason`'s
+> incremental branches — forward-cross splits the window at the boundary then snapshots;
+> backward/cursor-jump replays from 0; watch the same retained-buffer-reset class of bug as the
+> career frontier fix) then **SA2** (the visible sprung cloud + glide loop — needs a real-GPU
+> browser MANUAL; headless SwiftShader can't configure a visible canvas). NOT committed yet.
+> **Verify-vehicle gotcha:** verifySpring/verifySeason flake on a COLD page under SwiftShader
+> (oracle fires before the first stream upload settles → all-zero counters; pre-existing,
+> reproduces on clean `main`) — poll until `verifySpring().maxX>0` before trusting a run. Must
+> use the **dev server** (stat layer present), NOT the `file://` bundle (no stat layer → no
+> spring).
+>
 > **Session handoff (2026-06-19) — G6c shipped on `feat/event-level-pbp`** (after G6e + G6d).
 > This session shipped **G6c** — the one-run full parity matrix `window.__bl2d_verifyGraphMatrix()`
 > in `webgpu-graph.js`: it drives the real DOM selectors across ~15 representative combos, awaits
@@ -145,10 +172,14 @@ Two independent entry points — pick based on whether a human is available to d
   ref was dead at module scope, now dispatches `bl2d:refresh`). G6c caught + fixed a threshold-leak
   driver bug. Verify GPU static frames, the parity matrix, + the device-loss path with the new
   `scripts/snap-gpu.js` on the `file://` bundle. With G6's agent work done, pick up
-  the data track at the **S-track** (GPU season-mode animation, SA0→SA4 — design only) or
-  **S2** (Lahman complement). The full S3 + S4 data-layer migration is now done: BL2S is
-  the single stat layer, and `.evt`/STEV (S3d) and BL2P (S4b) are both deleted. S3e
-  (`qualDeps:["PA"]`) remains an optional one-file-load optimization that can come any time.
+  the **S-track** — **SA1 (GPU season-targeting correctness core) is shipped** (`seasonMis 0`
+  via `__bl2d_verifySeason`); the next agent-doable phase is **SA0** (route season → the spring
+  path, per-frame baseline management mirroring `verifySeason`'s incremental branches) before
+  **SA2**'s visible sprung cloud needs a MANUAL — or **S2** (Lahman complement). NOTE the
+  S-track oracle runs on the **dev server** (stat layer present), NOT the `file://` bundle. The
+  full S3 + S4 data-layer migration is done: BL2S is the single stat layer, and `.evt`/STEV
+  (S3d) and BL2P (S4b) are both deleted. S3e (`qualDeps:["PA"]`) remains an optional
+  one-file-load optimization that can come any time.
 
 _Resume at the first unticked phase of the chosen track. Update the checkbox + the
 progress-trail row + the README "Ideas & future work" entry in the SAME commit as each
@@ -354,7 +385,15 @@ so raw 1e-6 is unreachable — the design's aspiration; the radius compresses it
 
 Design summary in [`rendering.md`](rendering.md) §"Season GPU animation". Phases
 SA0 (gating) → SA1 (GPU season targeting, correctness core) → SA2 (sprung open-season
-cloud) → SA3 (hybrid GPU frontier) → SA4 (polish). All ☐ not started.
+cloud) → SA3 (hybrid GPU frontier) → SA4 (polish).
+
+| Phase | Status | Notes / commit |
+|---|---|---|
+| SA1 GPU season targeting (correctness core) | ✅ shipped | spring shader `mode` flag + `baseHr`/`baseSb` baseline buffers (snapshot via `copyBufferToBuffer` at `appliedAt(seasonStart−1)`); target = `max(career−base,0)` (exact ∵ linear zero-intercept axis). `__bl2d_verifySeason` oracle: `seasonMis 0` over HR×SB / TB×R / H×BB / SO×W incl. boundary cross + backward scrub; Bonds 2001 = 73 HR / 411 TB / 156 H / 177 BB. Career `verifySpring` still green. Headless on the dev server via `snap-gpu.js`. |
+| SA0 live gate + active set | ☐ not started | route season → `filters.evt`/spring path (the per-frame baseline management mirrors `verifySeason`'s incremental branches); needs SA2 to be visible |
+| SA2 sprung open-season cloud + glide loop | ☐ not started | **real-GPU browser MANUAL** (live-only spring effect; folds in deferred G5i cross-fade) |
+| SA3 hybrid GPU frontier | ☐ not started | CPU completed-season frontier ∪ GPU open skyline |
+| SA4 polish | ☐ not started | rate axes excluded; bats/country still CPU; README/CLAUDE updates |
 
 ---
 

@@ -678,7 +678,41 @@ Phases (each shippable, with `__bl2d_verifySeason` gates): **SA0** gating + acti
 **SA1** GPU season targeting (correctness core; `seasonMis 0` incl. boundary crossing +
 backward scrub) → **SA2** render the sprung open cloud + glide loop → **SA3** hybrid GPU
 frontier (`skylineMis 0`, season-record spot-check) → **SA4** polish (rate axes excluded
-as in career; bats/country mask still forces CPU; README/CLAUDE updates). Invariant:
+as in career; bats/country mask still forces CPU; README/CLAUDE updates).
+
+### [x] SA1 — GPU season targeting (correctness core) *(shipped)*
+
+The spring shader (`WEBGPU_SPRING_WGSL`) gained a `mode` field in its uniform (`0` career,
+`1` season) and two read-only bindings `baseHr`/`baseSb` (springBgl bindings 5/6). In season
+mode the target becomes `max(career − baseline, 0)`; the identity `seasonValue = cum(d) −
+cum(seasonStart−1)` holds **exactly** because `evtGpuMonotone` guarantees each axis is a
+linear, zero-intercept combination of the streamed counting components (so career-counter −
+baseline == within-season value, and the f32 subtraction of two integers < 2²⁴ is lossless).
+The baseline is the career counter snapshotted by `copyBufferToBuffer(bX→baseX, bY→baseY)`
+the moment the counters reach `appliedAt(seasonStart−1)`. `uploadEvtStream` precomputes
+`eventsByDate` (the date→event-prefix table) so `appliedAt(d)` and the baseline target are
+O(1). Career is untouched: `mode==0` ignores the base buffers, and `__bl2d_verifySpring`
+stays green (Bonds 762/514, springMis/skylineMis 0).
+
+The one-shot oracle `window.__bl2d_verifySeason(years, spotlight)` + `WebGPURenderer.verifySeason`
+drive the resident counters through every motion class — fresh jump (full replay), forward
+season-boundary cross (accumulate-to-boundary → snapshot → accumulate-rest), backward scrub
+(replay from 0), and within-season extend — and compare each player's settled `pos[]` to an
+independent `evtAsOf` binary-search oracle, **per index** (the `(b.YYYY)` display name is NOT
+unique — two distinct Lahman players can collide, e.g. two "Luis Garcia (b.1975)", which a
+name-keyed map conflates). Verified headless via `scripts/snap-gpu.js` on the **dev server**
+(`?webgpuHeadless=1&renderer=webgpu&gpustream=1`, stat layer present): **`seasonMis 0`** across
+HR×SB, TB×R, H×BB (batting) and SO×W (pitching), boundary crossings (e.g. 1998→2001→2002) and
+backward scrubs (→2001, →mid-2001) included; spot-checks Bonds 2001 = 73 HR / 13 SB / 411 TB /
+129 R / 156 H / 177 BB. **Not yet done:** SA0's live gate (season still sets no `filters.evt`,
+so it renders on the CPU cloud) and SA2's sprung-cloud render + glide loop — both need a
+real-GPU browser MANUAL (the spring is a live-only visual effect; headless SwiftShader can't
+configure a visible canvas). The verifySpring/verifySeason one-shots are **flaky on a cold
+page** under SwiftShader (the oracle occasionally fires before the first stream upload settles,
+yielding all-zero counters — pre-existing, reproduces on clean `main`); poll until
+`verifySpring().maxX>0` before trusting a run.
+
+Invariant:
 career counters are never mutated by the season path, so career↔season mid-play stays
 exact. Key seams: `evtOpenSeasonPoints`/`evtAsOf`, `seasonStartByYear`/`yearOf`,
 the `gpuCloud`/`gpuSpring` gates, `accumulateCloud`, `WEBGPU_SPRING_WGSL`,
