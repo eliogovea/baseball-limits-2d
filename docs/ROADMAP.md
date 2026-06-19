@@ -20,7 +20,12 @@ source of truth for *shipped* status of individual features.
 3. **POCs stay** as pedagogical references (not ported to BL2S); merged feature
    branches are deleted; `main` is the deployed branch.
 
-## Current state (snapshot — 2026-06-13)
+## Current state (snapshot — 2026-06-13; data-layer update 2026-06-19)
+
+**Update 2026-06-19:** the data layer is done — **S3 (S3a–S3d) and S4 (S4a–S4b) all
+shipped.** BL2S is the single app-facing stat layer; `.evt`/STEV and BL2P are deleted (git
+history). Only S3e (optional) and the S-track/S2 (not started) remain on the data side. The
+G-track snapshot below is unchanged.
 
 The G-track (full-GPU rendering) is the bulk of recent work and is nearly done; the data
 tracks (S3/S4) have NOT been started yet. Concretely:
@@ -48,7 +53,7 @@ now finishes the in-flight render track, then returns to the (still-unstarted) d
 |---|---|---|---|---|
 | 1 | **G6** — graduate the G-track | G6a–G6f (detail in [`rendering.md`](rendering.md) §"G6") | ◑ in progress (GPU-default shipped) | G6a + G6b-flip need a **human/browser MANUAL**; G6c–G6f are agent-doable headless |
 | 2 | **S3** — app onto BL2S, remove `.evt` | S3a–S3e | ✅ S3a–S3d shipped (builder + batting & pitching swap + `.evt` removal); S3e optional | fully agent-doable |
-| 3 | **S4** — retire BL2P | S4a–S4b | ◑ S4a shipped (readers on BL2S); S4b (removal) next | fully agent-doable |
+| 3 | **S4** — retire BL2P | S4a–S4b | ✅ S4a+S4b shipped (readers on BL2S; BL2P deleted) | fully agent-doable |
 | 4 | **S-track** — GPU season animation (folds in G5i) | SA0–SA4 | ☐ design only | agent-doable; SA2 motion needs a MANUAL |
 | 5 | **S2** — Lahman complement | — | ☐ after S3/S4 | fully agent-doable |
 
@@ -61,12 +66,11 @@ Two independent entry points — pick based on whether a human is available to d
   default). Both are detailed in `rendering.md` §"G6".
 - **If it's an unattended coding agent:** do the headless-doable G6 close-out —
   **G6c** (one-run parity matrix), **G6d** (device-loss recovery test), **G6e** (rotated
-  Y-axis title on the GPU) — in any order; they don't depend on the MANUAL. *Or* continue
-  the data track at **S4** (retire BL2P — S3a–S3d all shipped: the BL2S builder, the
-  batting+pitching app swap, and the `.evt`/STEV removal are done). S4 migrates the
-  remaining `.bl2p` readers (rate-pair smooth fallback + group-career) onto BL2S
-  components, then deletes the 106 `.bl2p.gz`. S3e (`qualDeps:["PA"]`) is an optional
-  one-file-load optimization that can come any time.
+  Y-axis title on the GPU) — in any order; they don't depend on the MANUAL. *Or* pick up
+  the data track at the **S-track** (GPU season-mode animation, SA0→SA4 — design only) or
+  **S2** (Lahman complement). The full S3 + S4 data-layer migration is now done: BL2S is
+  the single stat layer, and `.evt`/STEV (S3d) and BL2P (S4b) are both deleted. S3e
+  (`qualDeps:["PA"]`) remains an optional one-file-load optimization that can come any time.
 
 _Resume at the first unticked phase of the chosen track. Update the checkbox + the
 progress-trail row + the README "Ideas & future work" entry in the SAME commit as each
@@ -198,18 +202,27 @@ instead, and the BL2P layer (~12 MB, 1920–2025 AL/NL batting only) retires.
   zero `.bl2p`/`.evt`; RC chart loads via BL2S. The `.bl2p` engine is now dead code (S4b
   removes it).
 
-### [ ] S4b — removal
+### [x] S4b — removal *(shipped)*
 
-- Delete `data/pbp/b*.bl2p.gz` (106 files), `convert_retrosheet_pbp.py`'s writer role
-  (keep the file in git history; the `build_retro_to_display` helper it hosts must
-  move/already be shared with `build_stat_files.py` first), `parseBl2p` in script.js,
-  deploy-workflow excludes, README/CLAUDE references.
-- **Gate:** full session with zero `.bl2p` requests; bundle builds; snap.js suite green.
+- Deleted `data/pbp/b*.bl2p.gz` (106 files) and `convert_retrosheet_pbp.py`; the genuinely
+  shared Retrosheet helpers (`build_retro_to_display`, `day_of_year`, `pack_bits`) moved to
+  new `scripts/_retro_util.py` first, and the three importers (`convert_retrosheet_events.py`,
+  `statfile_experiment.py`, `decode_bl2e.py` docstring) now point there;
+  `build_stat_files.py` reaches them via `convert_retrosheet_events`. Removed `parseBl2p` +
+  the whole BL2P timeline engine (`buildPbpTimeline`, `pbp{Resolve,Global,Ensure,Release,
+  Reload}*`, `decodePbpSeason`, `pbpPointsAsOf`, the two orphaned `PBP_NOMINAL_DATES`/
+  `PBP_PREFETCH_TAIL` constants, and the `__bl2d_pbpTimeline`/`pbpActive`/`pbpPointsAsOf`
+  hooks) from script.js — `enableSmooth` dropped `forceBl2p` and now always routes to the
+  resident BL2S `enableEvt` model. Updated the deploy-workflow asset-policy comment, the
+  data-formats.md table + BL2P bullet, and the README backlog. Stale `.bl2p`-as-live comments
+  swept.
+- **Gate:** full smooth + group-career session fetches zero `.bl2p`; no dangling
+  removed-symbol references; bundle builds; snap.js desktop + mobile green.
 
 | Phase | Status | Notes / commit |
 |---|---|---|
-| S4a migrate readers | ☐ not started | audit `.bl2p` call sites first |
-| S4b removal | ☐ not started | |
+| S4a migrate readers | ✅ shipped | RC added to `batting.derived` (no more rate-pair `.bl2p` fallback); group-career on `evtBuildGroupCareer` (all-components BL2S model) |
+| S4b removal | ✅ shipped | deleted 106 `b*.bl2p.gz` + `convert_retrosheet_pbp.py` + `parseBl2p`/timeline engine; helpers → `_retro_util.py`; docs/workflow/README synced |
 
 ---
 

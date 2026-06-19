@@ -3,11 +3,11 @@
 
 WHERE THIS SITS in the data hierarchy (coarsest -> finest):
   - Lahman season blob (BL2D)  : one row per player per SEASON     (the main chart)
-  - BL2P (convert_retrosheet_pbp): one row per player per GAME      (sub-season anim)
-  - .evt / STEV                : one sparse timeline per single stat (full-history scrub)
+  - BL2S (build_stat_files)    : one date-keyed timeline per stat   (smooth-mode animation)
   - **BL2E (this file)**       : one row per PLAY / EVENT            (true play-by-play)
 
-So a player who hits two HR in one game is TWO rows here (vs one in BL2P). The corpus
+(BL2P and .evt/STEV were the older sub-season layers; both retired in S3/S4 — see
+docs/ROADMAP.md and git history.) So a player who hits two HR in one game is TWO rows here. The corpus
 is ~16.5M events (1903/1910-2025). See docs/data-formats.md §BL2E for the full byte layout
 and docs/pbp-data-experiments.md (git history) §3 for the sizing that motivated this format.
 
@@ -50,7 +50,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # Reuse the BL2P helpers verbatim — same provenance, same idioms.
-from convert_retrosheet_pbp import build_retro_to_display, day_of_year, pack_bits
+from _retro_util import build_retro_to_display, day_of_year, pack_bits
 
 ROOT = Path(__file__).resolve().parent.parent
 PEOPLE_PATH = ROOT / "data" / "people_lahman_1871-2025.csv"

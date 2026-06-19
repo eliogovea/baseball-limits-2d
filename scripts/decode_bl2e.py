@@ -53,7 +53,7 @@ class Bl2e:
 
 
 def _unpack_bits(buf, off, n, width):
-    """Inverse of convert_retrosheet_pbp.pack_bits: n values of `width` bits, LSB-first,
+    """Inverse of _retro_util.pack_bits: n values of `width` bits, LSB-first,
     starting byte-aligned at `off`. Returns (values, next_byte_offset)."""
     vals = []
     acc = 0

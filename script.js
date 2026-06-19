@@ -311,7 +311,6 @@ const VERIFY_FRONTIER = new URLSearchParams(location.search).has("verifyFrontier
 let hvEncodingEnabled = true;  // scale frontier dot radius by hypervolume contribution (always on)
 let animTimer = null;           // setInterval handle while frontier animation is running
 let animExtentCache = null;     // { key, x, y } — full-range axis extents cached per animation session
-let pbpTimeline = null;         // multi-year cursor model (buildPbpTimeline) when smooth mode is on, else null
 let pbpCursorIdx = 0;           // global index into the concatenated multi-year game-date space
 let pbpExtentCache = null;      // { key, x, y } — axis-extent lock held across the smooth sweep
 let pbpCompletedCache = null;   // { key, points } — completed-season points (yearID < openYear) cached per open year so play doesn't re-filter all of data.points every frame
@@ -392,8 +391,6 @@ const EVT_REGISTRY = {
     },
 };
 const evtReg = () => EVT_REGISTRY[activeDatasetKey];
-const PBP_NOMINAL_DATES = 185;  // assumed game-date count for a not-yet-loaded season (scrubber estimate)
-const PBP_PREFETCH_TAIL = 10;   // prefetch the neighbouring season when within this many dates of an edge
 const PBP_PLAY_FRAME_MS = 66;   // min ms between full chart re-renders while playing (~15fps) — keeps the main thread responsive on wide windows
 const PBP_PLAY_MAX_MS = 45000;  // cap a full sweep so a 100-season window doesn't take ~18 minutes
 
@@ -618,292 +615,6 @@ async function loadDataset(key) {
     return { points, playerIndex: buildPlayerIndex(points) };
 }
 
-// ── Sub-season (Retrosheet) play-by-play layer ──────────────────────────────
-// A lazy-loaded BL2P season file (scripts/convert_retrosheet_pbp.py) holds every
-// player's per-game counting-stat deltas in date order. We prefix-sum them into
-// cumulative-as-of-date trajectories so the frontier can be animated game by game
-// within a season. The synthetic points pointsAsOf() emits are shaped exactly like
-// parseBattingRows output, so they feed the existing frontier pipeline unchanged.
-const pbpCache = new Map();   // `${dataset}:${year}` -> Promise<decoded | null>
-
-function decodePbpSeason(year, dataset) {
-    const key = `${dataset}:${year}`;
-    if (pbpCache.has(key)) return pbpCache.get(key);
-    const prefix = dataset === "pitching" ? "p" : "b";
-    const promise = fetch(`data/pbp/${prefix}${year}.bl2p.gz`)
-        .then(async (resp) => {
-            if (!resp.ok) return null;            // 404 → caller degrades to year animation
-            const stream = resp.body.pipeThrough(new DecompressionStream("gzip"));
-            const buf = new Uint8Array(await new Response(stream).arrayBuffer());
-            return parseBl2p(buf);
-        })
-        .catch(() => null);
-    pbpCache.set(key, promise);
-    return promise;
-}
-
-// Decode one BL2P season blob (little-endian, produced by
-// scripts/convert_retrosheet_pbp.py). The format is a hand-rolled columnar binary chosen
-// over JSON/CSV because a season is ~thousands of player-games and we want it small over
-// the wire AND zero-parse on the hot path. Layout, in order:
-//   "BL2P"                      4-byte magic
-//   major,minor,dataset,flags   4 bytes (only major is checked)
-//   year, P, D, C               4× u16  — year, #players, #dates, #stat columns
-//   dates[D]                    D× u16  — the day-of-year index for each game date
-//   cols[C]                     per col: u8 bit-width, u8 name-len, name bytes
-//   names[P]                    per player: u8 len, name bytes
-//   gameCounts[P]               P× u16  — games per player (Σ = G, the total game rows)
-//   dateIdxAll[G]               G× u16  — each game row's date index (grouped by player)
-//   columns[C]                  G× `width`-bit values, LSB-first, byte-aligned per column
-// The values are PER-GAME deltas; we prefix-sum them per player at the end so a cursor
-// lookup is "cumulative as of date X" without re-summing. Throws on bad magic/version so
-// decodePbpSeason's caller can degrade to whole-season animation.
-function parseBl2p(buf) {
-    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-    const dec = new TextDecoder();
-    let off = 0;
-    if (dec.decode(buf.subarray(0, 4)) !== "BL2P") throw new Error("parseBl2p: bad magic");
-    off = 4;
-    const major = buf[off++]; off += 3;           // minor, dataset, flags (unused here)
-    if (major !== 1) throw new Error("parseBl2p: unsupported version " + major);
-    const year = dv.getUint16(off, true); off += 2;
-    const P = dv.getUint16(off, true); off += 2;   // players
-    const D = dv.getUint16(off, true); off += 2;   // distinct game dates
-    const C = dv.getUint16(off, true); off += 2;   // stat columns
-
-    const dates = new Uint16Array(D);
-    for (let i = 0; i < D; i++) { dates[i] = dv.getUint16(off, true); off += 2; }
-
-    const cols = new Array(C);
-    for (let i = 0; i < C; i++) {
-        const width = buf[off++];
-        const nl = buf[off++];
-        const name = dec.decode(buf.subarray(off, off + nl)); off += nl;
-        cols[i] = { name, width };
-    }
-
-    const names = new Array(P);
-    for (let i = 0; i < P; i++) {
-        const nl = buf[off++];
-        names[i] = dec.decode(buf.subarray(off, off + nl)); off += nl;
-    }
-
-    const gameCounts = new Uint16Array(P);
-    let G = 0;
-    for (let i = 0; i < P; i++) { gameCounts[i] = dv.getUint16(off, true); off += 2; G += gameCounts[i]; }
-
-    const dateIdxAll = new Uint16Array(G);
-    for (let i = 0; i < G; i++) { dateIdxAll[i] = dv.getUint16(off, true); off += 2; }
-
-    // Bit-unpack each column. Each stat is stored in just `width` bits (most per-game
-    // counts fit in 2–4 bits — a player rarely hits 4 HR in a game), packed LSB-first
-    // into a bit stream that resets to a byte boundary at each column. The classic
-    // shift-register unpack: keep an accumulator `acc` with `nbits` valid low bits, refill
-    // a byte at a time until we have ≥ width, then take the low `width` bits and shift them
-    // out. `mask` clears the high bits; `acc >>>= width` (unsigned) discards the consumed value.
-    const colArrays = {};
-    for (const { name, width } of cols) {
-        const arr = new Int32Array(G);
-        const mask = (1 << width) - 1;
-        let acc = 0, nbits = 0, p = off;
-        for (let i = 0; i < G; i++) {
-            while (nbits < width) { acc |= buf[p++] << nbits; nbits += 8; }  // refill
-            arr[i] = acc & mask;                                            // take width bits
-            acc >>>= width;                                                 // drop them
-            nbits -= width;
-        }
-        off += Math.ceil((G * width) / 8);          // next column is byte-aligned
-        colArrays[name] = arr;
-    }
-
-    // Prefix-sum per player into cumulative-by-game arrays: arr[i] is the running total
-    // through game i, so pbpPointsAsOf can binary-search "state as of date X" in O(log n)
-    // instead of summing deltas every frame.
-    const colNames = cols.map((c) => c.name);
-    const perPlayer = new Map();
-    let g = 0;
-    for (let pi = 0; pi < P; pi++) {
-        const n = gameCounts[pi];
-        const dateIdx = dateIdxAll.subarray(g, g + n);
-        const cum = {};
-        for (const name of colNames) {
-            const src = colArrays[name];
-            const c = new Int32Array(n);
-            let run = 0;
-            for (let k = 0; k < n; k++) { run += src[g + k]; c[k] = run; }
-            cum[name] = c;
-        }
-        perPlayer.set(names[pi], { dateIdx, cum });
-        g += n;
-    }
-
-    return { year, dates, dateCount: D, cols: colNames, perPlayer, games: G, players: P };
-}
-
-// Largest index k with sortedDateIdx[k] <= cursorIdx, or -1 if the player has
-// not yet appeared by the cursor date.
-function pbpLastGameAtOrBefore(sortedDateIdx, cursorIdx) {
-    let lo = 0, hi = sortedDateIdx.length - 1, ans = -1;
-    while (lo <= hi) {
-        const mid = (lo + hi) >> 1;
-        if (sortedDateIdx[mid] <= cursorIdx) { ans = mid; lo = mid + 1; }
-        else hi = mid - 1;
-    }
-    return ans;
-}
-
-// Build season-shaped points from each player's cumulative stats as of the
-// cursor date, then run them through parseBattingRows so every derived stat
-// (PA, AVG, OBP, …) is computed identically to the season-level pipeline.
-function pbpPointsAsOf(decoded, withinIdx, dataset) {
-    const seasonIdx = datasetState[dataset]?.playerIndex;
-    const rawRows = [];
-    for (const [name, rec] of decoded.perPlayer) {
-        const k = pbpLastGameAtOrBefore(rec.dateIdx, withinIdx);
-        if (k < 0) continue;                       // no game yet → no point
-        const row = { playerID: name, yearID: String(decoded.year) };
-        for (const col of decoded.cols) row[col] = rec.cum[col][k];
-        // Team / league come from the player's season-level row (same display
-        // key), so the league filter and color-by-league work unchanged.
-        let teamID = "—", lgID = "—";
-        const seasonRows = seasonIdx && seasonIdx.get(name);
-        if (seasonRows) {
-            const s = seasonRows.find((r) => r.yearID === decoded.year);
-            if (s) { teamID = s.teamID; lgID = s.lgID; }
-        }
-        row.teamID = teamID;
-        row.lgID = lgID;
-        rawRows.push(row);
-    }
-    return dataset === "pitching" ? parsePitchingRows(rawRows) : parseBattingRows(rawRows);
-}
-
-// ── Multi-year cursor timeline ───────────────────────────────────────────────
-// A virtual timeline over the selected sYear..eYear. Each year is decoded lazily
-// when the cursor reaches it; 404 years are marked "missing" and skipped. The
-// global cursor (pbpCursorIdx) indexes a concatenation of every year's game-date
-// table; not-yet-loaded years are estimated at PBP_NOMINAL_DATES so the scrubber
-// has a sane range without fetching all 100+ seasons up front.
-
-function buildPbpTimeline(sYear, eYear, dataset) {
-    const years = [];
-    for (let y = sYear; y <= eYear; y++) {
-        years.push({ year: y, status: "unknown", decoded: null, dateCount: null, offset: 0 });
-    }
-    const tl = { dataset, sYear, eYear, years, totalEstimate: 0, openYearIdx: 0 };
-    pbpRecomputeOffsets(tl);
-    return tl;
-}
-
-// Effective length of a year in the concatenated day-space.
-function pbpYearLen(entry) {
-    if (entry.status === "covered") return entry.dateCount;
-    if (entry.status === "missing") return 0;
-    return PBP_NOMINAL_DATES;
-}
-
-// Recompute per-year offsets + the timeline total. When `keep` ({yearIdx,
-// withinIdx}) is given, remap the global cursor so it holds the same calendar
-// position across a year's estimate→real length change.
-function pbpRecomputeOffsets(tl, keep) {
-    let acc = 0;
-    for (const e of tl.years) { e.offset = acc; acc += pbpYearLen(e); }
-    tl.totalEstimate = acc;
-    if (keep) pbpCursorIdx = pbpGlobalFor(tl, keep.yearIdx, keep.withinIdx);
-}
-
-function pbpGlobalFor(tl, yearIdx, withinIdx) {
-    const e = tl.years[yearIdx];
-    if (!e) return 0;
-    return e.offset + Math.max(0, Math.min(pbpYearLen(e) - 1, withinIdx | 0));
-}
-
-// Map a global cursor index to { yearEntry, yearIdx, withinIdx }, skipping
-// zero-length (missing) years. Clamps into [0, totalEstimate-1].
-function pbpResolveGlobal(tl, globalIdx) {
-    const g = Math.max(0, Math.min(tl.totalEstimate - 1, globalIdx | 0));
-    let chosen = -1;
-    for (let i = 0; i < tl.years.length; i++) {
-        if (pbpYearLen(tl.years[i]) === 0) continue;   // skip missing years
-        chosen = i;
-        if (g < tl.years[i].offset + pbpYearLen(tl.years[i])) break;
-    }
-    if (chosen < 0) return { yearEntry: tl.years[0], yearIdx: 0, withinIdx: 0 };
-    const e = tl.years[chosen];
-    return { yearEntry: e, yearIdx: chosen, withinIdx: Math.max(0, Math.min(pbpYearLen(e) - 1, g - e.offset)) };
-}
-
-// Lazily decode a year (idempotent). Preserves the cursor's calendar position
-// across the resulting length change.
-async function pbpEnsureYearLoaded(tl, yearIdx) {
-    const e = tl.years[yearIdx];
-    if (!e || e.status !== "unknown") return e;
-    e.status = "loading";
-    const decoded = await decodePbpSeason(e.year, tl.dataset);
-    const keep = pbpResolveGlobal(tl, pbpCursorIdx);
-    if (decoded) { e.status = "covered"; e.decoded = decoded; e.dateCount = decoded.dateCount; }
-    else { e.status = "missing"; }
-    pbpRecomputeOffsets(tl, { yearIdx: keep.yearIdx, withinIdx: keep.withinIdx });
-    return e;
-}
-
-// Prefetch the neighbouring season as the cursor nears a year's edge.
-function pbpMaybePrefetch(tl, yearIdx, withinIdx) {
-    const e = tl.years[yearIdx];
-    if (!e || e.status !== "covered") return;
-    if (withinIdx >= e.dateCount - PBP_PREFETCH_TAIL) {
-        const next = tl.years[yearIdx + 1];
-        if (next && next.status === "unknown") pbpEnsureYearLoaded(tl, yearIdx + 1);
-    }
-    if (withinIdx <= PBP_PREFETCH_TAIL) {
-        const prev = tl.years[yearIdx - 1];
-        if (prev && prev.status === "unknown") pbpEnsureYearLoaded(tl, yearIdx - 1);
-    }
-}
-
-// Eagerly load the next `ahead` not-yet-loaded seasons. Group-career sweeps span the
-// whole career (decades), and the per-year prefetch above only kicks in within a few
-// dates of a boundary — too late when the play loop crosses a year in one frame. With
-// several years of lead the small (~130 KB) fetches land before the cursor arrives, so
-// the sweep doesn't stall on "Loading <year>…" at every boundary. Idempotent.
-function pbpEnsureAhead(tl, yearIdx, ahead) {
-    for (let k = 1; k <= ahead; k++) {
-        const i = yearIdx + k;
-        if (i >= tl.years.length) break;
-        if (tl.years[i].status === "unknown") pbpEnsureYearLoaded(tl, i);
-    }
-}
-
-// Memory bound for long sweeps. Only the OPEN year's decoded PBP is ever read
-// (completed years render from Lahman season totals in `data.points`), so a sweep
-// across a wide span — e.g. a group-career spanning 1920–2025 — otherwise retains
-// ~100 decoded seasons (hundreds of MB, OOM-crashes the tab). Drop decoded payloads
-// for years outside a small window around the cursor AND evict them from `pbpCache`
-// so they're actually GC'd (both hold a reference). Status + dateCount are kept, so
-// offsets and the cursor are undisturbed; a step back re-decodes on demand.
-function pbpReleaseFarYears(tl, openIdx, behind, ahead) {
-    for (let i = 0; i < tl.years.length; i++) {
-        if (i >= openIdx - behind && i <= openIdx + ahead) continue;
-        const e = tl.years[i];
-        if (e.decoded) {
-            e.decoded = null;
-            pbpCache.delete(`${tl.dataset}:${e.year}`);
-        }
-    }
-}
-
-// Re-decode a year whose decoded payload was released (a backward scrub landed on it),
-// WITHOUT touching status/offsets — dateCount is preserved, so the cursor stays put.
-function pbpReloadDecoded(tl, idx) {
-    const e = tl.years[idx];
-    if (!e || e.status !== "covered" || e.decoded || e.reloading) return Promise.resolve();
-    e.reloading = true;
-    return decodePbpSeason(e.year, tl.dataset).then((decoded) => {
-        if (decoded) e.decoded = decoded;
-        e.reloading = false;
-    });
-}
-
 // Axis-extent lock for the smooth sweep: the extent of every season in the full
 // selected window (sYear..eYear) at its full totals, so the axes are fixed from
 // the first frame and the accumulating frontier visibly grows into that frame
@@ -959,13 +670,13 @@ function pbpComputeExtent(tl, xDim, yDim, filters, windowPoints, mode, datasetKe
 
 // ── Group-career mode ────────────────────────────────────────────────────────
 // The selected players (careerHighlights) race their CUMULATIVE careers through
-// stat-space as the cursor sweeps calendar time. Shares the whole pbpTimeline
-// engine (cursor, scrubber, play loop, lazy season decode) — only the per-frame
+// stat-space as the cursor sweeps calendar time. Shares the whole BL2S smooth-mode
+// engine (cursor, scrubber, play loop, the resident pbpEvt model) — only the per-frame
 // point-builder differs: one cumulative-career point per player instead of the
 // all-player accumulating cloud.
 
 function groupCareerActive() {
-    return groupCareerMode && (pbpEvt || pbpTimeline) && careerHighlights.size >= 1;
+    return groupCareerMode && pbpEvt && careerHighlights.size >= 1;
 }
 
 // The group's combined career span: earliest debut → latest final season, across
@@ -987,43 +698,10 @@ function groupCareerSpan(datasetKey) {
     return isFinite(lo) ? { lo, hi } : null;
 }
 
-// Per-frame builder: for each selected player, the cumulative-career point as of
-// the cursor = aggregateCareer(prior completed seasons at full totals  +  the open
-// season's PBP partial). Players with no game yet hold at their prior career total
-// (a step); players whose career hasn't started are omitted.
-function pbpBuildGroupCareer(tl, resolved, xDim, yDim, filt, datasetKey) {
-    const { yearEntry, withinIdx } = resolved;
-    const openYear = yearEntry.year;
-    const group = new Set(careerHighlights.keys());
-    const seasonIndex = datasetState[datasetKey]?.playerIndex;
-    // Open-season cumulative-to-date partials, filtered to the group; normalize the
-    // String yearID emitted by pbpPointsAsOf to a number for aggregateCareer/sorts.
-    const openByPid = new Map();
-    for (const r of pbpPointsAsOf(yearEntry.decoded, withinIdx, tl.dataset)) {
-        if (!group.has(r.playerID)) continue;
-        r.yearID = openYear;
-        openByPid.set(r.playerID, r);
-    }
-    const pts = [];
-    for (const pid of group) {
-        const seasons = (seasonIndex && seasonIndex.get(pid)) || [];
-        const priorFull = seasons.filter(s => s.yearID < openYear);   // strict: the open year is represented only by its partial
-        const openRow = openByPid.get(pid);
-        const careerSeasons = openRow ? priorFull.concat(openRow) : priorFull;
-        if (!careerSeasons.length) continue;                          // career not started by the cursor
-        careerSeasons.sort((a, b) => a.yearID - b.yearID);
-        pts.push(aggregateCareer(careerSeasons, datasetKey));
-    }
-    const pbpExtent = pbpComputeExtent(tl, xDim, yDim, filt, datasetState[datasetKey].points, "career", datasetKey, group);
-    window.__bl2d_groupCareerPoints = pts.map(p => ({ pid: p.playerID, x: p[xDim], y: p[yDim] }));
-    window.__bl2d_groupCareerActive = true;
-    return { points: pts, sY: tl.sYear, eY: openYear, pbpExtent };
-}
-
-// BL2S version of the group-career per-frame builder (the .bl2p one above is retired with
-// the BL2P layer in S4). Same hybrid: prior completed seasons at full Lahman totals (covers
-// pre-1910, which BL2S lacks until S2) + the OPEN season's game-by-game partial sourced from
-// the BL2S model (cumulative as-of the cursor minus the season's starting cumulative). The
+// Group-career per-frame builder (BL2S-backed; the old .bl2p version was removed in S4b).
+// Hybrid: prior completed seasons at full Lahman totals (covers pre-1910, which BL2S lacks
+// until S2) + the OPEN season's game-by-game partial sourced from the BL2S model
+// (cumulative as-of the cursor minus the season's starting cumulative). The
 // model is built with allComponents, so the open-season row carries every counting stat
 // aggregateCareer sums. `d` is the model's global date index (the smooth-mode cursor).
 function evtBuildGroupCareer(model, d, xDim, yDim, filt, datasetKey) {
@@ -1065,11 +743,11 @@ function evtBuildGroupCareer(model, d, xDim, yDim, filt, datasetKey) {
     return { points: pts, sY: model.winStartYear, eY: O, pbpExtent };
 }
 
-// ── .evt full-history mode (single counting-stat pair) ──────────────────────
-// When both chart axes are counting stats with committed event streams, decode the
-// two resident .evt files (docs/data-formats.md §Deprecated) and animate every player's
-// cumulative-as-of-date career across ALL history — no per-season .bl2p streaming,
-// no lazy load / release. Rate stats stay on .bl2p (they're not sparse events).
+// ── Full-history smooth mode (single counting-stat pair) ────────────────────
+// When both chart axes are counting stats (or rates derived from them), load the few
+// BL2S stat files the pair needs and animate every player's cumulative-as-of-date career
+// across ALL history — one resident model, no lazy per-season load/release. (Rate axes
+// like AVG ride the same path now, computed from their component series — S3.)
 // Resolve a chart dimension to {deps, fn, rate}: a raw streamed column, or a derived
 // stat whose components are all streamed. Returns null if not .evt-eligible.
 function evtDimSpec(dim) {
@@ -1460,14 +1138,6 @@ function pbpYmdToDay(ymd) {
     const y = +ymd.slice(0, 4), m = +ymd.slice(4, 6), d = +ymd.slice(6, 8);
     return Math.round((Date.UTC(y, m - 1, d) - Date.UTC(y, 0, 1)) / 86400000) + 1;
 }
-// Index into the date table for the day nearest (and <=) a given day-of-year.
-function pbpNearestDateIdx(dates, doy) {
-    let ans = 0;
-    for (let i = 0; i < dates.length; i++) {
-        if (dates[i] <= doy) ans = i; else break;
-    }
-    return ans;
-}
 
 Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batting, pitching]) => {
     datasetState.batting = batting;
@@ -1515,15 +1185,15 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             mode === "career"
                 ? "Each dot is one player's career totals across the selected year window."
                 : "Each dot is one player's single season.";
-        // Smooth on: the mode picks the engine (career→.evt full-history, season→.bl2p),
+        // Smooth on: the resident full-history model drives every mode now,
         // so re-init to switch. Group-career is its own thing — leave it.
-        if (!groupCareerMode && (pbpTimeline || pbpEvt)) { stopAnimation(); disableSmooth(); enableSmooth(); }
+        if (!groupCareerMode && pbpEvt) { stopAnimation(); disableSmooth(); enableSmooth(); }
         else refreshChart();
     });
     setupModeToggle("stats-toggle", () => {
         // The smooth cursor is tied to one dataset's corpus; switching datasets
         // drops it (the pitching corpus / read path lands in a later phase).
-        if (pbpTimeline || pbpEvt) disableSmooth();
+        if (pbpEvt) disableSmooth();
         activeDatasetKey = getActiveModeBtnData("stats-toggle", "stats") || "batting";
         playerIndex = datasetState[activeDatasetKey].playerIndex;
         clearHighlights();
@@ -1582,7 +1252,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
 
     // The bridge between the DOM and drawScatterPlot. It is the SINGLE place that reads
     // the current control values (axes, year range, mode, filters), resolves the active
-    // dataset/data, decides which animation path is live (static | .bl2p game-by-game |
+    // dataset/data, decides which animation path is live (static |
     // .evt full-history | group-career), assembles the per-mode `filters` bag, and calls
     // drawScatterPlot. Every interaction handler ends in refreshChart() rather than poking
     // the chart directly — so there's exactly one render path to reason about. Reads from
@@ -1648,55 +1318,6 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
                     xDim, yDim, { league: "all", franchise: "all" }, data.points, "season", activeDatasetKey);
                 evtSeason = true;
             }
-        } else if (pbpTimeline) {
-            const resolved = pbpResolveGlobal(pbpTimeline, pbpCursorIdx);
-            const { yearEntry, yearIdx, withinIdx } = resolved;
-            pbpTimeline.openYearIdx = yearIdx;
-            if (yearEntry.status === "unknown") {
-                // Cursor entered a not-yet-loaded season: kick the fetch and redraw
-                // when it lands; hold the current frame in the meantime.
-                pbpEnsureYearLoaded(pbpTimeline, yearIdx).then(() => { syncScrubber(); refreshChart(); });
-                return;
-            }
-            if (yearEntry.status !== "covered") return;   // transient "loading" — hold frame
-            if (!yearEntry.decoded) {
-                // Open year's decoded PBP was released to bound memory (a backward
-                // scrub landed past the retained window) — re-decode, hold the frame.
-                if (!yearEntry.reloading) pbpReloadDecoded(pbpTimeline, yearIdx).then(() => { syncScrubber(); refreshChart(); });
-                return;
-            }
-            if (groupCareerActive()) {
-                // Group-career: build one cumulative-career point per selected player.
-                const built = pbpBuildGroupCareer(pbpTimeline, resolved, xDim, yDim, { league, franchise }, activeDatasetKey);
-                points = built.points;
-                sY = built.sY; eY = built.eY; pbpExtent = built.pbpExtent;
-                groupCareer = true;
-                pbpEnsureAhead(pbpTimeline, yearIdx, 4);   // keep several seasons loaded ahead of the sweep
-                pbpReleaseFarYears(pbpTimeline, yearIdx, 2, 6);  // …and drop the rest so a wide span doesn't OOM
-            } else {
-            // Accumulating multi-year frontier: completed seasons stay on the chart
-            // at their full (Lahman) season totals and only the OPEN season grows
-            // game-by-game from its PBP partial. The window runs sYear..openYear, so
-            // the all-time envelope evolves outward as the cursor sweeps instead of
-            // resetting at each year boundary.
-            const openYear = yearEntry.year;
-            const openPartial = pbpPointsAsOf(yearEntry.decoded, withinIdx, pbpTimeline.dataset);
-            // Completed seasons (full totals) only change when the open year does, so
-            // cache that slice — otherwise play re-filters all of data.points every
-            // frame, which is what locked the main thread on wide windows.
-            const completedKey = `${pbpTimeline.dataset}|${pbpTimeline.sYear}|${openYear}`;
-            if (!pbpCompletedCache || pbpCompletedCache.key !== completedKey) {
-                pbpCompletedCache = { key: completedKey,
-                    points: data.points.filter((p) => p.yearID >= pbpTimeline.sYear && p.yearID < openYear) };
-            }
-            points = pbpCompletedCache.points.concat(openPartial);
-            sY = pbpTimeline.sYear;
-            eY = openYear;
-            pbpExtent = pbpComputeExtent(pbpTimeline, xDim, yDim, { league, franchise }, data.points, mode, activeDatasetKey);
-            pbpMaybePrefetch(pbpTimeline, yearIdx, withinIdx);
-            pbpReleaseFarYears(pbpTimeline, yearIdx, 2, 6);  // bound memory on long accumulating sweeps too
-            window.__bl2d_groupCareerActive = false;
-            }
         }
 
         // The playing-time threshold only matters for rate stats — for counting
@@ -1718,7 +1339,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         // The "Loading data…" indicator is for the initial load and heavy filter
         // changes — NOT the smooth/group-career sweep, where every ~66ms frame would
         // strobe it on and off. Each cursor draw is only a couple of ms, so skip it.
-        const showLoader = !pbpTimeline && !pbpEvt;
+        const showLoader = !pbpEvt;
         if (showLoader) loadingIndicator.classList.add("active");
         cancelAnimationFrame(pendingRender);
         pendingRender = requestAnimationFrame(() => {
@@ -1727,7 +1348,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             // filters — the selected group IS the filter, and career points carry no
             // single lgID/team, so a league filter would otherwise drop them all.
             // .evt career: points are pre-aggregated careers → draw "season" (no
-            // re-aggregation). .evt season + .bl2p use the real mode.
+            // re-aggregation). .evt season uses the real mode.
             const drawMode = (groupCareer || evtCareer) ? "season" : mode;
             // .evt as-of points carry only a player + cumulative stat (no per-season
             // team/league), so neutralize league/franchise; bats/country still work via
@@ -1744,7 +1365,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
                     pbpExtent, smooth: true, groupCareer: true, group: new Set(careerHighlights.keys()) }
                 : evtCareer ? { ...evtFilters, evt: true }
                 : evtSeason ? evtFilters
-                : { league, bats, colorBy, depth, compareEras, sB, eB, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey, pbpExtent, smooth: !!pbpTimeline, lite: smoothLite && !!pbpTimeline };
+                : { league, bats, colorBy, depth, compareEras, sB, eB, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey, pbpExtent, smooth: false, lite: false };
             drawScatterPlot(points, xDim, yDim, sY, eY, minThreshold, formatStat, drawMode, drawFilters);
             if (showLoader) loadingIndicator.classList.remove("active");
             writeUrlState({ xDim, yDim, sYear, eYear, minPa: thresholdValue, mode, league, bats, colorBy, depth, compareEras, sB, eB, country, franchise });
@@ -1823,9 +1444,9 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         // In group-career mode keep the selected group and just re-plot their
         // careers on the new axes — swapping HR×SB → AVG×OBP keeps them racing.
         if (groupCareerActive()) { refreshChart(); return; }
-        // Smooth on: the axes changed, so re-decide the engine (.evt vs .bl2p) and
+        // Smooth on: the axes changed, so rebuild the resident model and
         // reload the matching streams for the new pair.
-        if (pbpTimeline || pbpEvt) { stopAnimation(); disableSmooth(); enableSmooth(); return; }
+        if (pbpEvt) { stopAnimation(); disableSmooth(); enableSmooth(); return; }
         filterChanged();
     };
     ["x-axis-select", "y-axis-select"].forEach((id) => {
@@ -1838,7 +1459,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             // at the new window's last covered season). Otherwise just refilter.
             // (.evt mode spans all history, so the year range is moot there — a
             // rebuild simply re-lands on the present-day frame.)
-            if (pbpTimeline || pbpEvt) { disableSmooth(); enableSmooth(); }
+            if (pbpEvt) { disableSmooth(); enableSmooth(); }
             else filterChanged();
         });
     });
@@ -1886,7 +1507,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         }, 400);
     }
     document.getElementById("anim-play-btn").addEventListener("click", () => {
-        if (pbpTimeline || pbpEvt) { if (pbpRaf) stopPbpPlay(); else startPbpPlay(); return; }
+        if (pbpEvt) { if (pbpRaf) stopPbpPlay(); else startPbpPlay(); return; }
         if (animTimer) stopAnimation(); else startAnimation();
     });
 
@@ -1928,22 +1549,6 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             if (pbpGranularity === "season") setPbpYear(pbpEvt.yearOf[d]);
             else setPbpDate(pbpEvt.yearOf[d], pbpEvt.doy[d]);
             window.__bl2d_pbpCursorYmd = pbpDayToYmd(pbpEvt.yearOf[d], pbpEvt.doy[d]);
-            return;
-        }
-        if (!pbpTimeline) return;
-        const { yearEntry, yearIdx, withinIdx } = pbpResolveGlobal(pbpTimeline, pbpCursorIdx);
-        pbpTimeline.openYearIdx = yearIdx;
-        scrubber.min = "0";
-        scrubber.max = String(Math.max(0, pbpTimeline.totalEstimate - 1));
-        scrubber.value = String(pbpCursorIdx);
-        updateScrubFill();
-        if (yearEntry.status === "covered" && yearEntry.decoded) {
-            const doy = yearEntry.decoded.dates[withinIdx];
-            setPbpDate(yearEntry.year, doy);
-            window.__bl2d_pbpCursorYmd = pbpDayToYmd(yearEntry.year, doy);
-        } else {
-            setPbpMsg(`Loading ${yearEntry.year}…`);
-            window.__bl2d_pbpCursorYmd = "";
         }
     }
     const pbpOverlay = document.getElementById("pbp-overlay");
@@ -1960,7 +1565,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     // changes the cursor step (game-by-game vs year-by-year) and the date readout.
     setupSegGroup("pbp-gran-seg", () => {
         pbpGranularity = getSegValue("pbp-gran-seg", "gran") || "pbp";
-        if (!pbpEvt && !pbpTimeline) {                 // currently static → turn the cursor on
+        if (!pbpEvt) {                                 // currently static → turn the cursor on
             const xd = document.getElementById("x-axis-select").value, yd = document.getElementById("y-axis-select").value;
             if (evtEligible(xd, yd)) { enableSmooth(); return; }
         }
@@ -2065,14 +1670,14 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         }
     }
     function startPbpPlay() {
-        if (!pbpTimeline && !pbpEvt) return;
+        if (!pbpEvt) return;
         stopAnimation();
         collapseControlsForPlay();                 // mobile: give the chart full height during playback
         smoothLite = true;                         // lighten frames during playback
         springFinalPending = false;                // a fresh play cancels any pending settle-finalize from a prior stop
         clearTimeout(smoothLiteTimer);
         const perYearMs = 10000;                   // ~10s per covered season at 1× …
-        // .evt sweeps only the selected-year window; .bl2p sweeps its whole timeline.
+        // .evt sweeps only the selected-year window.
         const lo = pbpEvt ? pbpEvt.winStart : 0;
         const hi = pbpEvt ? pbpEvt.winEnd : null;
         // Advance the cursor incrementally by elapsed time × speed, so changing the
@@ -2086,9 +1691,8 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         document.getElementById("anim-icon-stop").hidden = false;
         const tick = (now) => {
             // total & covered-count grow as lazy loads land; recompute each frame.
-            const end = pbpEvt ? hi : pbpTimeline.totalEstimate - 1;
-            const coveredYears = pbpEvt ? (pbpEvt.yearOf[hi] - pbpEvt.yearOf[lo] + 1)
-                : Math.max(1, pbpTimeline.years.filter((y) => y.status !== "missing").length);
+            const end = hi;
+            const coveredYears = pbpEvt.yearOf[hi] - pbpEvt.yearOf[lo] + 1;
             const durMs = Math.min(PBP_PLAY_MAX_MS, perYearMs * coveredYears) / playbackSpeed;  // capped, then scaled by speed
             const dt = now - lastNow; lastNow = now;
             pos = Math.min(end, pos + (end - lo) * dt / Math.max(1, durMs));
@@ -2126,7 +1730,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         if (winEnd < winStart) { winStart = 0; winEnd = model.numDates - 1; }
         model.winStart = winStart; model.winEnd = winEnd;
         model.winStartYear = model.yearOf[winStart]; model.winEndYear = model.yearOf[winEnd];
-        pbpEvt = model; pbpTimeline = null; pbpExtentCache = null;
+        pbpEvt = model; pbpExtentCache = null;
         window.__bl2d_pbpFallback = false;
         pbpCursorIdx = (startIdx != null) ? Math.max(winStart, Math.min(winEnd, startIdx)) : winEnd;
         if (pbpGranularity === "season") pbpCursorIdx = evtSeasonSnap(model, pbpCursorIdx);
@@ -2134,52 +1738,19 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         syncScrubber();
         refreshChart();
     }
-    async function enableSmooth(startIdx, forceBl2p) {
+    async function enableSmooth(startIdx) {
         const xDimNow = document.getElementById("x-axis-select").value;
         const yDimNow = document.getElementById("y-axis-select").value;
-        // Counting-stat pair with .evt streams → resident full-history path instead of
-        // per-season .bl2p (instant scrub, all of MLB history). Rate stats use .bl2p.
-        // Group-career passes forceBl2p: it needs the season timeline (it samples each
-        // open season's PBP), so it never takes the all-history .evt path.
-        if (!forceBl2p && evtEligible(xDimNow, yDimNow)) { await enableEvt(startIdx); return; }
-        const sYear = parseInt(document.getElementById("s-year-select").value);
-        const eYear = parseInt(document.getElementById("e-year-select").value);
-        const tl = buildPbpTimeline(sYear, eYear, activeDatasetKey);
-
-        // Load from the latest year backward until a covered season is found, so
-        // the default view is that season's full (year-end) frontier — matching
-        // the single-season behaviour. Only one season decodes on enable.
-        let idx = tl.years.length - 1;
-        let entry = await pbpEnsureYearLoaded(tl, idx);
-        while (entry && entry.status === "missing" && idx > 0) {
-            entry = await pbpEnsureYearLoaded(tl, --idx);
-        }
-        if (!entry || entry.status !== "covered") {   // no PBP anywhere in the range
-            window.__bl2d_pbpFallback = true;
-            window.__bl2d_pbpGames = 0;
-            pbpTimeline = null;
-            showSmoothControls(false);
-            setPbpMsg(`No data for ${sYear}–${eYear}`);
-            return;
-        }
-        window.__bl2d_pbpFallback = false;
-        window.__bl2d_pbpGames = entry.decoded.games;
-        pbpTimeline = tl;
-        pbpExtentCache = null;
-        pbpCompletedCache = null;
-        pbpFrontierPrepCache = null;
-        evtIncFrontier = null;
-        pbpCursorIdx = (startIdx != null)
-            ? Math.max(0, Math.min(tl.totalEstimate - 1, startIdx))
-            : pbpGlobalFor(tl, idx, entry.decoded.dateCount - 1);
-        showSmoothControls(true);
-        syncScrubber();
-        refreshChart();
+        // Every counting/derived axis pair is BL2S-eligible (the per-season .bl2p path was
+        // retired in S4), so smooth mode is always the resident full-history model that
+        // enableEvt builds. An ineligible pair just stays static.
+        if (evtEligible(xDimNow, yDimNow)) { await enableEvt(startIdx); return; }
+        showSmoothControls(false);
+        setPbpMsg("No streams for these stats");
     }
     function disableSmooth() {
         stopPbpPlay();
         stopSpringLoop(true); lastGpuSpringFrame = false;   // teardown: hard-cancel the glide loop (no settle tail, no stale cloud)
-        pbpTimeline = null;
         pbpEvt = null;
         pbpExtentCache = null;
         pbpCompletedCache = null;
@@ -2206,7 +1777,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         eInput.value = String(Math.min(parseInt(eInput.max) || span.hi, span.hi));
         groupCareerMode = true;
         groupTrailHistory.clear();
-        if (pbpTimeline || pbpEvt) disableSmoothQuiet();
+        if (pbpEvt) disableSmoothQuiet();
         await enableSmooth(0);                 // start at the group's earliest debut (BL2S all-components model)
         syncGroupCareerToggle();
     }
@@ -2215,7 +1786,6 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     function disableSmoothQuiet() {
         stopPbpPlay();
         stopSpringLoop(true); lastGpuSpringFrame = false;   // teardown: hard-cancel the glide loop
-        pbpTimeline = null;
         pbpEvt = null;
         pbpExtentCache = null;
         pbpCompletedCache = null;
@@ -2235,7 +1805,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     });
 
     scrubber?.addEventListener("input", () => {
-        if (!pbpTimeline && !pbpEvt) return;
+        if (!pbpEvt) return;
         if (pbpRaf) stopPbpPlay();
         const raw = parseInt(scrubber.value) || 0;
         pbpCursorIdx = (pbpEvt && pbpGranularity === "season") ? evtSeasonSnap(pbpEvt, raw) : raw;
@@ -2253,21 +1823,11 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         clearTimeout(smoothLiteTimer);
         smoothLiteTimer = setTimeout(() => { smoothLite = false; refreshChart(); }, 160);
     });
-    // Expose for headless verification (scripts/snap.js evalJS). pbpPointsAsOf
-    // and pbpActive take/return the OPEN year resolved from the global cursor.
-    window.__bl2d_pbpTimeline = () => pbpTimeline;
+    // Expose for headless verification (scripts/snap.js evalJS).
     window.__bl2d_pbpCursorIdx = () => pbpCursorIdx;
-    window.__bl2d_pbpEvt = () => pbpEvt;   // resident .evt model (full-history mode) or null
+    window.__bl2d_pbpEvt = () => pbpEvt;   // resident BL2S smooth-mode model (full-history) or null
     window.__bl2d_evtCursorYear = () => pbpEvt ? pbpEvt.yearOf[evtClampedDate(pbpEvt)] : null;
     window.__bl2d_evtPoints = () => pbpEvt ? evtPointsAsOf(pbpEvt, pbpCursorIdx) : null;
-    window.__bl2d_pbpOpenYear = () => pbpTimeline ? (pbpTimeline.years[pbpTimeline.openYearIdx]?.year ?? null) : null;
-    window.__bl2d_pbpActive = () => pbpTimeline ? (pbpTimeline.years[pbpTimeline.openYearIdx]?.decoded || null) : null;
-    window.__bl2d_pbpPointsAsOf = (globalIdx) => {
-        if (!pbpTimeline) return null;
-        const { yearEntry, withinIdx } = pbpResolveGlobal(pbpTimeline, globalIdx);
-        return yearEntry.status === "covered"
-            ? pbpPointsAsOf(yearEntry.decoded, withinIdx, pbpTimeline.dataset) : null;
-    };
     window.__bl2d_enableSmooth = enableSmooth;
 
     // Deep-link with t=YYYYMMDD: point the season at that year, load its PBP,
@@ -2289,15 +1849,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
                     else if (pbpEvt.yearOf[i] > year) break;
                 }
                 if (d >= 0) { pbpCursorIdx = Math.max(pbpEvt.winStart, Math.min(pbpEvt.winEnd, d)); syncScrubber(); refreshChart(); }
-                return;
             }
-            if (!pbpTimeline) return;
-            const yi = pbpTimeline.years.findIndex((e) => e.year === year);
-            if (yi < 0 || pbpTimeline.years[yi].status !== "covered" || !pbpTimeline.years[yi].decoded) return;
-            const within = pbpNearestDateIdx(pbpTimeline.years[yi].decoded.dates, pbpYmdToDay(ymd));
-            pbpCursorIdx = pbpGlobalFor(pbpTimeline, yi, within);
-            syncScrubber();
-            refreshChart();
         });
     } else if (evtEligible(document.getElementById("x-axis-select").value, document.getElementById("y-axis-select").value)) {
         // Smooth is the default view: auto-enable it on load whenever the axes are
@@ -2682,11 +2234,7 @@ function writeUrlState(state) {
             // Emits the open year's date resolved from the global multi-year cursor.
             t: (() => {
                 if (pbpEvt) { const d = evtClampedDate(pbpEvt); return pbpDayToYmd(pbpEvt.yearOf[d], pbpEvt.doy[d]); }
-                if (!pbpTimeline) return "";
-                const e = pbpTimeline.years[pbpTimeline.openYearIdx];
-                if (!e || e.status !== "covered" || !e.decoded) return "";   // decoded may be released to bound memory
-                const { withinIdx } = pbpResolveGlobal(pbpTimeline, pbpCursorIdx);
-                return pbpDayToYmd(e.year, e.decoded.dates[withinIdx]);
+                return "";
             })(),
         };
         // Drop defaults to keep the URL short.
@@ -5548,7 +5096,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         return { filtered: flt, unique: uniq, frontier: sweepFrontier(uniq) };
     }
 
-    // Incremental frontier for the season-accumulating sweep (.bl2p and .evt-season):
+    // Incremental frontier for the season-accumulating sweep (.evt-season):
     // completed seasons (year < open) are static, so cache their sorted rows per open
     // year and only sort+merge the open season each frame — avoids re-sorting ~100k
     // completed player-seasons every frame. Not for career / group-career / evt-career
@@ -6076,7 +5624,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // ── G-track gate (?renderer=webgpu&gpugraph=1; webgpu-graph.js) ─────────────
     // Phase G0: the STATIC background cloud renders from a retained data-space GPU
     // scene (docs/rendering.md). Static views only — the playback
-    // paths (.evt / .bl2p smooth / group-career) keep their existing engines, so
+    // paths (.evt smooth / group-career) keep their existing engines, so
     // this gate and gpuCloud are mutually exclusive (gpuCloud requires filters.evt).
     // The uploadScene typeof check makes the gate falsy if webgpu-graph.js didn't
     // load (e.g. an old bundle) — the Phase-3 instanced path then runs unchanged.
@@ -6234,7 +5782,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
 
     // .evt: every point's (x,y) moves each frame (cumulative grows), so the whole cloud
     // goes on the redrawn-every-frame foreground; the cached background would freeze it.
-    // .bl2p accumulating: completed seasons are static → cache them on the background.
+    // .evt-season accumulating: completed seasons are static → cache them on the background.
     const backgroundPoints = (filters.groupCareer || filters.evt)
         ? []
         : filters.smooth

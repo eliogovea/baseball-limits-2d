@@ -25,7 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from decode_bl2e import decode
-from convert_retrosheet_pbp import pack_bits
+from _retro_util import pack_bits
 from convert_retrosheet_events import build_retro_to_display, PEOPLE_PATH
 
 ROOT = Path(__file__).resolve().parent.parent

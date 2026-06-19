@@ -14,15 +14,16 @@ regenerates from raw sources.
 | Lahman CSVs | player × season | `data/*_limits_1871-2025.csv` | `convert_csv_lahman*.py` | app static views, season points, bundle | **live** (canonical seasons) |
 | BL2D | player × season blob | inlined in `dist/index.html` | `build_bundle.py` | offline bundle | **live** |
 | BL2E | one play/event | `data/pbp/e1910..e2025.bl2e.gz` (76.8 MB) | `convert_retrosheet_events.py` | nothing at runtime (research/archival) | **archival** |
-| **BL2S** | one stat, star schema | `data/pbp/stat_*.bl2s.gz` (batting 20 + pitching 25 = 45 files, ~17 MB) | `build_stat_files.py` | nothing yet — S3 wires it in | **current target** |
+| **BL2S** | one stat, star schema | `data/pbp/stat_*.bl2s.gz` (batting 20 + pitching 25 = 45 files, ~17 MB) | `build_stat_files.py` | smooth mode + group-career (since S3b/S3c, S4a) | **live** (single stat layer) |
 | ~~`.evt` / STEV~~ | one stat, sparse timeline | _removed in S3d_ (was `data/pbp/*.evt.gz`) | _removed_ (`build_stat_streams.js`) | — superseded by BL2S | **removed — git history only** |
-| BL2P | player × game | `data/pbp/b1920..b2025.bl2p.gz` (~12 MB, batting only) | `convert_retrosheet_pbp.py` | rate-stat smooth fallback, group-career animation | **deprecated — removed at S4** |
+| ~~BL2P~~ | player × game | _removed in S4b_ (was `data/pbp/b1920..b2025.bl2p.gz`) | _removed_ (`convert_retrosheet_pbp.py`) | — superseded by BL2S | **removed — git history only** |
 
-**What the app reads today:** Lahman CSVs (static + season points), **BL2S** (smooth mode,
-batting + pitching — auto-enabled for every eligible counting-stat axis pair via the
-`decodeBl2s*` decoders + `buildEvtModel`, since S3b/S3c), `.bl2p` (rate-stat-pair fallback +
-group-career). The `.evt`/STEV path is dead code pending the S3d deletion. The `file://`
-bundle can't fetch `data/pbp/` so smooth falls back to the static view there (by design).
+**What the app reads today:** Lahman CSVs (static + season points) and **BL2S** (smooth
+mode, batting + pitching — auto-enabled for every eligible counting/derived axis pair via
+the `decodeBl2s*` decoders + `buildEvtModel`, since S3b/S3c; group-career rides an
+all-components BL2S model since S4a). The `.evt`/STEV and `.bl2p` paths were removed in
+S3d/S4b (git history). The `file://` bundle can't fetch `data/pbp/` so smooth falls back to
+the static view there (by design).
 
 **Serving note (applies to every `data/pbp/*.gz`):** the server must send `.gz` as raw
 bytes (Content-Type `application/gzip`, **no** `Content-Encoding`) so the browser's
@@ -209,11 +210,13 @@ strips NTM rows, rewrites playerID → disambiguated display name via
   BL2S in S3b/S3c, then the 40 `*.evt.gz` files, `scripts/build_stat_streams.js`, the
   `decodeStev` reader, and the `evt-demo.html`/`.js` standalone demo were deleted in S3d.
   Full spec: `docs/pbp-evt-format.md` in git history (pre-consolidation).
-- **BL2P** — per-game counting-stat deltas, bit-packed sparse columnar, one gzipped
-  file per season (~150 KB batting). Its remaining consumers (`.evt` builder,
-  rate-stat-pair fallback, group-career animation) migrate or retire in S3/S4. Full
-  spec: header of `scripts/convert_retrosheet_pbp.py` and `docs/pbp-data-format.md`
-  in git history.
+- **BL2P** *(removed in S4b — data + code in git history)* — per-game counting-stat
+  deltas, bit-packed sparse columnar, one gzipped file per season (~150 KB batting). Its
+  consumers (`.evt` builder, rate-stat-pair fallback, group-career animation) all migrated
+  to BL2S over S3/S4, then the 106 `b*.bl2p.gz` files, `convert_retrosheet_pbp.py`, and the
+  `parseBl2p` reader were deleted in S4b (the shared Retrosheet helpers moved to
+  `scripts/_retro_util.py` first). Full spec: header of `convert_retrosheet_pbp.py` and
+  `docs/pbp-data-format.md` in git history.
 - **Measurements** behind all the format choices (size/memory/packing experiments):
   `docs/pbp-data-experiments.md` in git history; the load-bearing numbers are restated
   inline above.
