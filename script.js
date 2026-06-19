@@ -3612,7 +3612,7 @@ class WebGPURenderer {
     // first eligible frame pays the cost and every later frame is just a uniform write +
     // a compute dispatch. Returns false (→ caller falls back to the CPU cloud) if the
     // stream isn't the single-counter-per-axis shape this GPU path requires.
-    uploadEvtStream(model) {
+    uploadEvtStream(model, colorBy = "era") {
         const dev = this.device;
         const stream = model.evStream || buildEvtEventStream(model);
         const players = model.players.length;
@@ -3623,7 +3623,7 @@ class WebGPURenderer {
         if (!mono.ok) return false;
         const cx = mono.cx, cy = mono.cy;
         const token = `${model.xDim}|${model.yDim}|${players}|${stream.n}`;
-        if (this.evt && this.evt.token === token) { this._refreshEvtColors(model); return true; }
+        if (this.evt && this.evt.token === token) { this._refreshEvtColors(model, colorBy); return true; }
         try {
             this._destroyEvt();
             const BU = GPUBufferUsage;
@@ -3667,11 +3667,11 @@ class WebGPURenderer {
             for (let i = 0; i < model.numDates; i++) eventsByDate[i + 1] += eventsByDate[i];
             this.evt = { token, players, streamN: stream.n, numDates: model.numDates, eventsByDate,
                 bEvents, bX, bY, bColor, uWin, uScale, bgAccum, bgCloud,
-                debut, colorTheme: null, zeros: new Uint32Array(players),
+                debut, colorKey: null, zeros: new Uint32Array(players),
                 gpuApplied: null,   // how many stream events the counters reflect (null = none yet)
                 pending: null, failed: false, spring: null };
             if (this.springMode) this._initSpringBuffers(model, players);
-            this._refreshEvtColors(model);
+            this._refreshEvtColors(model, colorBy);
             return true;
         } catch (e) {
             console.warn("[webgpu] evt stream upload failed → CPU cloud:", e.message);
@@ -3726,17 +3726,33 @@ class WebGPURenderer {
         };
     }
 
-    // Pack each player's era colour into the col[] buffer. Era colours are per-theme
-    // (eraFor reads the live ramp), so re-pack whenever the document theme changes —
-    // cheap, and far simpler/more exact than re-deriving the banded ramp in WGSL.
-    _refreshEvtColors(model) {
+    // Pack each player's cloud colour into the col[] buffer for the active Color-by encoding.
+    // All three encodings are STATIC per player across the animation: era = debut-year band,
+    // bats = handedness (from metaFor), league = uniformly "unknown" (the evt-career/open rows
+    // carry no single lgID — matches the CPU `colorOf` for these rows). Colours are per-theme
+    // (eraFor / the palettes read the live ramp), so the cache key folds in both colorBy and
+    // the theme; re-pack only when either changes — far simpler/more exact than re-deriving the
+    // ramp in WGSL. Lets the GPU spring drive league/bats colourings smoothly, not just era.
+    _refreshEvtColors(model, colorBy = "era") {
         const e = this.evt; if (!e) return;
         const theme = document.documentElement.dataset.theme || "";
-        if (e.colorTheme === theme) return;
+        const key = colorBy + "|" + theme;
+        if (e.colorKey === key) return;
         const col = new Uint32Array(e.players);
-        for (let i = 0; i < e.players; i++) col[i] = packColorRGBA((eraFor(e.debut[i]) || { color: "#4a6fa5" }).color, 1);
+        for (let i = 0; i < e.players; i++) {
+            let css;
+            if (colorBy === "bats") {
+                const m = metaFor(model.players[i].name);
+                css = (COLOR_PALETTES.bats[m && m.bats] || COLOR_PALETTES.bats.unknown).color;
+            } else if (colorBy === "league") {
+                css = COLOR_PALETTES.league.unknown.color;   // evt rows carry no single lgID
+            } else {
+                css = (eraFor(e.debut[i]) || { color: "#4a6fa5" }).color;
+            }
+            col[i] = packColorRGBA(css, 1);
+        }
         this.device.queue.writeBuffer(e.bColor, 0, col);
-        e.colorTheme = theme;
+        e.colorKey = key;
     }
 
     // Queue this frame's GPU cloud: figure out the catch-up window, write the uniforms,
@@ -5887,12 +5903,12 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         pbpEvt && pbpEvt.xDim === xDim && pbpEvt.yDim === yDim &&
         !pbpEvt.xs.rate && !pbpEvt.ys.rate &&
         evtGpuMonotone(pbpEvt).ok &&
-        colorBy === "era" &&
+        (colorBy === "era" || colorBy === "bats" || colorBy === "league") &&
         xSign === 1 && ySign === 1 && !showWorstFrontier &&
         bats === "all" && country === "all" &&
         filters.lite &&
         frontierResult.gpu &&
-        pointRenderer.uploadEvtStream(pbpEvt)
+        pointRenderer.uploadEvtStream(pbpEvt, colorBy)
     );
     window.__bl2d_evtGpuCloud = gpuCloud;
     // Phase-5 gpuStreaming engine active this frame (?gpustream=1 + a GPU cloud frame):
@@ -5915,10 +5931,10 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         pbpEvt && pbpEvt.xDim === xDim && pbpEvt.yDim === yDim &&
         !pbpEvt.xs.rate && !pbpEvt.ys.rate &&
         evtGpuMonotone(pbpEvt).ok &&
-        colorBy === "era" &&
+        (colorBy === "era" || colorBy === "bats" || colorBy === "league") &&
         xSign === 1 && ySign === 1 && !showWorstFrontier &&
         bats === "all" && country === "all" &&
-        pointRenderer.uploadEvtStream(pbpEvt)
+        pointRenderer.uploadEvtStream(pbpEvt, colorBy)
     );
     window.__bl2d_evtGpuSeason = gpuSeason;
     lastGpuSpringFrame = gpuSpring || gpuSeason;   // gate the glide loop: a CPU-fallback frame parks it

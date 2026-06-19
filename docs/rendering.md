@@ -735,7 +735,7 @@ run.
 The live render of the open-season cloud, gated behind the **`?gpuseason=1`** dev hatch (default
 OFF — the proven CPU season cloud stays the default until graduation). A `gpuSeason` gate in
 `drawScatterPlot` mirrors `gpuCloud`'s eligibility but for SEASON smooth (monotone counting axes,
-era colour, no sign flip / worst toggle / bats-country filter, a lite playback frame); when it
+era/bats/league colour, no sign flip / worst toggle / bats-country filter, a lite playback frame); when it
 engages it calls `accumulateSeasonCloud`, suppresses the CPU foreground open-cloud
 (`foregroundCloudPoints = []`), keeps the CPU completed-season bg + the union frontier, and sets
 `lastGpuSpringFrame` so the glide loop drives it. `present_legacy`/`present_unified` gained a
