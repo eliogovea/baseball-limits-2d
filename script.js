@@ -6005,6 +6005,14 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             fillFor: d => careerHighlights.get(d.playerID) || frontierColor || colorOf(d, colorBy, getMeta),
             strokeColor: "#ffffff", strokeWidth: 1.5,
         });
+    } else if ((gpuSpring || gpuGraph) && pointRenderer && pointRenderer.count) {
+        // The GPU spring / G-track draws the frontier dots itself (spring: the skyline
+        // pass over onFront[]; G-track: sceneFront). drawFrontierDots is skipped above,
+        // so the retained legacy `frontier` buffer is NOT refreshed — and present()'s
+        // drawPts("frontier") would otherwise keep re-drawing whatever frontier was last
+        // uploaded by a static/paused (non-spring) frame ON TOP of the animation (the
+        // "previous frontier never clears" bug). Zero it so that draw is a true no-op.
+        pointRenderer.count.frontier = 0;
     }
     // GPU compute-accumulate cloud: hand the renderer this frame's event window (from the
     // JS incremental frontier) + the D3-linear axis mapping, so present() runs the compute
