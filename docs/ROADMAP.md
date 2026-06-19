@@ -73,7 +73,7 @@ now finishes the in-flight render track, then returns to the (still-unstarted) d
 | 1 | **G6** — graduate the G-track | G6a–G6f (detail in [`rendering.md`](rendering.md) §"G6") | ◑ in progress (**all agent-doable phases shipped**: GPU-default + G6c parity-matrix + G6d device-loss + G6e rotated-title + **G6f hatch-cleanup/docs**) | only **G6a + G6b-flip** remain — both need a **human/browser MANUAL** |
 | 2 | **S3** — app onto BL2S, remove `.evt` | S3a–S3e | ✅ S3a–S3d shipped (builder + batting & pitching swap + `.evt` removal); S3e optional | fully agent-doable |
 | 3 | **S4** — retire BL2P | S4a–S4b | ✅ S4a+S4b shipped (readers on BL2S; BL2P deleted) | fully agent-doable |
-| 4 | **S-track** — GPU season animation (folds in G5i) | SA0–SA4 | ◑ **SA1 shipped** (GPU season-targeting correctness core + `__bl2d_verifySeason` oracle, `seasonMis 0`); SA0/SA2–SA4 pending | SA0 agent-doable; SA2 motion needs a MANUAL |
+| 4 | **S-track** — GPU season animation (folds in G5i) | SA0–SA4 | ◑ **SA1 + SA0 shipped** (targeting core + live `accumulateSeasonCloud` state machine; `__bl2d_verifySeason`/`verifySeasonLive` `seasonMis 0`); SA2–SA4 pending | agent-doable end-to-end — **`scripts/snap-realgpu.js`** (Playwright headed real GPU) verifies the SA2 visible glide, no human MANUAL needed |
 | 5 | **S2** — Lahman complement | — | ☐ after S3/S4 | fully agent-doable |
 
 ### ▶ RESUME HERE (next session)
@@ -390,7 +390,7 @@ cloud) → SA3 (hybrid GPU frontier) → SA4 (polish).
 | Phase | Status | Notes / commit |
 |---|---|---|
 | SA1 GPU season targeting (correctness core) | ✅ shipped | spring shader `mode` flag + `baseHr`/`baseSb` baseline buffers (snapshot via `copyBufferToBuffer` at `appliedAt(seasonStart−1)`); target = `max(career−base,0)` (exact ∵ linear zero-intercept axis). `__bl2d_verifySeason` oracle: `seasonMis 0` over HR×SB / TB×R / H×BB / SO×W incl. boundary cross + backward scrub; Bonds 2001 = 73 HR / 411 TB / 156 H / 177 BB. Career `verifySpring` still green. Headless on the dev server via `snap-gpu.js`. |
-| SA0 live gate + active set | ☐ not started | route season → `filters.evt`/spring path (the per-frame baseline management mirrors `verifySeason`'s incremental branches); needs SA2 to be visible |
+| SA0 live state machine (production primitive) | ✅ shipped | `_seasonAccumulateTo` shared branch logic + `accumulateSeasonCloud` (persistent `e.season` state, pos snap on boundary cross, `mode=1` spring uniform, `pending.season`); `__bl2d_verifySeasonLive` proves the live per-frame path `seasonMis 0` (fresh→cross→cross→backward). Not wired into present yet (SA2). |
 | SA2 sprung open-season cloud + glide loop | ☐ not started | **real-GPU browser MANUAL** (live-only spring effect; folds in deferred G5i cross-fade) |
 | SA3 hybrid GPU frontier | ☐ not started | CPU completed-season frontier ∪ GPU open skyline |
 | SA4 polish | ☐ not started | rate axes excluded; bats/country still CPU; README/CLAUDE updates |

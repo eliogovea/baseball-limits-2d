@@ -704,13 +704,30 @@ name-keyed map conflates). Verified headless via `scripts/snap-gpu.js` on the **
 (`?webgpuHeadless=1&renderer=webgpu&gpustream=1`, stat layer present): **`seasonMis 0`** across
 HR×SB, TB×R, H×BB (batting) and SO×W (pitching), boundary crossings (e.g. 1998→2001→2002) and
 backward scrubs (→2001, →mid-2001) included; spot-checks Bonds 2001 = 73 HR / 13 SB / 411 TB /
-129 R / 156 H / 177 BB. **Not yet done:** SA0's live gate (season still sets no `filters.evt`,
-so it renders on the CPU cloud) and SA2's sprung-cloud render + glide loop — both need a
-real-GPU browser MANUAL (the spring is a live-only visual effect; headless SwiftShader can't
-configure a visible canvas). The verifySpring/verifySeason one-shots are **flaky on a cold
-page** under SwiftShader (the oracle occasionally fires before the first stream upload settles,
-yielding all-zero counters — pre-existing, reproduces on clean `main`); poll until
-`verifySpring().maxX>0` before trusting a run.
+129 R / 156 H / 177 BB.
+
+### [x] SA0 — live season state machine (production primitive) *(shipped)*
+
+The one-shot SA1 oracle proved the math; SA0 lifts that logic into the **production per-frame
+path** the live loop will call. `_seasonAccumulateTo(state, desiredBase, target)` is the shared
+counter/baseline state machine (the three motion branches + the boundary snapshot), now used by
+BOTH `verifySeason` (refactored onto it) and the new `accumulateSeasonCloud({cursor, start,
+scales})`. `accumulateSeasonCloud` holds **persistent** `e.season = {gpuApplied, baseTarget}`
+across frames, snaps pos/vel to rest on the first season frame or a boundary cross (so a new
+season grows from 0 instead of swooping down from the prior season's values), zeros `bOnFront`
+(the GPU owns only the open cloud — no GPU frontier yet; the CPU keeps the union frontier until
+SA3), writes the spring uniform in `mode=1`, and stashes a `pending.season` request. A career
+frame clears `e.seasonActive` so present/glide fall back to `mode=0`. Verified headless via
+`window.__bl2d_verifySeasonLive` — it drives the production `accumulateSeasonCloud` with its
+persistent state through a real per-frame sequence (fresh jump → forward cross → forward cross →
+backward replay) and checks `bX − baseX` (the season value before the spring glides) against the
+per-index `evtAsOf` oracle: **`seasonMis 0`** at every step (Bonds 1998 = 37/28, 2001 = 73/13,
+2002 = 46/9, back to 2001 = 73/13). **No visible change yet** — `accumulateSeasonCloud` isn't
+wired into `drawScatterPlot`/`present` until SA2; this commit ships only the verified primitive.
+The verifySpring/verifySeason one-shots are **flaky on a cold page** under SwiftShader (the oracle
+occasionally fires before the first stream upload settles, yielding all-zero counters —
+pre-existing, reproduces on clean `main`); poll until `verifySpring().maxX>0` before trusting a
+run.
 
 Invariant:
 career counters are never mutated by the season path, so career↔season mid-play stays

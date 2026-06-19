@@ -3756,6 +3756,7 @@ class WebGPURenderer {
     accumulateCloud({ win, instanceCount, scales }) {
         const e = this.evt;
         if (!e || e.failed) return;
+        e.seasonActive = false;   // a career frame: clear the S-track season flag so present/glide use mode 0
         const dev = this.device;
         const target = win.applied >>> 0;
         let lo, count;
@@ -3804,6 +3805,85 @@ class WebGPURenderer {
             dev.queue.writeBuffer(s.uSpringScale1, 0, new Float32Array([...base, 1, 0]));  // frontier pass
             e.pending.spring = true;
         }
+    }
+
+    // ── S-track: the season counter/baseline state machine (shared by the live cloud +
+    //    the verify oracles) ───────────────────────────────────────────────────────────────
+    // appliedAt(d) = # stream events with date ≤ d (the eventsByDate prefix; O(1)).
+    _appliedAt(d) { const e = this.evt; return e.eventsByDate[Math.max(0, Math.min(e.numDates - 1, d)) + 1]; }
+
+    // Drive the resident career counters bX/bY + the season baseline baseX/baseY from `state`
+    // (`{gpuApplied, baseTarget}`) to the cursor's `{desiredBase, target}` event counts, doing
+    // the minimal work for the three motion classes and snapshotting the baseline at the season
+    // boundary. Each accumulate range is its own submit (the pAccum pass reads uWin at exec time;
+    // collapsing many writes before one submit would lose all but the last window). Returns
+    // whether the baseline changed this step (⇒ a season boundary cross / replay → the caller
+    // snaps pos/vel so the new season grows from 0 instead of gliding down from the old one).
+    _seasonAccumulateTo(state, desiredBase, target) {
+        const dev = this.device, e = this.evt, s = e.spring, bytes = e.players * 4;
+        const accum = (lo, count) => {
+            if (count <= 0) return;
+            dev.queue.writeBuffer(e.uWin, 0, new Uint32Array([lo >>> 0, count >>> 0, 0, 0]));
+            const enc = dev.createCommandEncoder();
+            const cp = enc.beginComputePass(); cp.setPipeline(this.pAccum); cp.setBindGroup(0, e.bgAccum);
+            cp.dispatchWorkgroups(Math.ceil(count / 64)); cp.end();
+            dev.queue.submit([enc.finish()]);
+        };
+        const snapshot = () => {                       // bX/bY (at season start−1) → baseX/baseY
+            const enc = dev.createCommandEncoder();
+            enc.copyBufferToBuffer(e.bX, 0, s.baseX, 0, bytes);
+            enc.copyBufferToBuffer(e.bY, 0, s.baseY, 0, bytes);
+            dev.queue.submit([enc.finish()]);
+        };
+        const baseChanged = desiredBase !== state.baseTarget;
+        if (state.baseTarget < 0 || target < state.gpuApplied || desiredBase < state.baseTarget) {
+            dev.queue.writeBuffer(e.bX, 0, e.zeros);     // fresh / backward seek → replay from 0
+            dev.queue.writeBuffer(e.bY, 0, e.zeros);
+            accum(0, desiredBase); snapshot(); accum(desiredBase, target - desiredBase);
+        } else if (desiredBase > state.baseTarget) {     // forward across a season boundary
+            accum(state.gpuApplied, desiredBase - state.gpuApplied); snapshot(); accum(desiredBase, target - desiredBase);
+        } else {                                         // forward within the same open season
+            accum(state.gpuApplied, target - state.gpuApplied);
+        }
+        state.gpuApplied = target; state.baseTarget = desiredBase;
+        return baseChanged;
+    }
+
+    // SA0/SA2 live season frame: maintain the resident counters + baseline for the open season
+    // at `cursor` (global date index; `start` = its season's first date index), then set up the
+    // spring uniforms so present() glides the open-season cloud toward `max(career − baseline, 0)`
+    // (mode=1). The GPU owns ONLY the open cloud here — onFront is zeroed so every active dot
+    // draws (no GPU frontier; the CPU keeps the union frontier until SA3), and present() skips
+    // the skyline/staircase/frontier-dot passes for a season pending. count=0: the accumulate is
+    // done here (it can span multiple ranges + a snapshot), so present runs only the spring+draw.
+    accumulateSeasonCloud({ cursor, start, scales }) {
+        const e = this.evt;
+        if (!e || e.failed || !e.spring) return;
+        const dev = this.device, s = e.spring;
+        if (!e.season) e.season = { gpuApplied: 0, baseTarget: -1 };
+        const first = !e.seasonActive;
+        const desiredBase = this._appliedAt(start - 1), target = this._appliedAt(cursor);
+        const baseChanged = this._seasonAccumulateTo(e.season, desiredBase, target);
+        e.seasonActive = true;
+        const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
+        let dt = this.lastSpringT ? (now - this.lastSpringT) / 1000 : 1 / 60;
+        this.lastSpringT = now;
+        if (!isFinite(dt) || dt <= 0) dt = 1 / 60;
+        dt = Math.min(dt, 0.05);
+        // Snap the cloud to rest on the first season frame or a boundary cross (the new season's
+        // values jump to ~0) so it grows from the origin instead of swooping from the old values.
+        if (first || baseChanged) { dev.queue.writeBuffer(s.bPos, 0, s.zerosVec2); dev.queue.writeBuffer(s.bVel, 0, s.zerosVec2); }
+        dev.queue.writeBuffer(s.bOnFront, 0, e.zeros);   // no GPU frontier → every active dot draws in the cloud pass
+        const uSpring = new ArrayBuffer(16);
+        new Float32Array(uSpring, 0, 2).set([dt, WEBGPU_SPRING_OMEGA]);
+        new Uint32Array(uSpring, 8, 2).set([e.players, 1]);   // n, mode=1 (season)
+        dev.queue.writeBuffer(s.uSpring, 0, uSpring);
+        const fr = Math.max((scales.radius || 2.5) + 3, 6), ring = 1.5;
+        const base = [scales.slopeX, scales.interceptX, scales.slopeY, scales.interceptY,
+            scales.vpX, scales.vpY, scales.radius, scales.alpha, fr, ring];
+        dev.queue.writeBuffer(s.uSpringScale0, 0, new Float32Array([...base, 0, 0]));   // cloud pass only
+        e.pending = { count: 0, instanceCount: e.players, spring: true, season: true };
+        e.lastInstanceCount = e.players;
     }
 
     // Read the per-player counters back to the CPU (buffer→buffer copy → MAP_READ). Used
@@ -3907,51 +3987,14 @@ class WebGPURenderer {
         const e = this.evt, s = e && e.spring;
         if (!e || !s || !e.eventsByDate) return null;
         const dev = this.device, n = e.players;
-        const ebd = e.eventsByDate;
-        const appliedAt = (d) => ebd[Math.max(0, Math.min(e.numDates - 1, d)) + 1];   // events with date ≤ d
-        const bytes = n * 4;
-        // Each accumulate range is its own submit: the pAccum pass reads uWin at execution
-        // time, and multiple writeBuffers to one uWin before a single submit would collapse to
-        // the last — so one submit per range keeps the windows distinct (ordering is preserved
-        // on the queue). Perf is irrelevant here (one-shot verify).
-        const accum = (lo, count) => {
-            if (count <= 0) return;
-            dev.queue.writeBuffer(e.uWin, 0, new Uint32Array([lo >>> 0, count >>> 0, 0, 0]));
-            const enc = dev.createCommandEncoder();
-            const cp = enc.beginComputePass(); cp.setPipeline(this.pAccum); cp.setBindGroup(0, e.bgAccum);
-            cp.dispatchWorkgroups(Math.ceil(count / 64)); cp.end();
-            dev.queue.submit([enc.finish()]);
-        };
-        const snapshot = () => {                       // bX/bY (at season start−1) → baseX/baseY
-            const enc = dev.createCommandEncoder();
-            enc.copyBufferToBuffer(e.bX, 0, s.baseX, 0, bytes);
-            enc.copyBufferToBuffer(e.bY, 0, s.baseY, 0, bytes);
-            dev.queue.submit([enc.finish()]);
-        };
-        let gpuApplied = 0, baseTarget = -1;
+        // Drive the shared season state machine through each probe (no reset between probes — the
+        // sequence exercises the same incremental branches the live cloud hits).
+        const state = { gpuApplied: 0, baseTarget: -1 };
         dev.queue.writeBuffer(e.bX, 0, e.zeros);
         dev.queue.writeBuffer(e.bY, 0, e.zeros);
         const out = [];
         for (const probe of probes) {
-            const desiredBase = appliedAt(probe.start - 1);   // events strictly before the open year
-            const target = appliedAt(probe.d);
-            if (baseTarget < 0 || target < gpuApplied || desiredBase < baseTarget) {
-                // fresh / backward seek: replay the career counters from 0, snapshot at the boundary.
-                dev.queue.writeBuffer(e.bX, 0, e.zeros);
-                dev.queue.writeBuffer(e.bY, 0, e.zeros);
-                accum(0, desiredBase);
-                snapshot();
-                accum(desiredBase, target - desiredBase);
-            } else if (desiredBase > baseTarget) {
-                // forward across a season boundary: split the window at the boundary, snapshot there.
-                accum(gpuApplied, desiredBase - gpuApplied);
-                snapshot();
-                accum(desiredBase, target - desiredBase);
-            } else {
-                // forward within the same open season: baseline unchanged, just extend the counters.
-                accum(gpuApplied, target - gpuApplied);
-            }
-            gpuApplied = target; baseTarget = desiredBase;
+            this._seasonAccumulateTo(state, this._appliedAt(probe.start - 1), this._appliedAt(probe.d));
             // Settle the season spring from rest: mode=1, huge dt ⇒ pos = max(career − base, 0).
             dev.queue.writeBuffer(s.bPos, 0, s.zerosVec2);
             dev.queue.writeBuffer(s.bVel, 0, s.zerosVec2);
@@ -3988,7 +4031,7 @@ class WebGPURenderer {
             for (const nm of spotlight) { const i = model.players.findIndex(p => p.name === nm); if (i >= 0) records[nm] = { x: pos[i * 2], y: pos[i * 2 + 1] }; }
             out.push({ year: probe.O, seasonMis, active, records, misDetail });
         }
-        e.gpuApplied = gpuApplied;   // leave live bookkeeping consistent (counters reflect this)
+        e.gpuApplied = state.gpuApplied;   // leave live bookkeeping consistent (counters reflect this)
         return out;
     }
 
@@ -4487,6 +4530,51 @@ window.__bl2d_verifySeason = async (years = [1998, 2001, 2002], spotlight = ["Ba
     if (!res) return null;
     const totalMis = res.reduce((a, r) => a + r.seasonMis, 0);
     return { axes: `${m.xDim}×${m.yDim}`, totalMis, allGreen: totalMis === 0, probes: res };
+};
+
+// S-track SA0 invariant probe (the LIVE season state-machine oracle). Where __bl2d_verifySeason
+// drives a one-shot local state, this drives the PRODUCTION accumulateSeasonCloud with its
+// persistent e.season state across a cursor sequence (fresh jump → forward boundary cross →
+// forward cross → backward replay) — the exact per-frame path the live render loop uses — and
+// checks the resident counter minus baseline (bX−baseX, the season value BEFORE the spring
+// glides) against the per-index evtAsOf oracle. seasonMis must be 0 at every step. One-shot,
+// headless-safe (compute + buffer readback only).
+window.__bl2d_verifySeasonLive = async (years = [1998, 2001, 2002, 2001], spotlight = ["Barry Bonds"]) => {
+    if (!(pointRenderer instanceof WebGPURenderer) || !pointRenderer.springMode || !pbpEvt) return null;
+    const m = pbpEvt;
+    if (m.xs.rate || m.ys.rate || !evtGpuMonotone(m).ok) return { skipped: "axes not GPU-season-eligible" };
+    pointRenderer.uploadEvtStream(m);
+    const r = pointRenderer.evt; if (!r || !r.spring) return null;
+    r.season = null; r.seasonActive = false;   // fresh live state for the run
+    const endOf = (y) => Math.min(m.winEnd ?? (m.numDates - 1), m.seasonEndByYear.get(y));
+    const scales = { slopeX: 1, interceptX: 0, slopeY: 1, interceptY: 0, vpX: 1, vpY: 1, radius: 2.5, alpha: 0.5 };
+    const out = [];
+    for (const y of years) {
+        const start = m.seasonStartByYear.get(y); if (start == null) continue;
+        const cursor = endOf(y);
+        pointRenderer.accumulateSeasonCloud({ cursor, start, scales });   // advances persistent e.season
+        const X = await pointRenderer._readback(r.bX, r.players * 4, Uint32Array);
+        const Y = await pointRenderer._readback(r.bY, r.players * 4, Uint32Array);
+        const BX = await pointRenderer._readback(r.spring.baseX, r.players * 4, Uint32Array);
+        const BY = await pointRenderer._readback(r.spring.baseY, r.players * 4, Uint32Array);
+        const c = {}, before = start - 1; let seasonMis = 0, active = 0; const misDetail = [];
+        for (let i = 0; i < r.players; i++) {
+            const comp = m.players[i].comp;
+            for (const dep of m.depList) { const sr = comp[dep]; c[dep] = sr ? evtAsOf(sr, cursor) - evtAsOf(sr, before) : 0; }
+            let ex = m.xs.fn(c), ey = m.ys.fn(c);
+            if (!isFinite(ex) || ex < 0) ex = 0;
+            if (!isFinite(ey) || ey < 0) ey = 0;
+            const gx = X[i] - BX[i], gy = Y[i] - BY[i];   // career counter − baseline = the season value
+            if (ex || ey) active++;
+            if (Math.abs(gx - ex) > 0.5 || Math.abs(gy - ey) > 0.5) { seasonMis++; if (misDetail.length < 5) misDetail.push({ i, name: m.players[i].name, gpu: [gx, gy], cpu: [ex, ey] }); }
+        }
+        const records = {};
+        for (const nm of spotlight) { const i = m.players.findIndex(p => p.name === nm); if (i >= 0) records[nm] = { x: X[i] - BX[i], y: Y[i] - BY[i] }; }
+        out.push({ year: y, seasonMis, active, records, misDetail });
+    }
+    r.season = null; r.seasonActive = false;   // don't leak test state into the live loop
+    const totalMis = out.reduce((a, p) => a + p.seasonMis, 0);
+    return { axes: `${m.xDim}×${m.yDim}`, totalMis, allGreen: totalMis === 0, probes: out };
 };
 
 function recordPbpFrameTiming(totalMs, modelMs, renderMs, enabled) {

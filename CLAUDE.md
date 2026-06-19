@@ -97,6 +97,30 @@ node scripts/snap-gpu.js "file://$PWD/dist/index.html?webgpuHeadless=1&gpugraph=
 # stderr: MATRIX-SUMMARY ALL-GREEN 15/15 pass   (append &matrixPerturb=1 → FAILED 0/15)
 ```
 
+**Live-animation / real-GPU frames need `scripts/snap-realgpu.js` (Playwright headed Chrome).**
+Headless Chrome (`snap.js`/`snap-gpu.js`) runs the **SwiftShader** fallback adapter, which
+cannot configure a visible canvas AND serializes/stalls some timing-sensitive GPU paths — so
+**live-animation bugs only reproduce on a real GPU** (e.g. a persistent-draw glitch that shows
+only mid-glide). `snap-realgpu.js` launches **headed system Chrome** (real Metal GPU), drives the
+live playback, and grabs the app's OFFSCREEN readback (`__bl2d_exportDataURLs()`) — the only way
+to see the GPU layer, since Playwright's `page.screenshot` does NOT composite the WebGPU canvas
+and `pointRenderer` is module-scoped. It returns only the GPU layer (no SVG axes). One-time setup
+(the repo stays `package.json`-free): `mkdir -p /tmp/pw && cd /tmp/pw &&
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm i playwright` (override the dir with `PLAYWRIGHT_DIR`; no
+browser download — it uses `channel:'chrome'`). The URL **must** include `?webgpuHeadless=1`
+(Playwright sets `navigator.webdriver=true`, which `chooseRenderer` otherwise treats as headless →
+Canvas2D). Capture ACROSS live glide frames — don't pause+settle, that hides transient/persistent
+bugs. Drive via `#anim-play-btn` / `#pbp-scrubber`; the tour is auto-dismissed.
+```
+# serve over HTTP (stat layer must load → spring/season engages; the file:// bundle has none)
+node scripts/snap-realgpu.js "http://localhost:8000/?webgpuHeadless=1&renderer=webgpu&gpustream=1#m=career&ds=batting&x=HR&y=SB&smooth=1" /tmp/g.png 3500 \
+  'document.getElementById("anim-play-btn").click(); await new Promise(r=>setTimeout(r,1300));'
+# stderr: [realgpu] renderer=webgpu   → /tmp/g.png is the offscreen GPU layer mid-glide
+```
+Reach for it over `snap-gpu.js` whenever the thing under test is the **`.evt` smooth / group-career
+playback** (career or season spring) rather than a static G-track frame. See memory
+`project_realgpu_verification` for the gotchas.
+
 The full set of dev/verification URL hatches (`?renderer=canvas`, `?gpugraph=0`, `?gpustream=0`,
 `?gpuonly=1`, `?webgpuHeadless=1`, `?legacyPresent=0`, `?verifyFrontier=1`, `?deviceLossTest=1`,
 `?matrixPerturb=1`) is tabulated in [`docs/rendering.md`](docs/rendering.md) §"G6f" — none is a
