@@ -649,6 +649,7 @@ auto-enables, Canvas2D is the silent fallback); these exist to *force* a path fo
 | `?verifyFrontier=1` | off | asserts the incremental frontier == full sweep every smooth frame | smooth-path (`pbpEvt`) incremental gate |
 | `?deviceLossTest=1` | hook not attached | attaches `window.__bl2d_forceDeviceLoss()` | G6d device-loss → Canvas2D recovery test |
 | `?matrixPerturb=1` | off | corrupts one oracle inside `__bl2d_verifyGraphMatrix()` | G6c parity-matrix negative control |
+| `?gpuseason=1` | season cloud on CPU | GPU-springs the open-season cloud (S-track SA2) | season smooth GPU animation — default off until graduated |
 
 **G6 done ⇒** the full-GPU chart is the production renderer end-to-end (cloud → frontier →
 HV → overlays → text → interaction), one loop owner, one present body, with Canvas2D as the
@@ -728,6 +729,29 @@ The verifySpring/verifySeason one-shots are **flaky on a cold page** under Swift
 occasionally fires before the first stream upload settles, yielding all-zero counters —
 pre-existing, reproduces on clean `main`); poll until `verifySpring().maxX>0` before trusting a
 run.
+
+### [x] SA2 — render the sprung open-season cloud + glide loop *(shipped, behind `?gpuseason=1`)*
+
+The live render of the open-season cloud, gated behind the **`?gpuseason=1`** dev hatch (default
+OFF — the proven CPU season cloud stays the default until graduation). A `gpuSeason` gate in
+`drawScatterPlot` mirrors `gpuCloud`'s eligibility but for SEASON smooth (monotone counting axes,
+era colour, no sign flip / worst toggle / bats-country filter, a lite playback frame); when it
+engages it calls `accumulateSeasonCloud`, suppresses the CPU foreground open-cloud
+(`foregroundCloudPoints = []`), keeps the CPU completed-season bg + the union frontier, and sets
+`lastGpuSpringFrame` so the glide loop drives it. `present_legacy`/`present_unified` gained a
+**cloud-only** `season` source — it runs just the `pSpring` glide (mode=1) and draws spring-cloud
+pass 0; it does NOT run the skyline/staircase or draw the GPU frontier-dots/stairline (the CPU
+owns the union frontier until SA3). `presentGlide` keeps `mode=1` + re-zeros `onFront` on season
+glide frames. The GPU owns only the OPEN cloud; `onFront=0` ⇒ every active dot draws.
+
+Verified on the **real Metal GPU** via `scripts/snap-realgpu.js` (Playwright headed Chrome —
+headless SwiftShader can't show a visible canvas): in season smooth play the gate engages
+(`__bl2d_evtGpuSeason === true`, 5/5 sampled glide frames, no CPU flicker) and the GPU open-season
+cloud renders correctly — at 1929 it clusters near the origin on the integer HR/SB grid (season
+values, not career), and its outliers + data→pixel alignment match the CPU-path season cloud
+(`?gpuseason` off) at the same cursor. Settled (paused) frames are non-lite ⇒ the CPU exact cloud
+takes over, same as career. Default season render (no flag) is byte-unchanged. **Remaining:** SA3
+(hybrid GPU frontier over completed ∪ open) then SA4 (polish) + graduating the flag to default.
 
 Invariant:
 career counters are never mutated by the season path, so career↔season mid-play stays

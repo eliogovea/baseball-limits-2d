@@ -4071,10 +4071,12 @@ class WebGPURenderer {
     _buildSceneDescriptor() {
         const evt = this.evt;
         const gpuCloud = !!(evt && evt.pending && !evt.failed);
-        const springOn = !!(gpuCloud && evt.pending.spring && evt.spring);
+        // S-track season: a cloud-only spring source (no GPU skyline/staircase/frontier-dots).
+        const seasonOn = !!(gpuCloud && evt.pending.season && evt.spring);
+        const springOn = !!(gpuCloud && evt.pending.spring && evt.spring && !evt.pending.season);
         return {
-            evt, gpuCloud, springOn,
-            source: springOn ? "spring" : (this.graph && this.graphMode ? "upload" : "hybrid"),
+            evt, gpuCloud, springOn, seasonOn,
+            source: springOn ? "spring" : seasonOn ? "season" : (this.graph && this.graphMode ? "upload" : "hybrid"),
             runAccumulate: !!(gpuCloud && evt.pending.count > 0),
             instanceCount: gpuCloud ? (evt.pending.instanceCount || 0) : 0,
         };
@@ -4104,6 +4106,11 @@ class WebGPURenderer {
                 pass(this.pStairRanksort, s.bgStair, wgK);
                 pass(this.pStairEmit, s.bgStair, wgK);
             } catch (e3) { evt.failed = true; console.warn("[webgpu] spring passes failed → CPU cloud:", e3.message); }
+        } else if (d.source === "season") {
+            try {
+                const cp = enc.beginComputePass(); cp.setPipeline(this.pSpring); cp.setBindGroup(0, evt.spring.bgSpring);
+                cp.dispatchWorkgroups(Math.ceil(evt.players / 64)); cp.end();   // open-cloud glide only (mode=1)
+            } catch (e3) { evt.failed = true; console.warn("[webgpu] season spring pass failed → CPU cloud:", e3.message); }
         }
         // ── render: identical z-order to present_legacy ──
         const rp = enc.beginRenderPass({ colorAttachments: [{
@@ -4114,7 +4121,7 @@ class WebGPURenderer {
         this._drawGraphScene?.(rp);
         this._drawGraphDepth?.(rp);
         this._drawGraphAux?.(rp);
-        if (d.source === "spring" && d.instanceCount > 0) {
+        if ((d.source === "spring" || d.source === "season") && d.instanceCount > 0) {
             rp.setPipeline(this.pSpringCloud); rp.setBindGroup(0, evt.spring.bgSpringCloud0);
             rp.draw(6, d.instanceCount); rp.setPipeline(this.pPoints);
         } else if (d.gpuCloud && d.instanceCount > 0) {
@@ -4170,7 +4177,11 @@ class WebGPURenderer {
         // accumulate writes, skyline sees spring's pos, and the staircase passes chain
         // compact→ranksort→emit. ranksort/emit over-dispatch to MAX_FRONT and self-guard
         // against the GPU-side K (the host can't know K without a readback).
-        const springOn = gpuCloud && !evt.failed && evt.pending.spring && evt.spring;
+        // S-track season frame (`pending.season`): the GPU owns ONLY the open-season cloud, so
+        // it runs the spring glide alone (mode=1, baseline-subtracted) — no GPU skyline/staircase
+        // (the CPU keeps the union frontier until SA3). The full career path runs all 5 passes.
+        const seasonOn = gpuCloud && !evt.failed && evt.pending.season && evt.spring;
+        const springOn = gpuCloud && !evt.failed && evt.pending.spring && evt.spring && !evt.pending.season;
         if (springOn) {
             try {
                 const s = evt.spring;
@@ -4182,6 +4193,11 @@ class WebGPURenderer {
                 pass(this.pStairRanksort, s.bgStair, wgK);    // rank-sort by x
                 pass(this.pStairEmit, s.bgStair, wgK);        // emit step verts + indirect count
             } catch (e3) { evt.failed = true; console.warn("[webgpu] spring passes failed → CPU cloud:", e3.message); }
+        } else if (seasonOn) {
+            try {
+                const cp = enc.beginComputePass(); cp.setPipeline(this.pSpring); cp.setBindGroup(0, evt.spring.bgSpring);
+                cp.dispatchWorkgroups(Math.ceil(evt.players / 64)); cp.end();   // glide the open cloud toward career−baseline
+            } catch (e3) { evt.failed = true; console.warn("[webgpu] season spring pass failed → CPU cloud:", e3.message); }
         }
         const rp = enc.beginRenderPass({ colorAttachments: [{
             view: this.offTex.createView(), clearValue: this.clearValue, loadOp: "clear", storeOp: "store" }] });
@@ -4201,9 +4217,9 @@ class WebGPURenderer {
         // Phase-5 spring path: vertex-pull the SMOOTHED pos[] (pass 0 = non-front cloud);
         // the frontier dots (pass 1) + the GPU staircase are drawn LAST, on top. Phase-4
         // hybrid path: the original counter-pull cloud.
-        if (springOn && evt.pending.instanceCount > 0) {
+        if ((springOn || seasonOn) && evt.pending.instanceCount > 0) {
             rp.setPipeline(this.pSpringCloud);
-            rp.setBindGroup(0, evt.spring.bgSpringCloud0);
+            rp.setBindGroup(0, evt.spring.bgSpringCloud0);   // pass 0 = cloud (season has onFront=0 ⇒ every active dot draws)
             rp.draw(6, evt.pending.instanceCount);
             rp.setPipeline(this.pPoints);
         } else if (gpuCloud && !evt.failed && evt.pending.instanceCount > 0) {
@@ -4268,9 +4284,14 @@ class WebGPURenderer {
         this.device.queue.writeBuffer(s.bIndirect, 0, new Uint32Array([0, 1, 0, 0]));
         const uSpring = new ArrayBuffer(16);
         new Float32Array(uSpring, 0, 2).set([dt, WEBGPU_SPRING_OMEGA]);
-        new Uint32Array(uSpring, 8, 2).set([e.players, 0]);
+        // S-track: a season glide frame keeps mode=1 (baseline-subtracted) and re-zeros onFront so
+        // the open cloud keeps drawing every active dot. The counters/baseline stay put — only the
+        // spring keeps gliding pos toward career−baseline.
+        const seasonMode = e.seasonActive ? 1 : 0;
+        new Uint32Array(uSpring, 8, 2).set([e.players, seasonMode]);
         this.device.queue.writeBuffer(s.uSpring, 0, uSpring);
-        e.pending = { count: 0, instanceCount: e.lastInstanceCount, spring: true };
+        if (seasonMode) this.device.queue.writeBuffer(s.bOnFront, 0, e.zeros);
+        e.pending = { count: 0, instanceCount: e.lastInstanceCount, spring: true, season: !!seasonMode };
         this.present();
     }
 
@@ -4373,6 +4394,9 @@ const GPU_ONLY = new URLSearchParams(location.search).has("gpuonly");
 // G5g/h are green on BOTH verify suites (__bl2d_verifyGraph + __bl2d_verifySpring); then the
 // default flips in its own commit. ?legacyPresent=0 opts into the converged path early.
 const LEGACY_PRESENT = new URLSearchParams(location.search).get("legacyPresent") !== "0";
+// S-track SA2 dev hatch: GPU-spring the open-season cloud in season smooth mode. Default OFF
+// (the proven CPU season cloud stays the default) until the real-GPU glide is signed off.
+const GPU_SEASON = new URLSearchParams(location.search).get("gpuseason") === "1";
 function gpuOnlyBanner(msg) {
     window.__bl2d_gpuOnlyFailed = msg;
     let el = document.getElementById("gpuonly-banner");
@@ -5878,7 +5902,26 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // DOM/interaction: cards, the quadtree hit-test, labels). See §"Phase 5".
     const gpuSpring = gpuCloud && pointRenderer.springMode;
     window.__bl2d_gpuSpring = gpuSpring;
-    lastGpuSpringFrame = gpuSpring;   // gate the glide loop: a CPU-fallback frame parks it
+
+    // ── S-track gate (?gpuseason=1): GPU-spring the OPEN-season cloud (SA2) ───────────
+    // Mirrors gpuCloud's eligibility but for SEASON smooth (filters.evt is career-only). The
+    // GPU owns ONLY the open-season moving cloud (mode=1, baseline-subtracted); the CPU keeps
+    // the completed-season bg cloud AND the union frontier (SA3 moves the frontier to a hybrid
+    // GPU skyline). Default off until the real-GPU glide is verified.
+    const gpuSeason = !!(
+        GPU_SEASON &&
+        pointRenderer instanceof WebGPURenderer && pointRenderer.springMode &&
+        filters.smooth && filters.lite && !filters.evt && !filters.groupCareer && mode === "season" &&
+        pbpEvt && pbpEvt.xDim === xDim && pbpEvt.yDim === yDim &&
+        !pbpEvt.xs.rate && !pbpEvt.ys.rate &&
+        evtGpuMonotone(pbpEvt).ok &&
+        colorBy === "era" &&
+        xSign === 1 && ySign === 1 && !showWorstFrontier &&
+        bats === "all" && country === "all" &&
+        pointRenderer.uploadEvtStream(pbpEvt)
+    );
+    window.__bl2d_evtGpuSeason = gpuSeason;
+    lastGpuSpringFrame = gpuSpring || gpuSeason;   // gate the glide loop: a CPU-fallback frame parks it
 
     // ── G-track gate (?renderer=webgpu&gpugraph=1; webgpu-graph.js) ─────────────
     // Phase G0: the STATIC background cloud renders from a retained data-space GPU
@@ -6048,8 +6091,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         ? unique.filter(d => d.year < smoothOpenYear)
         : regular;
     // When the GPU cloud is active it draws the regular .evt cloud itself, so keep the
-    // CPU foreground cloud empty (highlight heads still flow through it below).
-    const foregroundCloudPoints = gpuCloud
+    // CPU foreground cloud empty (highlight heads still flow through it below). gpuSeason
+    // (S-track) does the same for the OPEN-season cloud — the GPU spring draws it.
+    const foregroundCloudPoints = (gpuCloud || gpuSeason)
         ? []
         : filters.evt
         ? regular
@@ -6258,6 +6302,15 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         pointRenderer.accumulateCloud({
             win: frontierResult.gpu,
             instanceCount: pbpEvt.players.length,
+            scales: gpuScaleUniform(xScale, yScale, margin, width, height, pointRadius, cloudOpacity),
+        });
+    } else if (gpuSeason) {
+        // S-track SA2: maintain the open-season counters/baseline + queue the mode=1 spring so
+        // present() glides the open cloud toward each player's within-season value.
+        const cur = Math.max(pbpEvt.winStart, Math.min(pbpEvt.winEnd, pbpCursorIdx));
+        const start = pbpEvt.seasonStartByYear.get(pbpEvt.yearOf[cur]);
+        if (start != null) pointRenderer.accumulateSeasonCloud({
+            cursor: cur, start,
             scales: gpuScaleUniform(xScale, yScale, margin, width, height, pointRadius, cloudOpacity),
         });
     }
