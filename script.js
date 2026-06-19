@@ -4187,7 +4187,14 @@ function swapRenderer(next) {
     if (prev && prev !== next) prev.destroy();
     window.__bl2d_renderer = next instanceof WebGPURenderer ? "webgpu" : "canvas2d";
     syncRendererStatus();   // reflect the live backend on the read-only GPU/CPU indicator
-    if (typeof refreshChart === "function") refreshChart();
+    // Redraw on the new backend. refreshChart() is scoped to the DOMContentLoaded setup and is
+    // NOT visible at module scope here — `bl2d:refresh` is the cross-scope bridge (its listener
+    // is registered in setup; dispatching with no listener is a safe no-op). Before G6d this was
+    // `if (typeof refreshChart === "function") refreshChart()`, which was dead at module scope:
+    // a device-loss fallback swapped the renderer + indicator but never repainted, leaving an
+    // empty plot once the GPU canvas was destroyed (and the startup GPU paint relied on a rAF
+    // race with the initial render instead of this redraw).
+    document.dispatchEvent(new Event("bl2d:refresh"));
 }
 // Rendering is NON-OPTIONAL: WebGPU is the renderer, with Canvas 2D as the automatic,
 // SILENT fallback only when WebGPU is genuinely unavailable (no navigator.gpu / no adapter /
@@ -4278,6 +4285,21 @@ function syncRendererStatus() {
 }
 window.__bl2d_chooseRenderer = chooseRenderer;
 window.__bl2d_exportDataURLs = () => pointRenderer.exportDataURLs();   // headless WebGPU readback probe
+
+// G6d — device-loss recovery TEST hook. Flag-gated (?deviceLossTest=1) so it can NEVER fire
+// in production: a real visitor's window has no caller for it, and without the flag the hook
+// isn't even attached. Destroying the GPUDevice resolves its `device.lost` promise (reason
+// "destroyed"), which runs the SAME graceful path a real driver loss takes — the
+// `device.lost.then(...)` handler registered in enableWebGPU() calls swapToCanvas2D(), so the
+// chart falls back to Canvas 2D silently (no banner unless ?gpuonly) and the indicator flips to
+// CPU. Returns true if a live GPU device was destroyed, false if already on Canvas 2D.
+if (new URLSearchParams(location.search).has("deviceLossTest")) {
+    window.__bl2d_forceDeviceLoss = () => {
+        if (!(pointRenderer instanceof WebGPURenderer) || !pointRenderer.device) return false;
+        pointRenderer.device.destroy();   // → resolves device.lost → swapToCanvas2D (async)
+        return true;
+    };
+}
 
 // GPU compute-accumulate invariant probe: read the per-player counters back and compare
 // to the JS incremental-frontier shadow (comp[]) — they MUST match exactly when the GPU
@@ -6005,7 +6027,8 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // glyph instances before present(); the SVG text is suppressed (class + !gpuGraph gate).
     if (gpuGraph && typeof pointRenderer.uploadText === "function") {
         const t = buildTextInstances(pointRenderer, {
-            xScale, yScale, margin, plotW, plotH, labels, isSmall: width < 480 });
+            xScale, yScale, margin, plotW, plotH, labels, isSmall: width < 480,
+            xDim, yDim, xSign, ySign });
         pointRenderer.uploadText(t.instances, { count: t.count, strings: t.strings, charset: t.charset });
         window.__bl2d_gpuGraphText = { count: t.count, expected: t.expected, strings: t.strings };
         window.__bl2d_gpuGraphTicks = t.tickStrings;
@@ -6593,16 +6616,18 @@ function layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, pointR, is
     return out;
 }
 
-// G3 (GPU text): turn this refresh's axis tick labels + frontier player labels into
-// glyph instances for the GPU atlas pipeline (webgpu-graph.js). Tick generation
+// G3/G6e (GPU text): turn this refresh's axis tick labels, frontier player labels AND axis
+// titles into glyph instances for the GPU atlas pipeline (webgpu-graph.js). Tick generation
 // (d3 .ticks()/.tickFormat() — exactly what d3.axisBottom/Left use) and label layout
 // (layoutFrontierLabels, reused verbatim) stay CPU; this only lays the resulting strings
 // into atlas-metric glyph quads. Variant 0 = ticks (--text-muted), 1/2 = frontier labels
-// (--mlb-blue, with a white halo). Returns the packed Float32Array + verify metadata.
-function buildTextInstances(renderer, { xScale, yScale, margin, plotW, plotH, labels, isSmall }) {
+// (--mlb-blue, with a white halo), 3 = axis titles (--text; the Y rotated -90° via the
+// per-glyph (cos,sin) in the record). Returns the packed Float32Array + verify metadata.
+function buildTextInstances(renderer, { xScale, yScale, margin, plotW, plotH, labels, isSmall, xDim, yDim, xSign, ySign }) {
     const root = getComputedStyle(document.documentElement);
     const tickColor = packColorRGBA((root.getPropertyValue("--text-muted") || "#5a6478").trim(), 1);
     const labelColor = packColorRGBA((root.getPropertyValue("--mlb-blue") || "#002d72").trim(), 1);
+    const titleColor = packColorRGBA((root.getPropertyValue("--text") || "#0a0f1c").trim(), 1);
     const haloColor = packColorRGBA("#ffffff", 1);
 
     // d3-axis default tick values + format (same n as the SVG axes use).
@@ -6628,15 +6653,35 @@ function buildTextInstances(renderer, { xScale, yScale, margin, plotW, plotH, la
         items.push({ text: L.text, x: margin.left + L.x, y: margin.top + L.y,
             anchor: L.anchor, variant: labelVariant, color: labelColor, halo: true });
 
+    // G6e — axis titles (the last chart text to leave SVG → the chart is now 100% GPU
+    // text). Each title is laid out in a LOCAL frame centred at its origin, then placed by
+    // a per-glyph affine (cos/sin/tx/ty) the glyph shader replays on every quad corner: the
+    // X-title flat (cos 1, sin 0), the Y-title rotated -90° (cos 0, sin -1) to match the
+    // SVG's rotate(-90). The "  ▾" caret renders muted, the name in --text — same paint as
+    // the SVG titles, whose <text> nodes survive (invisible) as the click/glossary target.
+    const titleVariant = 3;
+    const titles = (xDim && yDim) ? [
+        {   // X-axis title — centred under the axis (SVG: x=plotW/2, y=plotH+36).
+            runs: [{ text: xSign === -1 ? `${xDim} ↓` : xDim, color: titleColor },
+                   { text: "  ▾", color: tickColor }],
+            cos: 1, sin: 0, tx: margin.left + plotW / 2, ty: margin.top + plotH + 36 },
+        {   // Y-axis title — rotated -90° about a centre 38px left of the y-axis
+            //   (SVG: rotate(-90) then x=-plotH/2, y=-38 → page (left-38, top+plotH/2)).
+            runs: [{ text: ySign === -1 ? `${yDim} ↓` : yDim, color: titleColor },
+                   { text: "  ▾", color: tickColor }],
+            cos: 0, sin: -1, tx: margin.left - 38, ty: margin.top + plotH / 2 },
+    ] : [];
+
     // Charset union → ensure the atlas covers it, then read its metrics.
     let charset = "";
     for (const it of items) charset += it.text;
+    for (const T of titles) for (const r of T.runs) charset += r.text;
     const metrics = renderer.ensureGlyphAtlas(Array.from(new Set(Array.from(charset))).join(""));
 
     // Lay each string into glyph quads. Two instances per halo glyph (halo then fill).
-    const recs = [];   // each: [x,y,w,h,u0,v0,u1,v1,colorBits]
+    const recs = [];   // each: [x,y,w,h,u0,v0,u1,v1,colorBits,cos,sin]
     const push = (m, penX, baseY, uv, color) => recs.push([
-        penX - m.padCss, baseY - m.ascCss - m.padCss, m.w, m.h, uv[0], uv[1], uv[2], uv[3], color]);
+        penX - m.padCss, baseY - m.ascCss - m.padCss, m.w, m.h, uv[0], uv[1], uv[2], uv[3], color, 1, 0]);
     const strings = [];
     let expected = 0;   // ideal glyph count: every codepoint a fill, +1 for halo'd glyphs
     for (const it of items) {
@@ -6654,7 +6699,33 @@ function buildTextInstances(renderer, { xScale, yScale, margin, plotW, plotH, la
             penX += m.advance;
         }
     }
-    // Pack to the 3·vec4 (12 float) record layout; colour bits go in float slot 8.
+    // Axis titles (variant 3): centre each across all its runs at local x=0, baseline at
+    // local y=0, then place each glyph's local top-left through the title's affine. The
+    // SAME (cos,sin) rides into the record so the shader rotates the quad-corner offsets
+    // identically. No halo — titles sit over the plain margin.
+    for (const T of titles) {
+        let W = 0;
+        for (const r of T.runs) for (const ch of Array.from(r.text)) {
+            const m = metrics.get(titleVariant * 0x10000 + ch.codePointAt(0)); if (m) W += m.advance;
+        }
+        let penX = -W / 2;
+        for (const r of T.runs) {
+            strings.push(r.text);
+            const chars = Array.from(r.text);
+            expected += chars.length;   // one fill instance per glyph (no halo)
+            for (const ch of chars) {
+                const m = metrics.get(titleVariant * 0x10000 + ch.codePointAt(0));
+                if (!m) continue;
+                const gx = penX - m.padCss, gy = -m.ascCss - m.padCss;   // local top-left corner
+                const sx = T.tx + gx * T.cos - gy * T.sin;               // affine place (matches shader)
+                const sy = T.ty + gx * T.sin + gy * T.cos;
+                recs.push([sx, sy, m.w, m.h, m.u0, m.v0, m.u1, m.v1, r.color, T.cos, T.sin]);
+                penX += m.advance;
+            }
+        }
+    }
+    // Pack to the 3·vec4 (12 float) record layout; colour bits go in float slot 8,
+    // the rotation (cos,sin) in slots 9,10 (slot 11 unused).
     const count = recs.length;
     const f32 = new Float32Array(count * 12);
     const u32 = new Uint32Array(f32.buffer);
@@ -6663,6 +6734,7 @@ function buildTextInstances(renderer, { xScale, yScale, margin, plotW, plotH, la
         f32[b] = r[0]; f32[b + 1] = r[1]; f32[b + 2] = r[2]; f32[b + 3] = r[3];
         f32[b + 4] = r[4]; f32[b + 5] = r[5]; f32[b + 6] = r[6]; f32[b + 7] = r[7];
         u32[b + 8] = r[8];
+        f32[b + 9] = r[9]; f32[b + 10] = r[10];
     }
     return { instances: f32, count, strings, charset, tickStrings, expected };
 }

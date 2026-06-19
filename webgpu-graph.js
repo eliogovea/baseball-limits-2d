@@ -923,13 +923,15 @@ const GRAPH_GLYPH_BASE_CHARSET = (() => {
     for (let c = 0xc0; c <= 0xff; c++) s += String.fromCharCode(c);   // Latin-1 À–ÿ
     return s;
 })();
-// Text variants: [id] = {px, weight}. 0 ticks, 1 labels-desktop, 2 labels-mobile.
+// Text variants: [id] = {px, weight}. 0 ticks, 1 labels-desktop, 2 labels-mobile, 3 titles.
 const GRAPH_GLYPH_VARIANTS = [
     { px: 11, weight: 400 },   // 0: axis tick labels (.axis text)
     { px: 11, weight: 600 },   // 1: frontier labels desktop (.frontier-label)
     { px: 9,  weight: 600 },   // 2: frontier labels mobile (.frontier-label--mobile)
+    { px: 12, weight: 600 },   // 3: axis titles (.axis-title; the X flat, the Y rotated -90° — G6e)
 ];
 const GRAPH_GLYPH_HALO_VARIANTS = new Set([1, 2]);   // label variants get a white halo cell
+                                                     // (titles sit over the margin → no halo)
 const GRAPH_GLYPH_ATLAS_MAX = 2048;
 
 // WGSL (render): instanced textured quads. Each instance is a glyph quad in PIXEL space
@@ -949,9 +951,11 @@ struct VSOut {
   @location(1) @interpolate(flat) rgba: u32,
 };
 // Glyph record = 48 B = 3 × vec4<f32>:
-//   [0] rect = (x, y, w, h)  CSS px (margin folded in)
+//   [0] rect = (x, y, w, h)  CSS px (margin folded in); (x,y) = the rotation anchor
 //   [1] uv   = (u0, v0, u1, v1)  atlas UV
-//   [2] col  = (colourBits, _, _, _)  packed RGBA8 in float[0]'s bit pattern
+//   [2] col  = (colourBits, cos, sin, _)  packed RGBA8 in float[0]'s bit pattern, plus
+//             the per-instance rotation (cos θ, sin θ). Axis-aligned glyphs pass (1, 0);
+//             the rotated Y-axis title (G6e) passes (0, -1) for SVG-equivalent rotate(-90).
 const C = array<vec2<f32>, 6>(
   vec2<f32>(0.0,0.0), vec2<f32>(1.0,0.0), vec2<f32>(0.0,1.0),
   vec2<f32>(0.0,1.0), vec2<f32>(1.0,0.0), vec2<f32>(1.0,1.0));
@@ -961,12 +965,17 @@ fn unpack(c: u32) -> vec4<f32> {
 }
 @vertex
 fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
-  let rect = inst[ii * 3u];          // x, y, w, h  (CSS px)
+  let rect = inst[ii * 3u];          // x, y, w, h  (CSS px); x,y = rotation anchor
   let uvr  = inst[ii * 3u + 1u];     // u0, v0, u1, v1
-  let col  = inst[ii * 3u + 2u];     // colourBits in .x
+  let col  = inst[ii * 3u + 2u];     // .x=colourBits, .y=cos θ, .z=sin θ
   let corner = C[vi];
-  let px = rect.x + corner.x * rect.z;
-  let py = rect.y + corner.y * rect.w;
+  // Quad-corner offset in the glyph's local frame, then rotate it by (cos,sin) about
+  // the anchor — the same affine the CPU used to place rect.xy, so the whole glyph
+  // (axis-aligned OR rotated -90° for the Y-title) lands consistently.
+  let lx = corner.x * rect.z;
+  let ly = corner.y * rect.w;
+  let px = rect.x + lx * col.y - ly * col.z;
+  let py = rect.y + lx * col.z + ly * col.y;
   var o: VSOut;
   o.clip = vec4<f32>(px / sc.vp.x * 2.0 - 1.0, 1.0 - py / sc.vp.y * 2.0, 0.0, 1.0);
   o.uv = vec2<f32>(mix(uvr.x, uvr.z, corner.x), mix(uvr.y, uvr.w, corner.y));
@@ -2321,4 +2330,167 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
     };
     window.__bl2d_graphMode = () =>
         pointRenderer instanceof WebGPURenderer && !!pointRenderer.graphMode;
+
+    // ── G6c: one-run full parity matrix ─────────────────────────────────────
+    // Replaces the ad-hoc per-phase gates with ONE headless sweep. It drives the
+    // REAL DOM selectors (dataset → mode → axes → depth → Best/Worst → era-B →
+    // ghost), so the change handlers + refreshChart fire exactly as a user would,
+    // awaits the rAF draw AND the async frontier readback to land, then folds
+    // __bl2d_verifyGraph's invariants into a PASS/FAIL row per combo. A green run
+    // means every G0–G4 invariant held across a representative cross-section.
+    // Negative control: ?matrixPerturb=1 (or {perturb:true}) corrupts one oracle
+    // (the expected glyph count) right before each verify, so a deliberately-broken
+    // run is PROVEN to FAIL — that's what makes a green run mean something.
+    // Vehicle: the file:// bundle (no stat layer → static, the only state the
+    // G-track engages in) under ?webgpuHeadless=1&gpugraph=1, driven by snap-gpu.js.
+    const _raf = () => new Promise(r => requestAnimationFrame(r));
+    const _delay = (ms) => new Promise(r => setTimeout(r, ms));
+    // Wait for the rAF-scheduled draw to run, then for the fire-and-forget frontier
+    // readback (g.front: double-buffered mapAsync on the scene-dirty frame) to land
+    // for the CURRENT scene key — frontMis/cardPidsMatch read null until it resolves.
+    const _settleGraph = async (awaitFront = true) => {
+        await _raf(); await _raf();           // let refreshChart's queued draw execute
+        if (!awaitFront) { await _raf(); return; }
+        const landed = () => { const g = pointRenderer.graph; return g && g.front && g.front.key === g.key; };
+        for (let i = 0; i < 80 && !landed(); i++) await _delay(25);   // poll up to ~2s
+        await _raf();
+    };
+    const _clickIfNeeded = (sel, isActive) => {
+        const el = document.querySelector(sel);
+        if (el && !isActive(el)) { el.click(); return true; }
+        return false;
+    };
+    window.__bl2d_verifyGraphMatrix = async (opts = {}) => {
+        if (!(pointRenderer instanceof WebGPURenderer)) {
+            console.log("MATRIX-SKIP not a WebGPURenderer (Canvas2D fallback?)");
+            return { rows: [], fails: ["not-webgpu"], allGreen: false };
+        }
+        const params = new URLSearchParams(location.search);
+        const perturb = opts.perturb ?? (params.get("matrixPerturb") === "1");
+        // ~15 representative combos (NOT the full cartesian product): the axis
+        // classes (counting / lower-is-better / rate / composite) × season&career ×
+        // Best/Worst × depth ∈ {1,3,5} × one ghost × one era-B, in batting & pitching.
+        const combos = opts.combos || [
+            { name: "bat HR×SB career",         ds: "batting",  x: "HR",   y: "SB", mode: "career" },
+            { name: "bat HR×SB season",         ds: "batting",  x: "HR",   y: "SB", mode: "season" },
+            { name: "bat OBP×SLG career rate",  ds: "batting",  x: "OBP",  y: "SLG", mode: "career" },
+            { name: "bat TB×PA career comp",    ds: "batting",  x: "TB",   y: "PA", mode: "career" },
+            { name: "bat HR×SB career worst",   ds: "batting",  x: "HR",   y: "SB", mode: "career", worst: true },
+            { name: "bat HR×SB career d3",      ds: "batting",  x: "HR",   y: "SB", mode: "career", depth: 3 },
+            { name: "bat HR×SB season d5",      ds: "batting",  x: "HR",   y: "SB", mode: "season", depth: 5 },
+            { name: "bat HR×SB career era-B",   ds: "batting",  x: "HR",   y: "SB", mode: "career", era: true },
+            { name: "bat HR×SB career ghost",   ds: "batting",  x: "HR",   y: "SB", mode: "career", bats: "R" },
+            { name: "pit ERA↓×SO career",       ds: "pitching", x: "ERA",  y: "SO", mode: "career" },
+            { name: "pit WHIP↓×SO career",      ds: "pitching", x: "WHIP", y: "SO", mode: "career" },
+            { name: "pit BB/9↓×SO season",      ds: "pitching", x: "BB/9", y: "SO", mode: "season" },
+            { name: "pit W×SO career",          ds: "pitching", x: "W",    y: "SO", mode: "career" },
+            { name: "pit ERA↓×SO career worst", ds: "pitching", x: "ERA",  y: "SO", mode: "career", worst: true },
+            { name: "pit ERA↓×SO career d3",    ds: "pitching", x: "ERA",  y: "SO", mode: "career", depth: 3 },
+        ];
+        const setSelectVal = (id, val) => {
+            const el = document.getElementById(id);
+            if (!el || el.value === val) return;       // no-op if already set (no spurious change)
+            el.value = val;
+            el.dispatchEvent(new Event("change"));      // → axisOrViewChanged → filterChanged (static path)
+        };
+        const drive = async (c) => {
+            // 1. dataset FIRST — its click handler rebuilds the axis <option>s synchronously.
+            _clickIfNeeded(`#stats-toggle .mode-btn[data-stats="${c.ds}"]`, el => el.classList.contains("active"));
+            // 2. mode
+            _clickIfNeeded(`#mode-toggle .mode-btn[data-mode="${c.mode}"]`, el => el.classList.contains("active"));
+            // 2b. threshold → the mode's qualifier default. applyModeConfig deliberately
+            //     KEEPS a still-valid prior value, so a career→season combo order would
+            //     otherwise leak a stale 0 (= no qualifier) and a rate-stat season combo
+            //     would test a 34k-point unqualified cloud instead of the ~7k qualified
+            //     frontier — a different, order-dependent universe. Pin it per combo so
+            //     the matrix is reproducible regardless of combo order.
+            if (typeof resetThresholdToDefault === "function") {
+                resetThresholdToDefault();
+                document.getElementById("pa-min-select")?.dispatchEvent(new Event("change"));
+            }
+            // 3. axes
+            setSelectVal("x-axis-select", c.x);
+            setSelectVal("y-axis-select", c.y);
+            // 4. Pareto depth
+            _clickIfNeeded(`#depth-seg .seg-btn[data-depth="${c.depth || 1}"]`, el => el.classList.contains("active"));
+            // 5. Best/Worst — NOT URL-persisted, so it must be clicked. The handler has
+            //    no "already active" guard, so re-clicking the current mode is a harmless refresh.
+            document.querySelector(`.frontier-btn[data-mode="${c.worst ? "worst" : "best"}"]`)?.click();
+            // 6. era-B compare (a toggle: click only to reach the desired state)
+            const eraBtn = document.getElementById("era-compare-toggle");
+            if (eraBtn && eraBtn.classList.contains("active") !== !!c.era) eraBtn.click();
+            // 7. ghost — any bats filter (≠ all) makes drawScatterPlot build the global ghost frontier.
+            _clickIfNeeded(`#bats-seg .seg-btn[data-bats="${c.bats || "all"}"]`, el => el.classList.contains("active"));
+            await _settleGraph();
+        };
+        const evalRow = (c, v) => {
+            const fails = [];
+            if (!v) { fails.push("no-verifyGraph"); return fails; }
+            const z = (n) => { if (v[n] > 0) fails.push(`${n}=${v[n]}`); };
+            // The "must be exactly 0" invariants. hvMis is intentionally NOT here:
+            // it rides a maxContrib-normalized f32 floor (see G2 decisions of record);
+            // radiusMis is the authoritative HV/visual gate.
+            ["posMis", "skylineMis", "stairVertMis", "radiusMis", "glyphMis", "tickMis", "atlasMissing", "overlayMis"].forEach(z);
+            if (v.frontMis !== 0) fails.push(`frontMis=${v.frontMis}`);          // -1 (readback never landed) or >0 both fail
+            if (v.cardPidsMatch !== true) fails.push(`cardPidsMatch=${v.cardPidsMatch}`);
+            if (v.shadeQuadrant !== true) fails.push(`shadeQuadrant=${v.shadeQuadrant}`);
+            if ((c.depth || 1) > 1) {
+                if (v.depthMis !== 0) fails.push(`depthMis=${v.depthMis}`);
+                if (v.depthStairMis !== 0) fails.push(`depthStairMis=${v.depthStairMis}`);
+            }
+            // Positive overlay-engaged checks: a combo that asked for era-B / ghost must
+            // actually have drawn it (overlayMis silently passes when the overlay is absent).
+            if (c.era && !(v.eraStairN > 0)) fails.push("eraStairN=0 (era-B overlay never drew)");
+            if (c.bats && c.bats !== "all" && !(v.ghostStairN > 0)) fails.push("ghostStairN=0 (ghost overlay never drew)");
+            if (v.regretMis != null && v.regretMis > 0) fails.push(`regretMis=${v.regretMis}`);
+            if (v.ringMis != null && v.ringMis > 0) fails.push(`ringMis=${v.ringMis}`);
+            return fails;
+        };
+        const rows = [];
+        for (const c of combos) {
+            await drive(c);
+            // Negative control: corrupt one oracle (expected glyph count) right before the
+            // verify. drawScatterPlot rewrites __bl2d_gpuGraphText every refresh, so this is
+            // transient/per-row; it forces glyphMis>0 ⇒ the row (and run) FAILS as designed.
+            if (perturb && window.__bl2d_gpuGraphText) window.__bl2d_gpuGraphText.expected += 7;
+            const v = await window.__bl2d_verifyGraph();
+            const fails = evalRow(c, v);
+            const pass = fails.length === 0;
+            rows.push({
+                name: c.name, pass, fails,
+                v: v && {
+                    dotCount: v.dotCount, posMis: v.posMis, skylineMis: v.skylineMis,
+                    frontMis: v.frontMis, cardPidsMatch: v.cardPidsMatch, stairVertMis: v.stairVertMis,
+                    radiusMis: v.radiusMis, hvMis: v.hvMis, hvMaxRel: v.hvMaxRel, shadeQuadrant: v.shadeQuadrant,
+                    glyphMis: v.glyphMis, tickMis: v.tickMis, atlasMissing: v.atlasMissing,
+                    depth: v.depth, depthMis: v.depthMis, depthStairMis: v.depthStairMis,
+                    overlayMis: v.overlayMis, eraStairN: v.eraStairN, ghostStairN: v.ghostStairN,
+                    uploads: v.uploads, frontReads: v.frontReads,
+                },
+            });
+            console.log(`MATRIX-ROW ${pass ? "PASS" : "FAIL"} ${c.name}${fails.length ? "  ::  " + fails.join(", ") : ""}`);
+        }
+        // Retention: an identity-preserving redraw must NOT re-upload the scene or
+        // re-run the skyline readback (uploads/frontReads stay put — G0/G1 invariant).
+        let retention = null;
+        {
+            const g = pointRenderer.graph;
+            if (g) {
+                const before = { uploads: g.uploads, frontReads: g.frontReads };
+                document.dispatchEvent(new Event("bl2d:refresh"));   // same scene identity
+                await _settleGraph(false);
+                const after = { uploads: g.uploads, frontReads: g.frontReads };
+                const ok = after.uploads === before.uploads && after.frontReads === before.frontReads;
+                retention = { ok, before, after };
+                if (!ok) rows.push({ name: "retention", pass: false, fails: [`uploads ${before.uploads}→${after.uploads}`, `frontReads ${before.frontReads}→${after.frontReads}`] });
+                console.log(`MATRIX-ROW ${ok ? "PASS" : "FAIL"} retention  uploads ${before.uploads}→${after.uploads} frontReads ${before.frontReads}→${after.frontReads}`);
+            }
+        }
+        const failRows = rows.filter(r => !r.pass);
+        const allGreen = failRows.length === 0 && (retention ? retention.ok : true);
+        const summary = { rows, fails: failRows.map(r => r.name), allGreen, perturb, retention, combos: combos.length };
+        window.__bl2d_matrix = summary;
+        console.log(`MATRIX-SUMMARY ${allGreen ? "ALL-GREEN" : "FAILED"} ${rows.filter(r => r.pass).length}/${rows.length} pass${perturb ? " (perturb/negative-control)" : ""}${failRows.length ? "  fails: " + failRows.map(r => r.name).join("; ") : ""}`);
+        return summary;
+    };
 })();

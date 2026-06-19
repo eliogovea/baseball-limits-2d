@@ -40,9 +40,26 @@ tracks (S3/S4) have NOT been started yet. Concretely:
   Canvas2D is the silent automatic fallback, a read-only `#renderer-status` indicator
   shows GPU/CPU, spring is default-on; the renderer toggles were removed. This is the
   start of **G6** (graduate the flag).
-- **NOT done:** the G5 real-browser MANUAL checkpoints, the `legacyPresent` default-flip,
-  the rest of G6 (parity matrix / device-loss sign-off / rotated Y-title), **G5i**
-  (deferred), and the entire **data layer** (S3/S4/S2) + the **S-track** season animation.
+- **G6e (rotated GPU Y-axis title) SHIPPED** — both axis titles now render from the GPU
+  glyph atlas (per-instance `(cos,sin)` rotation in the glyph record), so the chart is 100%
+  GPU text. New headless vehicle `scripts/snap-gpu.js` (offscreen GPU readback → PNG).
+- **G6d (device-loss recovery test) SHIPPED** — flag-gated `__bl2d_forceDeviceLoss()` hook;
+  it caught + fixed a real bug (`swapRenderer` never repainted — dead module-scope
+  `refreshChart` ref; now dispatches `bl2d:refresh`). Post-loss falls back to Canvas 2D and
+  fully repaints.
+- **G6c (one-run full parity matrix) SHIPPED** — `window.__bl2d_verifyGraphMatrix()` in
+  `webgpu-graph.js` drives the real DOM selectors across ~15 representative combos, awaits the
+  draw + the async frontier readback, and asserts every `__bl2d_verifyGraph` invariant + retention
+  per combo, with a `?matrixPerturb=1` negative control (normal: ALL-GREEN 15/15; perturbed:
+  FAILED 0/15). It caught + fixed a threshold-leak driver bug.
+- **G6f (dev-hatch cleanup + docs) SHIPPED** — audit found no dead URL flags (the renderer/spring
+  toggles were already collapsed in the GPU-default commit); the 9 surviving dev/verification
+  hatches are tabulated in one place (`rendering.md` §"G6f") with a CLAUDE.md pointer. No code
+  removed. **Every agent-doable G6 phase is now shipped.**
+- **NOT done:** the G5 real-browser MANUAL checkpoints, the `legacyPresent` default-flip
+  (G6a + G6b — both human/browser-gated), **G5i** (deferred), and the
+  **S-track** season animation + **S2** Lahman complement (the S3/S4 data layer is done — see
+  snapshot above).
 
 ## Ordered plan (recommended next → last)
 
@@ -51,7 +68,7 @@ now finishes the in-flight render track, then returns to the (still-unstarted) d
 
 | # | Track | Phases | Status | Who can do it |
 |---|---|---|---|---|
-| 1 | **G6** — graduate the G-track | G6a–G6f (detail in [`rendering.md`](rendering.md) §"G6") | ◑ in progress (GPU-default shipped) | G6a + G6b-flip need a **human/browser MANUAL**; G6c–G6f are agent-doable headless |
+| 1 | **G6** — graduate the G-track | G6a–G6f (detail in [`rendering.md`](rendering.md) §"G6") | ◑ in progress (**all agent-doable phases shipped**: GPU-default + G6c parity-matrix + G6d device-loss + G6e rotated-title + **G6f hatch-cleanup/docs**) | only **G6a + G6b-flip** remain — both need a **human/browser MANUAL** |
 | 2 | **S3** — app onto BL2S, remove `.evt` | S3a–S3e | ✅ S3a–S3d shipped (builder + batting & pitching swap + `.evt` removal); S3e optional | fully agent-doable |
 | 3 | **S4** — retire BL2P | S4a–S4b | ✅ S4a+S4b shipped (readers on BL2S; BL2P deleted) | fully agent-doable |
 | 4 | **S-track** — GPU season animation (folds in G5i) | SA0–SA4 | ☐ design only | agent-doable; SA2 motion needs a MANUAL |
@@ -59,14 +76,44 @@ now finishes the in-flight render track, then returns to the (still-unstarted) d
 
 ### ▶ RESUME HERE (next session)
 
+> **Session handoff (2026-06-19) — G6c shipped on `feat/event-level-pbp`** (after G6e + G6d).
+> This session shipped **G6c** — the one-run full parity matrix `window.__bl2d_verifyGraphMatrix()`
+> in `webgpu-graph.js`: it drives the real DOM selectors across ~15 representative combos, awaits
+> the draw + the async frontier readback, and asserts every `__bl2d_verifyGraph` invariant + a
+> retention check per combo, with a `?matrixPerturb=1` negative control. Result of record: normal
+> run **ALL-GREEN 15/15 + retention**, perturbed run **FAILED 0/15**. It caught a driver bug (a
+> stale 0 threshold leaking career→season → a rate-stat season combo tested a 34k-point unqualified
+> cloud → `radiusMis=4`; fixed by pinning the threshold per combo). **Then G6f** (dev-hatch
+> cleanup + docs) shipped same session: the audit found no dead URL flags, so it tabulated the 9
+> surviving dev/verification hatches in `rendering.md` §"G6f" + a CLAUDE.md pointer (no code
+> removed). **Every agent-doable G6 phase is now shipped.** The earlier session shipped
+> **G6e** (rotated GPU axis titles → 100% GPU text) and **G6d** (device-loss recovery test, which
+> caught + fixed a real `swapRenderer` repaint bug — now dispatches `bl2d:refresh`). What's left on the render track is human-gated: **G6a** (run the G5 real-browser MANUAL
+> checkpoints on the branch's Pages preview) then **G6b** (flip the `legacyPresent` default). An
+> unattended agent should instead pick up the data track — the **S-track** (GPU season animation,
+> SA0→SA4, design only) or **S2** (Lahman complement). **None of this turn's G6c/G6f work is
+> committed** (the working tree is dirty).
+>
+> **New verification tool to know about:** `scripts/snap-gpu.js` — forces the GPU path headless
+> (`?webgpuHeadless=1&gpugraph=1`) and writes the OFFSCREEN render-target readback to PNG (plain
+> `snap.js` only sees the visible canvas, blank under SwiftShader), and prints `__bl2d_verifyGraph`
+> to stderr. Falls back to a visible-frame screenshot when there's no GPU readback (e.g. a
+> Canvas-2D / post-device-loss frame). The G-track is static-only, so always run it on the
+> **`file://` bundle** (no stat layer → static). Hash keys: `ds`/`x`/`y`/`m`/`d`; Best/Worst is
+> NOT in the hash (click `.frontier-btn[data-mode=worst]`).
+
 Two independent entry points — pick based on whether a human is available to drive a browser:
 
 - **If a human can do the browser MANUAL:** start **G6a** (run the G5 real-browser
   checkpoints on the branch's Pages preview), then **G6b** (flip the `legacyPresent`
   default). Both are detailed in `rendering.md` §"G6".
-- **If it's an unattended coding agent:** do the headless-doable G6 close-out —
-  **G6c** (one-run parity matrix), **G6d** (device-loss recovery test), **G6e** (rotated
-  Y-axis title on the GPU) — in any order; they don't depend on the MANUAL. *Or* pick up
+- **If it's an unattended coding agent:** **every headless-doable G6 phase is now shipped** —
+  **G6c** (one-run parity matrix `__bl2d_verifyGraphMatrix()`), **G6f** (dev-hatch cleanup + the
+  URL-hatch table in `rendering.md` §"G6f"), **G6e** (rotated GPU Y-axis title), and **G6d**
+  (device-loss recovery, which caught + fixed a real `swapRenderer` repaint bug — its `refreshChart`
+  ref was dead at module scope, now dispatches `bl2d:refresh`). G6c caught + fixed a threshold-leak
+  driver bug. Verify GPU static frames, the parity matrix, + the device-loss path with the new
+  `scripts/snap-gpu.js` on the `file://` bundle. With G6's agent work done, pick up
   the data track at the **S-track** (GPU season-mode animation, SA0→SA4 — design only) or
   **S2** (Lahman complement). The full S3 + S4 data-layer migration is now done: BL2S is
   the single stat layer, and `.evt`/STEV (S3d) and BL2P (S4b) are both deleted. S3e

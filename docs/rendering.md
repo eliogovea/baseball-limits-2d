@@ -229,7 +229,7 @@ keeps Canvas2D as the permanent fallback.
 | **G3** ✅ | GPU text: atlas, axes, ticks, labels (rotated Y-title → G6e) | `glyphs`, `axes` | glyph count == Σ string lengths; ticks == d3-format; atlas covers every codepoint |
 | **G4** ✅ | overlays: depth layers, era-B, ghost (dashed); cross-fade → G5i | `depthLayers`, `stairGhost`, emit+arcLen | layers == CPU onion-peel (`__bl2d_depthLayers`); ghost == CPU global-ref; dash stable under zoom |
 | **G5** ✅ | interaction overlays + loop owner + stream convergence (G5d→SVG, G5i deferred) | `regret`, `rings` | picks == CPU quadtree + `computeDistToFrontier`; idle parks rAF; `verifySpring` green on converged path |
-| **G6** ◑ | graduate flag (GPU-default shipped); keep Canvas2D fallback | — | **detailed resumable plan below** (§"G6"): MANUALs → flip `legacyPresent` → parity matrix + device-loss + rotated Y-title |
+| **G6** ◑ | graduate flag (GPU-default + G6c parity-matrix + G6d device-loss + G6e rotated-title + G6f hatch-cleanup shipped — **all agent-doable phases done**); keep Canvas2D fallback | — | **detailed resumable plan below** (§"G6"): remaining = only the human/browser MANUALs (G6a) → flip `legacyPresent` (G6b) |
 
 Each gate is one headless command:
 ```
@@ -461,9 +461,8 @@ independently shippable with its own verify gate. Re-grep line numbers (they dri
 - **Human/browser-gated:** G6a (the G5 MANUALs) and the G6b flip depend on a real browser
   (headless SwiftShader can't judge live-cursor feel or animation cadence). An agent can
   *prepare* them but a human must run the MANUAL and confirm before the flip lands.
-- **Agent-doable headless:** G6c (parity matrix), G6d (device-loss recovery), G6e (rotated
-  Y-title), G6f (hatch cleanup) need no human — they verify via `snap-webgpu.js` invariants
-  + offscreen readback. Do these in any order; they don't depend on the MANUAL.
+- **Agent-doable headless: all shipped.** G6c (parity matrix), G6d (device-loss recovery), G6e
+  (rotated Y-title), and G6f (hatch cleanup + docs) are all `[x]` below — nothing headless remains.
 
 ### [ ] G6a — run the owed G5 MANUAL checkpoints (human/browser)
 Run on the branch's Pages preview (`…/experimental/feat-event-level-pbp/`) or a local
@@ -489,9 +488,47 @@ Once G6a passes: make `present_unified()` + `graphLoop` the LIVE path for everyo
   (subsumed by `graphLoop`) — only after a release with no regressions. Until then keep them
   for the `?legacyPresent=1` rollback.
 
-### [ ] G6c — one-run full parity matrix (agent-doable)
+### [x] G6c — one-run full parity matrix *(shipped)*
+**Shipped:** `window.__bl2d_verifyGraphMatrix(opts?)` in `webgpu-graph.js` (next to `__bl2d_verifyGraph`)
+drives the **real DOM selectors** (dataset → mode → axis pair → **threshold** → depth → Best/Worst →
+era-B → ghost) across ~15 representative combos, `await`s the rAF draw **and** the async frontier
+readback (`g.front.key === g.key`) to land, then folds `__bl2d_verifyGraph()` into a PASS/FAIL row.
+Asserted per combo: `posMis`/`skylineMis`/`frontMis`/`stairVertMis`/`radiusMis`/`glyphMis`/`tickMis`/
+`atlasMissing`/`overlayMis`/`depthMis`(d>1)/`depthStairMis`(d>1) = 0, `cardPidsMatch` true,
+`shadeQuadrant` correct, and a positive overlay-engaged check (era-B → `eraStairN>0`, ghost →
+`ghostStairN>0`, so an absent overlay can't silently pass). `hvMis` is intentionally NOT a gate
+(maxContrib-normalized f32 floor — `radiusMis` is the authoritative HV/visual gate, per G2). A
+separate **retention** row asserts `uploads`/`frontReads` don't bump on an identity-preserving
+redraw (`bl2d:refresh`). The combo set is `opts.combos`-overridable; default ~15 = the axis classes
+(counting / lower-is-better / rate / composite) × season&career × the worst toggle × depth∈{1,3,5} ×
+one ghost × one era-B, batting **and** pitching. Per-combo PASS/FAIL + a `MATRIX-SUMMARY` line go to
+`console.log` (snap-gpu → stderr); the full result is stashed on `window.__bl2d_matrix`.
+
+**Negative control:** `?matrixPerturb=1` (or `{perturb:true}`) bumps one oracle (the expected glyph
+count) right before each verify, forcing `glyphMis>0` ⇒ the run FAILS — proving a green run is
+meaningful. Result of record: normal run **ALL-GREEN 15/15 + retention green**; perturbed run
+**FAILED 0/15**.
+
+**The matrix immediately earned its keep** — it caught a driver-fidelity bug: `applyModeConfig`
+deliberately *keeps* a still-valid prior threshold, so a career→season combo order leaked a stale `0`
+(= no qualifier) and the `pit BB/9↓×SO season` combo tested a 34k-point *unqualified* cloud instead
+of the ~7k qualified frontier; the denser f32 HV leave-one-out crossed the 1e-3px `radiusMis` gate on
+4 dots. Fixed by `resetThresholdToDefault()` per combo so each tests a deterministic universe (the
+GPU/oracle agreement itself was never wrong — `radiusMis 0` once qualified).
+
+**Verify command (G6c — the one-run replacement for the per-phase gates):**
+```
+python3 scripts/build_bundle.py
+node scripts/snap-gpu.js "file://$PWD/dist/index.html?webgpuHeadless=1&gpugraph=1" /tmp/m.png 1440 900 4500 \
+  '(async()=>{ const r = await window.__bl2d_verifyGraphMatrix(); console.log("MATRIX "+JSON.stringify({allGreen:r.allGreen,fails:r.fails})); })()'
+# stderr: MATRIX-ROW PASS … (×15) + MATRIX-ROW PASS retention + MATRIX-SUMMARY ALL-GREEN 15/15 pass
+# negative control (must FAIL): append &matrixPerturb=1 to the URL → MATRIX-SUMMARY FAILED 0/15
+```
+
+<details><summary>Original G6c plan (for reference)</summary>
+
 Replace the ad-hoc per-phase gates with ONE headless sweep. New `window.__bl2d_verifyGraphMatrix()`
-(or a snap-webgpu driver) that, by driving the real selectors, loops every combo and asserts
+(or a snap-gpu driver) that, by driving the real selectors, loops every combo and asserts
 all invariants 0, emitting a pass/fail table:
 - modes: season × career; datasets: batting × pitching;
 - axis classes: counting×counting, **lower-is-better** (ERA↓/WHIP↓/BB9↓), rate (AVG/OBP/SLG),
@@ -503,31 +540,115 @@ all invariants 0, emitting a pass/fail table:
 - **Negative control:** deliberately perturb one oracle and confirm the matrix FAILS (so a
   green run means something). Gate: all-green matrix + the negative control catches a break.
 
-### [ ] G6d — device-loss recovery test (agent-doable)
-The `device.lost → swapToCanvas2D` path (script.js ~4558 / ~4538) exists but is untested.
-Headless: bring up WebGPU (`?webgpuHeadless=1`), then trigger a loss (call the GPUDevice's
-loss path / `device.destroy()` via an exposed `window.__bl2d_forceDeviceLoss()` hook to add)
-and assert: `window.__bl2d_renderer` flips `webgpu→canvas2d`, the indicator flips to **"CPU"**,
-**no banner** (graceful, since not `?gpuonly`), the chart cleanly redraws on Canvas2D, and a
-subsequent `?verifyFrontier=1` is `mis 0` on the CPU path. Add the `__bl2d_forceDeviceLoss`
-test hook (gated to a flag so it can't fire in prod).
+**Implementation plan (resumable) — what the next session should build:**
+1. **Vehicle:** the G-track engages only in STATIC views (`!filters.smooth`), which on the dev
+   server is never the default (smooth auto-enables). Use the **`file://` bundle** (no stat
+   layer → static) with `?webgpuHeadless=1&gpugraph=1`, driven by **`scripts/snap-gpu.js`**
+   (the offscreen-readback vehicle added in G6e/G6d). Build first: `python3 scripts/build_bundle.py`.
+2. **Add `window.__bl2d_verifyGraphMatrix(combos?)` in `webgpu-graph.js`** next to
+   `__bl2d_verifyGraph` (~line 2121). It must, per combo: drive the **real DOM selectors**
+   (not the hash) so the change handlers + `refreshChart` fire, `await` settle, then call the
+   existing `__bl2d_verifyGraph()` and collect its fields into a row. Selector handles:
+   `#stats-toggle .mode-btn[data-stats=…]` (dataset), `#x-axis-select`/`#y-axis-select`
+   (`.value=…` + `dispatchEvent(new Event("change"))`), `#mode-toggle .mode-btn[data-mode=…]`,
+   `#depth-seg .seg-btn[data-depth=…]`, `.frontier-btn[data-mode=worst|best]` (Best/Worst is
+   **NOT** URL-persisted — must click), `#era-compare-toggle`, `#bats-seg`/`#country-select`
+   (ghost). After each drive, **await the async frontier readback** before verifying: the
+   G1 `g.front` lands via a double-buffered fire-and-forget `mapAsync` on scene-dirty frames,
+   so `frontMis`/`cardPidsMatch` are null until it resolves — poll `g.front.key === g.key`
+   (or just `await new Promise(r=>setTimeout(r, ~150))` then a rAF) before reading.
+3. **Emit a table** (combo → all-invariants + PASS/FAIL) to `console.log` (snap-gpu forwards it
+   to stderr) and stash the worst offender on `window.__bl2d_matrix = {rows, fails}`. Keep the
+   combo list small but representative (~12–16 rows: the axis classes × a couple modes ×
+   the worst toggle × d∈{1,3,5} × one ghost × one era-B), not the full cartesian product.
+4. **Negative control:** add a `?matrixPerturb=1` (or an arg) path that intentionally corrupts
+   one oracle (e.g. flip a sign in the JS skyline ref, or offset one expected glyph count) and
+   assert the matrix reports ≥1 FAIL — proving a green run is meaningful. Gate met when: the
+   normal run is all-green AND the perturbed run catches the break.
+5. **Verify command** (document it in the G6c commit):
+   ```
+   python3 scripts/build_bundle.py
+   node scripts/snap-gpu.js "file://$PWD/dist/index.html?webgpuHeadless=1&gpugraph=1" /tmp/m.png 1440 900 4000 \
+     '(async()=>{ const r = await window.__bl2d_verifyGraphMatrix(); console.log("MATRIX "+JSON.stringify(r)); })()'
+   ```
+   Watch for the worst tolerance: `hvMis` uses a maxContrib-normalized f32 floor (not raw
+   1e-6) — `radiusMis 0` is the authoritative HV gate (see the G2 "decisions of record").
 
-### [ ] G6e — rotated Y-axis title on the GPU (agent-doable + offscreen visual)
-The one chart text still on SVG (G3 deliberately deferred the rotated Y-title). Options: a
-per-instance rotation angle in `WEBGPU_GLYPH_WGSL` (webgpu-graph.js ~809) applied to the
-glyph quad, or pre-rotated cells. Lay the title out CPU-side (reuse the axis-title text +
-position), emit rotated glyph instances, suppress the SVG Y-title under `gpuGraph` (it keeps
-its glossary-hover hit-rect as an invisible DOM element if needed). Verify: `glyphMis` still 0
-with the Y-title codepoints included; offscreen readback shows the rotated title; `tickMis 0`.
-(Then the chart is 100% GPU text — the SDF upgrade stays a documented future option.)
+</details>
 
-### [ ] G6f — dev-hatch cleanup + docs (agent-doable)
-Audit the surviving URL hatches and document them in ONE place (a short table in this file):
-keep the verification/debug ones — `?renderer=canvas`, `?gpugraph=0`, `?gpustream=0`,
-`?gpuonly=1`, `?webgpuHeadless`, `?verifyFrontier`, `?legacyPresent=1` (until the G6b soak) —
-remove anything now dead. Update CLAUDE.md §"Running locally"/verification if the snap
-recipes changed. After G6f the G-track is **shipped**; Canvas2D remains the permanent
-fallback (never deleted).
+### [x] G6d — device-loss recovery test *(shipped — caught + fixed a real recovery bug)*
+Added the flag-gated `window.__bl2d_forceDeviceLoss()` hook (only attached under
+`?deviceLossTest=1`, so it can't fire in prod): it calls `pointRenderer.device.destroy()`,
+which resolves `device.lost` (reason "destroyed") → the real `device.lost.then` handler →
+`swapToCanvas2D`. **The test caught a bug:** `swapRenderer()` (module scope) ended with
+`if (typeof refreshChart === "function") refreshChart();`, but `refreshChart` is scoped to the
+DOMContentLoaded setup and is **not visible at module scope** — so the guard was always false
+and the swap NEVER repainted. A device loss therefore swapped the renderer object + flipped the
+indicator to "CPU" but left an **empty plot** (the destroyed GPU canvas, no Canvas-2D redraw);
+the startup GPU paint only worked by a rAF race with the initial render. **Fix:** `swapRenderer`
+now dispatches the `bl2d:refresh` custom event (the existing cross-scope bridge whose listener
+is registered in setup) instead of the dead call. Verified headless (`scripts/snap-gpu.js` +
+`?webgpuHeadless=1&deviceLossTest=1` on the `file://` bundle): pre-loss `webgpu`/"GPU"/
+`gpugraph=true`; force loss → post-loss `__bl2d_renderer` `canvas2d`, indicator **"CPU"**,
+**no banner**, `body.gpugraph` **false** (`drawScatterPlot` re-ran), **2 Canvas-2D canvases +
+SVG staircase drawn**, the cloud + frontier (Bonds 762/514 + Henderson 297/1406) fully repaint;
+a second forced loss is a no-op (idempotent). Regression-checked: normal GPU startup invariants
+all 0, and `__bl2d_verifySpring` byte-identical with vs without the fix (springMis/skylineMis 0,
+Bonds 762/514 on-front). (`?verifyFrontier=1` is the smooth-path incremental gate; the static
+CPU sweep is verified instead via the known records above.)
+
+### [x] G6e — rotated Y-axis title on the GPU *(shipped)*
+The last chart text to leave SVG (G3 deferred it). Implemented as a **per-instance rotation**
+`(cos,sin)` added to the glyph record — float slots 9–10 of the 12-float (3·vec4) layout,
+previously unused — that the `WEBGPU_GLYPH_WGSL` vertex shader replays on each quad-corner
+offset about the instance anchor `rect.xy`. The CPU lays each title out in a LOCAL frame
+(centred across its runs at local x=0, baseline 0) and places each glyph's local top-left
+through the same affine (`tx + gx·cos − gy·sin`, `ty + gx·sin + gy·cos`), so the rect anchor
+and the shader's corner rotation stay consistent. Axis-aligned glyphs (ticks, labels, the flat
+X-title) pass `(1,0)` → identical to before; the **Y-title passes `(0,-1)`** = SVG `rotate(-90)`
+(maps local `(x,y)→(y,−x)`, reading bottom-to-top). A new glyph **variant 3** (12px/600, no
+halo) matches `.axis-title`; titles are built in `buildTextInstances` (passed `xDim/yDim/xSign/
+ySign`), the muted "  ▾" caret + the "↓" lower-is-better arrow ride along. The SVG `<text>`
+titles survive as the click/glossary hit target, painted `fill: transparent` under
+`body.gpugraph` (hover included, so the GPU title isn't doubled by a blue SVG copy). **Both
+titles** moved (not just the Y), so the chart is now **100% GPU text** — the SDF upgrade stays
+a documented future option.
+
+**Verify (shipped):** new `scripts/snap-gpu.js` — forces the GPU path under headless
+(`?webgpuHeadless=1&gpugraph=1`) and writes the app's `__bl2d_exportDataURLs()` **offscreen**
+readback to PNG (plain `snap.js` only sees the visible canvas, which is blank under SwiftShader)
+plus the `__bl2d_verifyGraph` numbers. Across batting HR×SB (career + season + mobile 390×844)
+and pitching ERA↓×SO: `glyphMis 0` / `tickMis 0` / `atlasMissing 0` with the title codepoints
+included (glyphCount +10 = "HR  ▾" + "SB  ▾"); the readback shows the upright bottom-to-top
+Y-title and the flat X-title with the ERA "↓" arrow; spot-checks Ryan tops SO, Henderson 130 SB
+tops the frontier. G0–G5 invariants (`posMis`/`skylineMis`/`radiusMis`/`stairVertMis`/`hvMis`/
+`overlayMis` …) stay green.
+
+### [x] G6f — dev-hatch cleanup + docs *(shipped)*
+**Audit result:** the renderer/spring header toggles were already collapsed in the GPU-default
+commit (`6eb276c`), so **no dead URL flags survive** — every remaining hatch is a live
+verification/debug switch (confirmed by grepping all `URLSearchParams().get|has(...)` reads in
+`script.js` + `webgpu-graph.js`). G6f is therefore documentation-only: the surviving hatches are
+consolidated into the one table below (this file is their single source of truth), and CLAUDE.md
+§"Running locally" gained a pointer to it. **No code removed** (nothing was dead); Canvas2D
+remains the permanent silent fallback (never deleted).
+
+#### URL hatches (the complete surviving set)
+
+All are dev/verification only — none is a user-facing toggle. Rendering is non-optional (WebGPU
+auto-enables, Canvas2D is the silent fallback); these exist to *force* a path for testing.
+
+| Flag | Default (flag absent) | Effect when set | Purpose / consumer |
+|---|---|---|---|
+| `?renderer=canvas` | WebGPU auto-enables | forces Canvas2D | unsupported-browser smoke test |
+| `?gpugraph=0` | G-track ON (static views) | disables the full-GPU graph → CPU Canvas/SVG static chart | isolate the G-track from the legacy path |
+| `?gpustream=0` | spring engine ON | forces the hybrid Phase-4 cloud (no GPU spring) | debug the non-spring animation path |
+| `?gpuonly=1` | silent Canvas2D fallback | red "no chart" banner if WebGPU is absent/lost | prove a captured frame is genuinely GPU output |
+| `?webgpuHeadless=1` | headless stays Canvas2D | opts headless Chrome past the "stay Canvas2D" guard | `scripts/snap-gpu.js` GPU offscreen readback |
+| `?legacyPresent=0` | legacy `present_legacy` path | the converged `present_unified()` + `graphLoop` | G5h convergence soak — **at G6b the default flips, then `=1` becomes the rollback hatch** |
+| `?verifyFrontier=1` | off | asserts the incremental frontier == full sweep every smooth frame | smooth-path (`pbpEvt`) incremental gate |
+| `?deviceLossTest=1` | hook not attached | attaches `window.__bl2d_forceDeviceLoss()` | G6d device-loss → Canvas2D recovery test |
+| `?matrixPerturb=1` | off | corrupts one oracle inside `__bl2d_verifyGraphMatrix()` | G6c parity-matrix negative control |
 
 **G6 done ⇒** the full-GPU chart is the production renderer end-to-end (cloud → frontier →
 HV → overlays → text → interaction), one loop owner, one present body, with Canvas2D as the

@@ -552,6 +552,14 @@ body.gpugraph .axis text { fill: transparent; }
 .axis-title:hover { fill: var(--mlb-blue); }
 .axis-title:hover .axis-caret { fill: var(--mlb-blue); }
 .axis-caret { fill: var(--text-muted); font-weight: 400; }
+/* G6e: under the full-GPU graph the axis TITLES render from the GPU glyph atlas (X flat,
+   Y rotated -90°). Keep the <text> nodes — they stay the click target (stat picker) and
+   glossary-hover hit-rect — but paint them invisibly, hover included, so the GPU title
+   isn't doubled by a blue SVG copy on hover. */
+body.gpugraph .axis-title,
+body.gpugraph .axis-title .axis-caret,
+body.gpugraph .axis-title:hover,
+body.gpugraph .axis-title:hover .axis-caret { fill: transparent; }
 
 /* Leader line connecting a dodged label back to its frontier dot. */
 .frontier-leader {

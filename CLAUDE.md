@@ -75,6 +75,33 @@ node scripts/snap.js "http://localhost:8000/#m=season&lg=ALL" /tmp/phone.png 390
 node scripts/snap.js "file://$PWD/dist/index.html#m=career&lg=AL" /tmp/al-career.png 1600 900 2500
 ```
 
+**Full-GPU graph (G-track) frames need `scripts/snap-gpu.js`, not `snap.js`.** Under headless
+Chrome the WebGPU backend can't configure a visible canvas (SwiftShader), so the G-track
+renders to an OFFSCREEN texture that `Page.captureScreenshot` can't see — `snap.js` would show
+only the SVG layer. `snap-gpu.js` forces the GPU path and writes the app's
+`__bl2d_exportDataURLs()` offscreen readback to PNG, plus prints the `__bl2d_verifyGraph`
+invariants. The G-track engages only in STATIC views (no `pbpEvt`), so use the `file://` bundle
+(no stat layer → static) with `?webgpuHeadless=1&gpugraph=1`:
+```
+python3 scripts/build_bundle.py
+node scripts/snap-gpu.js "file://$PWD/dist/index.html?webgpuHeadless=1&gpugraph=1#m=career&ds=pitching&x=ERA&y=SO" /tmp/g.png 1440 900 3500
+# stderr: [verifyGraph] {…glyphMis:0,tickMis:0,radiusMis:0,…}
+```
+
+**One-run G-track parity matrix (`__bl2d_verifyGraphMatrix`)** — instead of one-off `verifyGraph`
+combos, drive the whole invariant sweep across ~15 representative dataset/mode/axis/depth/toggle
+combos in one shot. Normal run must be ALL-GREEN; the `?matrixPerturb=1` negative control must FAIL:
+```
+node scripts/snap-gpu.js "file://$PWD/dist/index.html?webgpuHeadless=1&gpugraph=1" /tmp/m.png 1440 900 4500 \
+  '(async()=>{ const r = await window.__bl2d_verifyGraphMatrix(); console.log("MATRIX "+JSON.stringify({allGreen:r.allGreen,fails:r.fails})); })()'
+# stderr: MATRIX-SUMMARY ALL-GREEN 15/15 pass   (append &matrixPerturb=1 → FAILED 0/15)
+```
+
+The full set of dev/verification URL hatches (`?renderer=canvas`, `?gpugraph=0`, `?gpustream=0`,
+`?gpuonly=1`, `?webgpuHeadless=1`, `?legacyPresent=0`, `?verifyFrontier=1`, `?deviceLossTest=1`,
+`?matrixPerturb=1`) is tabulated in [`docs/rendering.md`](docs/rendering.md) §"G6f" — none is a
+user-facing toggle.
+
 ## Layout architecture
 
 - **Mobile-first.** Default state is a column flex: header on top, chart filling, controls collapsed at the bottom behind a "Filters" drawer. At `min-width: 768px`, layout switches to a row: chart left, fixed-width sidebar right, toggle hidden, panel always visible.
