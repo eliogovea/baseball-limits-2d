@@ -91,8 +91,39 @@ now finishes the in-flight render track, then returns to the (still-unstarted) d
 > caught + fixed a real `swapRenderer` repaint bug — now dispatches `bl2d:refresh`). What's left on the render track is human-gated: **G6a** (run the G5 real-browser MANUAL
 > checkpoints on the branch's Pages preview) then **G6b** (flip the `legacyPresent` default). An
 > unattended agent should instead pick up the data track — the **S-track** (GPU season animation,
-> SA0→SA4, design only) or **S2** (Lahman complement). **None of this turn's G6c/G6f work is
-> committed** (the working tree is dirty).
+> SA0→SA4, design only) or **S2** (Lahman complement). **All committed** on `feat/event-level-pbp`:
+> `c690a44` (G6c+G6d+G6e+G6f close-out) and `d79bae5` (the career-animation frontier bug fix
+> below).
+>
+> **Career-animation "previous frontier never clears" bug — FIXED (`d79bae5`).** The WebGPU
+> present (`present_legacy`/`present_unified`) draws `drawPts("frontier")` from the retained
+> `count.frontier`/`buf.frontier`, only written by `drawFrontierDots` in the `!gpuSpring &&
+> !gpuGraph` branch — so once a static/paused frame filled it, the spring path never zeroed it
+> and the previous frontier dots re-drew on top of the whole animation. Fix: zero
+> `count.frontier` when `gpuSpring || gpuGraph` (the GPU owns the frontier). Repro'd on the
+> **real GPU via Playwright** (headless SwiftShader couldn't) — see memory
+> `project_realgpu_verification` for the recipe.
+>
+> ### Careful next-steps plan (token-budget handoff)
+> Ordered; each is its own session. Re-grep line numbers (they drift).
+> 1. **S-track — GPU season-mode animation** (user's explicit ask: "make seasons animation use
+>    the same approach as career"). Design already written: `rendering.md` §"Season GPU
+>    animation", phases **SA0→SA4**. Core identity: `seasonValue = cum(d) − cum(seasonStart(O)−1)`
+>    reusing the GPU career counters `bX/bY` — add a per-player **season-baseline** subtracted in
+>    the spring/cloud shaders; season mode currently runs the CPU cloud ~15fps. **First steps:**
+>    SA0 (gate season-smooth onto the spring path) → SA1 (correctness core: baseline buffer +
+>    shader subtract, verify a known season e.g. Bonds 2001 = 73 HR). SA2 (sprung open-season
+>    cloud) needs a **real-GPU browser MANUAL** → use the Playwright recipe above. Folds in the
+>    deferred **G5i** cross-fade. Watch for the SAME class of bug just fixed: any retained
+>    per-frame buffer (frontier/heads/trails) must reset on a season/cursor change.
+> 2. **Drop d3 (T4, own session).** Still used (40 refs): `scaleLinear`, `axisBottom/Left`,
+>    **`zoom`+`brush`**, **`quadtree`**, `csv`, `extent/min/max`, `color`, `easeCubicOut`. Easy to
+>    replace: scales/extent/csv/color/ease. Hard: zoom+brush (rich behaviors) and quadtree
+>    (hover hit-test) and d3 tick generation. Sequence the easy ones first behind helpers, leave
+>    zoom/brush/quadtree last. Not a freebie from the GPU migration.
+> 3. **G6a + G6b (human-gated).** Run the G5 real-browser MANUALs, then flip the `legacyPresent`
+>    default. Needs a person at a WebGPU browser (or the Playwright headed recipe for the
+>    headless-checkable parts).
 >
 > **New verification tool to know about:** `scripts/snap-gpu.js` — forces the GPU path headless
 > (`?webgpuHeadless=1&gpugraph=1`) and writes the OFFSCREEN render-target readback to PNG (plain
