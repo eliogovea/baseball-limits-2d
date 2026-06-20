@@ -123,9 +123,10 @@ playback** (career or season spring) rather than a static G-track frame. See mem
 
 The full set of dev/verification URL hatches (`?renderer=canvas`, `?gpugraph=0`, `?gpustream=0`,
 `?gpuonly=1`, `?webgpuHeadless=1`, `?legacyPresent=0`, `?verifyFrontier=1`, `?deviceLossTest=1`,
-`?matrixPerturb=1`, `?gpuseason=1`) is tabulated in [`docs/rendering.md`](docs/rendering.md)
-§"G6f" — none is a user-facing toggle. (`?gpuseason=1` GPU-springs the open-season cloud — S-track
-SA2, default off until graduated.)
+`?matrixPerturb=1`, `?gpuseason=0`) is tabulated in [`docs/rendering.md`](docs/rendering.md)
+§"G6f" — none is a user-facing toggle. (`?gpuseason=0` opts OUT of the GPU season animation —
+SA2 open-season cloud + SA3 hybrid union frontier, graduated to default-on at SA4 — back to the
+CPU season cloud.)
 
 ## Layout architecture
 

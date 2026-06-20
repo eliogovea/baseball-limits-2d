@@ -649,7 +649,7 @@ auto-enables, Canvas2D is the silent fallback); these exist to *force* a path fo
 | `?verifyFrontier=1` | off | asserts the incremental frontier == full sweep every smooth frame | smooth-path (`pbpEvt`) incremental gate |
 | `?deviceLossTest=1` | hook not attached | attaches `window.__bl2d_forceDeviceLoss()` | G6d device-loss → Canvas2D recovery test |
 | `?matrixPerturb=1` | off | corrupts one oracle inside `__bl2d_verifyGraphMatrix()` | G6c parity-matrix negative control |
-| `?gpuseason=1` | season cloud + frontier on CPU | GPU-springs the open-season cloud AND the hybrid union frontier (S-track SA2 + SA3) | season smooth GPU animation — default off until graduated |
+| `?gpuseason=0` | GPU season cloud + union frontier (default) | forces the CPU season cloud + CPU frontier | opt OUT of the S-track GPU season animation (SA2 cloud + SA3 union frontier), graduated to default-on at SA4 |
 
 **G6 done ⇒** the full-GPU chart is the production renderer end-to-end (cloud → frontier →
 HV → overlays → text → interaction), one loop owner, one present body, with Canvas2D as the
@@ -790,6 +790,25 @@ single-season HR records (1998 → 70, 2001 → 73, Bonds). Career `__bl2d_verif
 **real Metal GPU** via `scripts/snap-realgpu.js`: in season play the GPU offscreen layer now shows
 the red union staircase + ringed frontier dots over the season cloud (under SA2 that layer had no
 frontier). **Remaining:** SA4 (polish) + graduating the flag to default.
+
+### [x] SA4 — graduate the flag to default + polish *(shipped)*
+
+The S-track's last phase: `GPU_SEASON` flips from opt-in (`?gpuseason=1`, default OFF) to
+**default-ON** (`get("gpuseason") !== "0"`), mirroring the career GPU spring (`?gpustream`) and the
+G-track (`?gpugraph`) which are already default-on. `?gpuseason=0` is the dev opt-out back to the
+CPU season cloud. The gate's exclusions are the polish (all already present, re-confirmed): a rate
+axis (`xs.rate`/`ys.rate`), a sign-flipped or Worst frontier (`xSign`/`ySign`/`showWorstFrontier`),
+a bats/country filter, a non-WebGPU renderer or `?gpustream=0`, and paused/non-lite frames all fall
+back to the proven CPU path. So in a real WebGPU browser, season smooth on a counting-axis pair now
+GPU-animates the cloud + union frontier by default; everything else is byte-unchanged.
+
+Verified headless on the dev server (`snap-gpu.js`, NO `?gpuseason`): the gate engages by default
+(`__bl2d_evtGpuSeason === true`) and `__bl2d_verifySeasonFrontier` is `allGreen` — `kernelMis 0` +
+`frontierMis 0` across **HR×SB** (11-pt frontier, 2001 → 73 HR), **TB×R** (1-pt: Ruth 1921 457 TB /
+177 R dominates both axes), and **H×BB** (7–9-pt frontiers). Fallback confirmed: OBP×SLG (rate)
+keeps `__bl2d_evtGpuSeason === false`, and `?gpuseason=0` forces it false on HR×SB. Real-GPU
+(`snap-realgpu.js`, no flag): the union staircase + ringed dots render over the season cloud by
+default. Career `verifySpring` + the G-track parity matrix stay green. The S-track is complete.
 
 Invariant:
 career counters are never mutated by the season path, so career↔season mid-play stays

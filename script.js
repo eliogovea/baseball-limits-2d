@@ -4527,9 +4527,14 @@ const GPU_ONLY = new URLSearchParams(location.search).has("gpuonly");
 // G5g/h are green on BOTH verify suites (__bl2d_verifyGraph + __bl2d_verifySpring); then the
 // default flips in its own commit. ?legacyPresent=0 opts into the converged path early.
 const LEGACY_PRESENT = new URLSearchParams(location.search).get("legacyPresent") !== "0";
-// S-track SA2 dev hatch: GPU-spring the open-season cloud in season smooth mode. Default OFF
-// (the proven CPU season cloud stays the default) until the real-GPU glide is signed off.
-const GPU_SEASON = new URLSearchParams(location.search).get("gpuseason") === "1";
+// S-track: GPU-animate season smooth mode (the sprung open-season cloud SA2 + the hybrid GPU
+// union frontier SA3). GRADUATED to default-ON (SA4) now that the union frontier is verified
+// (kernelMis/frontierMis 0 across HR×SB / TB×R / H×BB; real-GPU staircase+dots) — it mirrors the
+// career GPU spring (`?gpustream`/`springMode`), which is already default-on. The gate still falls
+// back to the CPU season cloud for every ineligible case (rate axes, sign-flipped/worst frontier,
+// a bats/country filter, non-WebGPU renderer, a paused/non-lite frame). `?gpuseason=0` forces the
+// CPU path (the dev opt-out, like `?gpustream=0`/`?gpugraph=0`).
+const GPU_SEASON = new URLSearchParams(location.search).get("gpuseason") !== "0";
 function gpuOnlyBanner(msg) {
     window.__bl2d_gpuOnlyFailed = msg;
     let el = document.getElementById("gpuonly-banner");
@@ -6080,11 +6085,13 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const gpuSpring = gpuCloud && pointRenderer.springMode;
     window.__bl2d_gpuSpring = gpuSpring;
 
-    // ── S-track gate (?gpuseason=1): GPU-spring the OPEN-season cloud (SA2) ───────────
-    // Mirrors gpuCloud's eligibility but for SEASON smooth (filters.evt is career-only). The
-    // GPU owns ONLY the open-season moving cloud (mode=1, baseline-subtracted); the CPU keeps
-    // the completed-season bg cloud AND the union frontier (SA3 moves the frontier to a hybrid
-    // GPU skyline). Default off until the real-GPU glide is verified.
+    // ── S-track gate (default-on; ?gpuseason=0 opts out): GPU-animate SEASON smooth ───────
+    // Mirrors gpuCloud's eligibility but for SEASON smooth (filters.evt is career-only). The GPU
+    // owns the open-season moving cloud (mode=1, baseline-subtracted, SA2) AND the hybrid union
+    // frontier (open ∪ the CPU completed-season frontier phantoms, SA3); the CPU keeps only the
+    // completed-season bg cloud. Every ineligible case below falls back to the proven CPU season
+    // cloud + CPU frontier: rate axes, a sign-flipped/worst frontier, a bats/country filter, a
+    // non-WebGPU renderer or ?gpustream=0, or a paused/non-lite frame.
     const gpuSeason = !!(
         GPU_SEASON &&
         pointRenderer instanceof WebGPURenderer && pointRenderer.springMode &&

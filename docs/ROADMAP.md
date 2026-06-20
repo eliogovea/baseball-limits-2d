@@ -24,12 +24,12 @@ source of truth for *shipped* status of individual features.
 
 **Update 2026-06-19:** the data layer is done — **S3 (S3a–S3d) and S4 (S4a–S4b) all
 shipped.** BL2S is the single app-facing stat layer; `.evt`/STEV and BL2P are deleted (git
-history). On the render side, **S-track SA0–SA3 are now shipped** (behind `?gpuseason=1`): GPU
-season targeting + the live state machine + the sprung open-season cloud + **SA3's hybrid GPU
-union frontier** (the GPU now owns the season frontier dots + staircase over completed ∪ open).
-A new `__bl2d_verifySeasonFrontier` oracle proves `kernelMis 0` + `frontierMis 0` (see the
-S-track section); only **SA4** (polish + graduate the flag) + S3e (optional) + S2 remain. The
-G-track snapshot below is unchanged.
+history). On the render side, the **S-track is COMPLETE (SA0–SA4 all shipped)**: GPU season targeting +
+the live state machine + the sprung open-season cloud + the hybrid GPU union frontier, now
+**graduated to default-on** (SA4 — `?gpuseason=0` opts out, mirroring `?gpustream`/`?gpugraph`).
+`__bl2d_verifySeasonFrontier` proves `kernelMis 0` + `frontierMis 0` (HR×SB / TB×R / H×BB; see the
+S-track section). Only **S3e** (optional) + **S2** (Lahman complement) remain on the whole roadmap.
+The G-track snapshot below is unchanged (its human-gated G6a/G6b flag-flip still pending).
 
 The G-track (full-GPU rendering) is the bulk of recent work and is nearly done; the data
 tracks (S3/S4) have NOT been started yet. Concretely:
@@ -75,13 +75,26 @@ now finishes the in-flight render track, then returns to the (still-unstarted) d
 | 1 | **G6** — graduate the G-track | G6a–G6f (detail in [`rendering.md`](rendering.md) §"G6") | ◑ in progress (**all agent-doable phases shipped**: GPU-default + G6c parity-matrix + G6d device-loss + G6e rotated-title + **G6f hatch-cleanup/docs**) | only **G6a + G6b-flip** remain — both need a **human/browser MANUAL** |
 | 2 | **S3** — app onto BL2S, remove `.evt` | S3a–S3e | ✅ S3a–S3d shipped (builder + batting & pitching swap + `.evt` removal); S3e optional | fully agent-doable |
 | 3 | **S4** — retire BL2P | S4a–S4b | ✅ S4a+S4b shipped (readers on BL2S; BL2P deleted) | fully agent-doable |
-| 4 | **S-track** — GPU season animation (folds in G5i) | SA0–SA4 | ◑ **SA0–SA3 shipped** (targeting core + live state machine + sprung open-season cloud + **hybrid GPU union frontier**, all behind `?gpuseason=1`, real-GPU verified); **SA4** (polish + graduate the flag) pending | agent-doable end-to-end — **`scripts/snap-realgpu.js`** (Playwright headed real GPU) verifies the visible glide, no human MANUAL needed |
+| 4 | **S-track** — GPU season animation (folds in G5i) | SA0–SA4 | ✅ **complete (SA0–SA4 shipped)** — targeting core + live state machine + sprung open-season cloud + hybrid GPU union frontier, graduated to **default-on** at SA4 (`?gpuseason=0` opts out); real-GPU verified | — |
 | 5 | **S2** — Lahman complement | — | ☐ after S3/S4 | fully agent-doable |
 
 ### ▶ RESUME HERE (next session)
 
+> **Session handoff (2026-06-20, later) — S-track SA4 shipped → the S-track is COMPLETE
+> (`feat/event-level-pbp`).** `GPU_SEASON` graduated to **default-on**
+> (`get("gpuseason") !== "0"`, opt-out `?gpuseason=0`), mirroring the career `?gpustream` and the
+> G-track `?gpugraph`. The gate's CPU-fallback exclusions (rate axes, sign-flip/worst, bats/country
+> filter, non-WebGPU/`?gpustream=0`, paused/non-lite) were re-confirmed, not changed. Verified on
+> the dev server (NO flag): the gate engages by default (`__bl2d_evtGpuSeason === true`) and
+> `__bl2d_verifySeasonFrontier` is `allGreen` across **HR×SB** (11-pt, 2001→73 HR), **TB×R** (1-pt:
+> Ruth 1921 dominates) and **H×BB** (7–9-pt); OBP×SLG (rate) + `?gpuseason=0` correctly stay
+> CPU (`false`); real-GPU renders the union staircase+dots with no flag; career `verifySpring` +
+> G-track matrix green. **Next on the roadmap:** only **S3e** (optional one-file rate-stat qualifier
+> load) and **S2** (Lahman complement — pre-1910 + Negro Leagues season-grain backfill) remain
+> agent-doable; the G-track's G6a/G6b default-flip is the only human/browser-gated item left.
+>
 > **Session handoff (2026-06-20) — S-track SA3 (hybrid GPU union frontier) shipped on
-> `feat/event-level-pbp` (NOT committed yet).** The GPU now owns the season frontier (dots +
+> `feat/event-level-pbp`.** The GPU now owns the season frontier (dots +
 > staircase) under `?gpuseason=1`. Mechanism: the CPU completed-season Pareto frontier (static
 > between open-year changes) is uploaded as static **phantom slots** in the `pos[]`/`col[]` tail
 > — `bPos`/`bOnFront`/`bColor` gained a `WEBGPU_MAX_COMPLETED` (2048) tail past `players`;
@@ -206,14 +219,17 @@ Two independent entry points — pick based on whether a human is available to d
   ref was dead at module scope, now dispatches `bl2d:refresh`). G6c caught + fixed a threshold-leak
   driver bug. Verify GPU static frames, the parity matrix, + the device-loss path with the new
   `scripts/snap-gpu.js` on the `file://` bundle. With G6's agent work done, pick up
-  the **S-track** — **SA0–SA3 are shipped** (behind `?gpuseason=1`): targeting core + live state
-  machine + sprung open cloud + **SA3's hybrid GPU union frontier** (`kernelMis 0` + `frontierMis 0`
-  via `__bl2d_verifySeasonFrontier`; real-GPU staircase+dots via `snap-realgpu.js`). The next
-  agent-doable phase is **SA4** (polish: confirm rate axes stay excluded, bats/country still force
-  CPU, then graduate `?gpuseason=1` to default) — or **S2** (Lahman complement). NOTE the
-  S-track oracles run on the **dev server** (stat layer present), NOT the `file://` bundle; pause
-  playback / let the oracle cancel `pbpRaf` before settling, and poll until `verifySpring().maxX>0`
-  to dodge the cold-page flake. The
+  the data work — **the S-track is COMPLETE (SA0–SA4 shipped)**: GPU season targeting + live state
+  machine + sprung open cloud + hybrid GPU union frontier, graduated to **default-on** at SA4
+  (`?gpuseason=0` opts out). Verified via `__bl2d_verifySeasonFrontier` (`kernelMis 0` +
+  `frontierMis 0` across HR×SB / TB×R / H×BB) + `snap-realgpu.js`. The remaining agent-doable work
+  is **S2** (Lahman complement) and the optional **S3e** (`qualDeps:["PA"]` one-file rate-stat
+  load). NOTE the S-track oracles run on the **dev server** (stat layer present), NOT the `file://`
+  bundle; the oracle cancels `pbpRaf` itself but DON'T click pause in the harness (the settle tail
+  stalls under headless SwiftShader) — click play to load the model, poll until the gate/`maxX>0`,
+  then call the oracle; `snap-gpu.js` sleeps `waitMs` BEFORE evalJS and never prints the return
+  value (use a small `waitMs` + `console.log`), macOS has no `timeout`, and stray headless Chrome
+  collisions hang the warmup (kill between runs). The
   full S3 + S4 data-layer migration is done: BL2S is the single stat layer, and `.evt`/STEV
   (S3d) and BL2P (S4b) are both deleted. S3e (`qualDeps:["PA"]`) remains an optional
   one-file-load optimization that can come any time.
@@ -430,7 +446,7 @@ cloud) → SA3 (hybrid GPU frontier) → SA4 (polish).
 | SA0 live state machine (production primitive) | ✅ shipped | `_seasonAccumulateTo` shared branch logic + `accumulateSeasonCloud` (persistent `e.season` state, pos snap on boundary cross, `mode=1` spring uniform, `pending.season`); `__bl2d_verifySeasonLive` proves the live per-frame path `seasonMis 0` (fresh→cross→cross→backward). Not wired into present yet (SA2). |
 | SA2 sprung open-season cloud + glide loop | ✅ shipped (behind `?gpuseason=1`) | `gpuSeason` gate in drawScatterPlot + a cloud-only `season` present source (pSpring glide only, no GPU frontier); CPU keeps completed-bg + union frontier. Verified on real GPU via `snap-realgpu.js` — gate engages 5/5 glide frames, GPU cloud matches the CPU-path season cloud. Default off until graduation. |
 | SA3 hybrid GPU frontier | ✅ shipped (behind `?gpuseason=1`) | CPU completed-season Pareto frontier uploaded as static phantom slots (`uploadCompletedFrontier`, `WEBGPU_MAX_COMPLETED` tail on `bPos`/`bOnFront`/`bColor`); GPU union skyline/staircase over (open ∪ completed) via the `uSpringUnion` count split (`bgSkylineU`/`bgStairU`) so the spring's `n=players` dispatch can't clobber the tail; cloud pass = open, frontier-dot + staircase = union; CPU SVG/Canvas frontier suppressed under `gpuSeason`. `__bl2d_verifySeasonFrontier`: kernelMis 0 + frontierMis 0 over HR×SB 1998/2001/2002 (1998→70, 2001→73 HR on the union frontier); career verifySpring + G-track matrix still green; real-GPU staircase+dots render via `snap-realgpu.js` |
-| SA4 polish | ☐ not started | rate axes excluded; bats/country still CPU; README/CLAUDE updates |
+| SA4 polish + graduate the flag | ✅ shipped | `GPU_SEASON` flipped to default-ON (`get("gpuseason") !== "0"`, opt-out `?gpuseason=0`), mirroring `?gpustream`/`?gpugraph`. Gate exclusions re-confirmed (rate axes / worst-flip / bats-country / non-WebGPU / paused → CPU). Verified default-on engages + `verifySeasonFrontier` allGreen across HR×SB / TB×R / H×BB; rate-axis + opt-out fall back to CPU; real-GPU renders the union frontier with no flag. **S-track complete.** |
 
 ---
 
