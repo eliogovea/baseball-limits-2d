@@ -84,6 +84,16 @@ now finishes the in-flight render track, then returns to the (still-unstarted) d
 
 ### ▶ RESUME HERE (next session)
 
+> **⚠ OPEN BUG (2026-06-20) — season animation shows wrong names/values "here and there."**
+> Live season smooth (real GPU, `gpuseason` default-on since SA4) renders impossible/mislabeled
+> points — e.g. "Kent Hrbek, 76 HR, 0 SB" at Sep 9 1948 (Hrbek debuted 1981; 76 HR is over the
+> record), and a point above the SB axis max. **Ruled out:** the settled CPU model AND settled GPU
+> values are both correct at that cursor (Kiner 38→40 HR / 1948 leaders; `verifySeason` allGreen).
+> So it's a **live-glide / GPU↔CPU hit-test-labeling** bug that only repros on a real GPU. Full
+> investigation handoff (symptoms, evidence, hypotheses, repro commands, mitigation) in
+> **[`docs/BUG-season-wrong-names.md`](BUG-season-wrong-names.md)** — START THERE. Stopgap if needed:
+> `?gpuseason=0` (or revert the SA4 default-on flip) routes season to the proven CPU path.
+>
 > **Session handoff (2026-06-20, latest) — S2 (Lahman complement) shipped → the whole data
 > track + S-track are done; only the human-gated G6a/G6b remain.** `build_stat_files.py
 > --lahman-complement` re-epochs the batting family 1910→1871 (required: pre-1910 Oct-1 cells are
