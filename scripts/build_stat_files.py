@@ -300,6 +300,123 @@ def build_pitching(out_dir, also_csv=False):
     print(f"  TOTAL binary: {total / 1024 / 1024:.1f} MB" + (" (+ CSVs)" if also_csv else ""))
 
 
+# --- S2: Lahman complement (backfill what Retrosheet lacks, at SEASON grain) ----------------
+BATTING_LIMITS_CSV = ROOT / "data" / "batting_limits_1871-2025.csv"   # display-name keyed (matches the dim)
+COMPLEMENT_EPOCH_DATE = datetime.date(1871, 1, 1)                     # pre-1910 cells need a pre-1910 epoch
+INV_BATS = {0: "R", 1: "L", 2: "B"}                                   # dim byte -> string (for re-encode)
+# Lahman batting_limits columns that map 1:1 to a BL2S stat. PA is derived (no Lahman column),
+# G is the season appearances. The remaining STATS not here (none) get 0.
+LAHMAN_BAT_COLS = ["AB", "H", "2B", "3B", "HR", "RBI", "BB", "IBB", "SO",
+                   "HBP", "SF", "SH", "GIDP", "SB", "CS", "R", "G"]
+
+
+def build_display_bio(people_path):
+    """display name -> (birthYear str, bats str) via the Lahman playerID->display map, for the
+    bio of NEW complement players (pre-1910 / Negro-League-only) absent from the Retrosheet dim."""
+    disp = build_display_name_map(str(people_path))   # playerID -> display name
+    bio = {}
+    with open(people_path, encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            d = disp.get((row.get("playerID") or "").strip())
+            if d and d not in bio:
+                bio[d] = (row.get("birthYear") or "", row.get("bats") or "")
+    return bio
+
+
+def build_lahman_complement(src_dir, out_dir):
+    """S2: backfill the BATTING BL2S family with Lahman season totals where Retrosheet doesn't
+    cover (pre-1910, gaps, Negro Leagues) — ONE season-end cell (Oct 1) per missing (player, year).
+    The batting files are re-epoched 1910-04-14 -> 1871-01-01 first (pre-1910 days are negative
+    under the old epoch; varint deltas are unsigned). A Lahman cell is added ONLY where that
+    (gpid, calendar-year) has ZERO Retrosheet cells, so existing game-grain data is never
+    double-counted; new players (no display-name match in the dim) append. Reads the committed
+    family from src_dir, writes the merged family to out_dir."""
+    new_ord = COMPLEMENT_EPOCH_DATE.toordinal()
+    dim = decode_players(src_dir / "stat_players.bl2s.gz")
+    old_ord = datetime.date(*dim["epoch"]).toordinal()
+    shift = old_ord - new_ord                                  # add to every existing day -> NEW epoch
+    rows = [[rid, nm, str(by), INV_BATS.get(bats, "")] for rid, nm, by, bats in dim["players"]]
+    name_to_gpid = {nm: i for i, (_rid, nm, _by, _b) in enumerate(rows)}
+
+    # Decode + re-epoch every existing stat file; record (gpid, year) coverage across ALL stats.
+    series = {}
+    covered = set()
+    for s in STATS:
+        dec = decode_stat(src_dir / f"stat_{s.lower()}.bl2s.gz")
+        ser = {g: [(d + shift, c) for d, c in cells] for g, cells in dec["series"].items()}
+        series[s] = ser
+        for g, cells in ser.items():
+            for d, _ in cells:
+                covered.add((g, datetime.date.fromordinal(new_ord + d).year))
+
+    # Sum Lahman stints per (display name, year).
+    lah = defaultdict(lambda: defaultdict(int))
+    with open(BATTING_LIMITS_CSV, encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            key = (r["playerID"], int(r["yearID"]))
+            for s in LAHMAN_BAT_COLS:
+                v = r.get(s, "")
+                if v and v != "0":
+                    try:
+                        lah[key][s] += int(v)
+                    except ValueError:
+                        pass
+
+    bio = build_display_bio(PEOPLE_PATH)
+    added_cells = added_pseasons = new_players = 0
+    for (nm, yr), tot in sorted(lah.items()):
+        g = name_to_gpid.get(nm)
+        if g is None:                                          # pre-1910 / NeL-only player -> append
+            g = len(rows); name_to_gpid[nm] = g
+            by, bats = bio.get(nm, ("", ""))
+            rows.append([nm, nm, by, bats])                    # no retroID -> display name fills the slot
+            new_players += 1
+        if (g, yr) in covered:
+            continue                                           # Retrosheet covers this player-year -> skip
+        day = datetime.date(yr, 10, 1).toordinal() - new_ord
+        pa = tot.get("AB", 0) + tot.get("BB", 0) + tot.get("HBP", 0) + tot.get("SH", 0) + tot.get("SF", 0)
+        added_pseasons += 1
+        for s in STATS:
+            v = pa if s == "PA" else tot.get(s, 0)
+            if v:
+                series[s].setdefault(g, []).append((day, v))
+                added_cells += 1
+
+    # Re-sort each player's cells (complement Oct-1 cells slot before the 1910+ game cells).
+    for s in STATS:
+        for g in series[s]:
+            series[s][g].sort()
+
+    # Re-encode: dimension (existing + new), each stat, and the rebuilt global dates table.
+    pdata = write_player_dim([(rid, nm, by, bats) for rid, nm, by, bats in rows],
+                             COMPLEMENT_EPOCH_DATE, BATS)
+    (out_dir / "stat_players.bl2s.gz").write_bytes(pdata)
+    print(f"source: {BATTING_LIMITS_CSV.name} (complement) + committed Retrosheet family "
+          f"(re-epoched +{shift}d -> {COMPLEMENT_EPOCH_DATE})")
+    print(f"  +{new_players:,} new players, +{added_pseasons:,} season-end cells "
+          f"({added_cells:,} stat cells)")
+    print(f"  stat_players.bl2s.gz: {len(rows):,} players, {len(pdata) / 1024:,.0f} KB")
+
+    all_days = set()
+    total = len(pdata)
+    for s in STATS:
+        by = series[s]
+        data = write_stat_file(s, by, COMPLEMENT_EPOCH_DATE)
+        (out_dir / f"stat_{s.lower()}.bl2s.gz").write_bytes(data)
+        total += len(data)
+        for g in by:
+            for d, _ in by[g]:
+                all_days.add(d)
+
+    dates = sorted(all_days)
+    ddata = write_dates_file(dates, COMPLEMENT_EPOCH_DATE)
+    (out_dir / "stat_dates.bl2s.gz").write_bytes(ddata)
+    total += len(ddata)
+    print(f"  stat_dates.bl2s.gz: {len(dates):,} dates, {len(ddata) / 1024:.1f} KB "
+          f"(epoch {COMPLEMENT_EPOCH_DATE})")
+    print(f"  TOTAL binary: {total / 1024 / 1024:.1f} MB")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Build the BL2S stat layer from Retrosheet plays.csv")
     ap.add_argument("years", nargs="?", default="1910-2025", help="year or START-END (default 1910-2025)")
@@ -309,6 +426,11 @@ def main():
                     help="emit stat_dates.bl2s.gz (kind 2) by unioning the committed stat_pa file")
     ap.add_argument("--pitching", action="store_true",
                     help="build the pitching family (stat_p_*) from Lahman season totals")
+    ap.add_argument("--lahman-complement", action="store_true",
+                    help="S2: backfill the batting family with Lahman season-end cells where "
+                         "Retrosheet lacks coverage (pre-1910 / gaps / Negro Leagues); re-epochs to 1871")
+    ap.add_argument("--src", default=str(OUT_DIR),
+                    help="source dir of the committed batting family (for --lahman-complement)")
     args = ap.parse_args()
     out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
     if args.dates_from_pa:
@@ -316,6 +438,9 @@ def main():
         return
     if args.pitching:
         build_pitching(out_dir, args.csv)
+        return
+    if args.lahman_complement:
+        build_lahman_complement(Path(args.src), out_dir)
         return
     if "-" in args.years:
         lo, hi = (int(x) for x in args.years.split("-", 1))

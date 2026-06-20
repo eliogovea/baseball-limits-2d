@@ -50,7 +50,7 @@ Brock 938, Coleman 752; 2023 totals == Lahman.
 **`stat_players.bl2s.gz`** (kind 0, the dimension):
 ```
 'BL2S' | u8 major | u8 minor | u8 kind=0
-u16 epochYear | u8 epochMonth | u8 epochDay        -- 1910-04-14
+u16 epochYear | u8 epochMonth | u8 epochDay        -- batting: 1871-01-01 since S2 (was 1910-04-14)
 u32 playerCount
 playerCount × ( u8 idLen + retroID | u8 nameLen + displayName | u16 birthYear | u8 bats )
               -- gpid = array index; bats 0=R 1=L 2=B 3=?
@@ -82,8 +82,12 @@ Oct 1, stints summed; the 23 counting columns — BAOpp/ERA are client-side rate
 The dimension's **retroID slot holds the opaque Lahman `playerID`** (stable identity) and
 its **handedness byte holds `throws`** (pitchers are colored by throwing arm), reusing the
 0=R/1=L/else=3 encoding the batting dimension uses for `bats`. Batting's own
-`stat_dates.bl2s.gz` (epoch 1910-04-14) is built `--dates-from-pa` (union of the committed
-`stat_pa` cell dates — no plays.csv re-download).
+`stat_dates.bl2s.gz` is built `--dates-from-pa` (union of the committed `stat_pa` cell dates —
+no plays.csv re-download). **Since S2, the batting family is epoch 1871-01-01** (was 1910-04-14):
+`--lahman-complement` re-epochs every batting file (+14,347 d, a no-op since `epoch+day` is the same
+calendar date) so pre-1910 Lahman season-end cells fit the unsigned varint date scheme, then
+backfills one Oct-1 cell per `(player, year)` Retrosheet doesn't cover (pre-1910 / gaps / Negro
+Leagues), restoring the pre-1910 animation S3 dropped. Pitching stays epoch 1871-01-01.
 
 ### Decoding
 

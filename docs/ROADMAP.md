@@ -28,8 +28,12 @@ history). On the render side, the **S-track is COMPLETE (SA0–SA4 all shipped)*
 the live state machine + the sprung open-season cloud + the hybrid GPU union frontier, now
 **graduated to default-on** (SA4 — `?gpuseason=0` opts out, mirroring `?gpustream`/`?gpugraph`).
 `__bl2d_verifySeasonFrontier` proves `kernelMis 0` + `frontierMis 0` (HR×SB / TB×R / H×BB; see the
-S-track section). Only **S3e** (optional) + **S2** (Lahman complement) remain on the whole roadmap.
-The G-track snapshot below is unchanged (its human-gated G6a/G6b flag-flip still pending).
+S-track section). **S2 (Lahman complement) is also shipped** — the batting family is re-epoched to
+1871 and backfilled with Lahman season-end cells, restoring pre-1910 animation (Cobb 117 HR) and the
+Negro Leagues, careers byte-identical. The only agent-doable item left is the optional **S3e**, now
+**deferred** (its premise is false — `stat_pa` ≠ the app-wide PA definition; see §S3). The G-track's
+human-gated **G6a/G6b** flag-flip is the sole remaining roadmap item, and it needs a person at a
+WebGPU browser.
 
 The G-track (full-GPU rendering) is the bulk of recent work and is nearly done; the data
 tracks (S3/S4) have NOT been started yet. Concretely:
@@ -76,10 +80,25 @@ now finishes the in-flight render track, then returns to the (still-unstarted) d
 | 2 | **S3** — app onto BL2S, remove `.evt` | S3a–S3e | ✅ S3a–S3d shipped (builder + batting & pitching swap + `.evt` removal); S3e optional | fully agent-doable |
 | 3 | **S4** — retire BL2P | S4a–S4b | ✅ S4a+S4b shipped (readers on BL2S; BL2P deleted) | fully agent-doable |
 | 4 | **S-track** — GPU season animation (folds in G5i) | SA0–SA4 | ✅ **complete (SA0–SA4 shipped)** — targeting core + live state machine + sprung open-season cloud + hybrid GPU union frontier, graduated to **default-on** at SA4 (`?gpuseason=0` opts out); real-GPU verified | — |
-| 5 | **S2** — Lahman complement | — | ☐ after S3/S4 | fully agent-doable |
+| 5 | **S2** — Lahman complement | — | ✅ shipped (`--lahman-complement`: re-epoch 1871 + zero-coverage Lahman backfill; pre-1910 animation restored, NeL-overlap completeness a follow-up) | done |
 
 ### ▶ RESUME HERE (next session)
 
+> **Session handoff (2026-06-20, latest) — S2 (Lahman complement) shipped → the whole data
+> track + S-track are done; only the human-gated G6a/G6b remain.** `build_stat_files.py
+> --lahman-complement` re-epochs the batting family 1910→1871 (required: pre-1910 Oct-1 cells are
+> negative under the old epoch; re-epoch is a verified no-op since `epoch+day` = same calendar date)
+> and backfills one Lahman season-end cell per `(player, year)` with ZERO Retrosheet coverage
+> (conservative, no double-count). Verified: existing careers byte-identical (Bonds 762, Henderson
+> 1406 SB); pre-1910 correct (Cobb 117 HR, Wagner 101, Anson 97); NeL restored; app smooth model
+> loads `minYear 1871` with Cobb 1905–1928; season-smooth @1905 shows Crawford/Lajoie 1901 on the
+> frontier. +6,513 players, +37,211 cells; all 22 batting files rewritten + committed.
+> **Known follow-up:** NeL-overlap years Retrosheet partially covers keep the partial (zero-coverage
+> rule) → those players undercount vs Lahman's official NeL totals (e.g. Gibson). Completing them
+> needs a "Lahman-wins-when-greater → replace the year's game cells with a season cell" rule (trades
+> that year's game-grain animation for season-grain — a product call). **Nothing agent-doable left
+> on the roadmap** except the optional/deferred S3e; G6a/G6b need a human at a WebGPU browser.
+>
 > **Session handoff (2026-06-20, later) — S-track SA4 shipped → the S-track is COMPLETE
 > (`feat/event-level-pbp`).** `GPU_SEASON` graduated to **default-on**
 > (`get("gpuseason") !== "0"`, opt-out `?gpuseason=0`), mirroring the career `?gpustream` and the
@@ -461,15 +480,48 @@ cloud) → SA3 (hybrid GPU frontier) → SA4 (polish).
 
 ---
 
-## S2 — Lahman complement (after S3/S4)
+## S2 — Lahman complement ✅ shipped (2026-06-20)
 
 Backfill coverage Retrosheet lacks, at SEASON grain (one end-of-season cell, no
-intra-season motion): pre-1910, gaps, and the *complete* Negro Leagues (Lahman has
-official NeL totals Retrosheet only partially reconstructs). Source:
-`data/batting_limits_1871-2025.csv`. For each (player, year) Lahman has but the stat
-files don't (or under-cover), add a season-end cell; new players (pre-1910, NeL-only)
-append to the dimension. Probably merge into the same files, not a separate overlay.
-**Restores the pre-1910 animation coverage S3 knowingly drops.** Keep all converters.
+intra-season motion): pre-1910, gaps, and the Negro Leagues. Source:
+`data/batting_limits_1871-2025.csv` (display-name keyed — the same disambiguated key the
+BL2S dimension carries, so the identity bridge is the **display name**). Builder mode
+`build_stat_files.py --lahman-complement` (reads the committed batting family from `--src`,
+writes the merged family to `--out`).
+
+**Implementation of record:**
+- **Re-epoch 1910-04-14 → 1871-01-01** (required first: pre-1910 Oct-1 cells are negative
+  epoch-days under the old epoch, and BL2S varint deltas are unsigned). Mechanical + verifiable
+  as a no-op: every existing cell-day + the dim/dates epoch shift by the same `+14347d`, so
+  `epoch + day` = the same calendar date → `yearOf`/`doy` (rebuilt from the dates epoch) are
+  unchanged. The decoder reads epoch per-file (`decodeBl2sStat` even skips the stat-file epoch;
+  `buildEvtModel` keys the day→index map off the **dates-file** epoch), so all batting files must
+  — and now do — share the 1871 epoch.
+- **Coverage rule (conservative, no double-count):** a Lahman season-end cell (Oct 1, totals,
+  stints summed) is added ONLY where that `(gpid, calendar-year)` has ZERO Retrosheet cells. So
+  fully-uncovered seasons (all of pre-1910, gaps) get clean Lahman cells; existing 1910+ game-grain
+  is never touched. New players (no display-name match in the dim) append; their bio (birthYear,
+  bats) comes from `people_lahman` via the playerID→display map; the retroID slot holds the display
+  name. `PA` cells = `AB+BB+HBP+SH+SF` (the app-wide PA definition — Lahman has no true-PA column).
+- **⚠ Known limitation (NeL overlap):** for Negro-League years Retrosheet *partially* reconstructs,
+  the zero-coverage rule keeps Retrosheet's partial game cells and does NOT add the Lahman total, so
+  those players undercount vs Lahman's official NeL season totals (e.g. Josh Gibson). The *complete*
+  NeL goal would need a "Lahman wins when its season total exceeds the Retrosheet year-sum → replace
+  the year's game cells with one season cell" rule, which trades that year's game-grain animation for
+  season-grain — a product decision left as a follow-up. The PRIMARY goal (restore pre-1910, which has
+  zero Retrosheet coverage → clean) is fully met.
+
+**Gates (verified):** existing careers byte-identical (Bonds 762, Aaron 755, Ruth 714 HR,
+Henderson 1406 SB); pre-1910 careers now correct (Cobb 117 HR, Wagner 101, Cap Anson absent→97);
+NeL backfilled (Gibson 37→97, Charleston 4→167, Cool Papa Bell 2→55); dates span 1871-10-01→
+2025-10-01 (19,927); the app's smooth model loads `minYear 1871` (was 1910) with Ty Cobb 1905–1928;
+season-smooth scrubbed to 1905 renders 1901 seasons (Crawford, Lajoie) on the frontier. +6,513
+players (→24,211), +37,211 season-end cells. **Restores the pre-1910 animation coverage S3 knowingly
+dropped.** All converters kept.
+
+| Phase | Status | Notes |
+|---|---|---|
+| S2 batting complement | ✅ shipped | `--lahman-complement` (re-epoch 1871 + zero-coverage Lahman backfill). Careers byte-identical; pre-1910 (Cobb 117) + NeL restored; app loads `minYear 1871`. NeL-overlap completeness = documented follow-up |
 
 ## Backlog (unordered)
 
