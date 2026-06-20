@@ -3742,6 +3742,13 @@ class WebGPURenderer {
         const uSpringScale1 = dev.createBuffer({ size: 48, usage: BU.UNIFORM | BU.COPY_DST });
         const bg = (layout, buffers) => dev.createBindGroup({ layout,
             entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })) });
+        // Guard the spring bind-group build against a layout-arity regression. These bind groups
+        // are created against this.stairBgl / this.stairLineBgl etc.; if another init path
+        // (e.g. the G-track's _initGraphPipelines) ever re-used those property names with a
+        // different arity, the bind groups would silently become INVALID and poison every
+        // submit they share an encoder with — surfacing as frozen/garbage season values rather
+        // than an obvious crash. The error scope turns that back into a loud, catchable signal.
+        dev.pushErrorScope("validation");
         e.spring = {
             bPos, bVel, bOnFront, bFrontIdx, bFrontSorted, bCount, bStaircase, bIndirect,
             uSpring, uSpringUnion, uSpringScale0, uSpringScale1, baseX: bBaseX, baseY: bBaseY,
@@ -3756,6 +3763,10 @@ class WebGPURenderer {
             bgSpringCloud1: bg(this.springCloudBgl, [uSpringScale1, bPos, e.bColor, bOnFront]),
             bgStairLine:    bg(this.stairLineBgl,   [uSpringScale0, bStaircase]),
         };
+        dev.popErrorScope().then((err) => {
+            window.__bl2d_springBglError = err ? err.message : null;
+            if (err) console.error("[bl2d] spring bind-group layout error:", err.message);
+        }).catch(() => {});
     }
 
     // Pack each player's cloud colour into the col[] buffer for the active Color-by encoding.

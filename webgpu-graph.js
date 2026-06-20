@@ -1078,10 +1078,14 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
         const un = (b) => ({ binding: b, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } });
         const ro = (b) => ({ binding: b, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } });
         const rw = (b) => ({ binding: b, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } });
-        this.stairBgl = dev.createBindGroupLayout({ entries: [
+        // NOTE: distinct from the spring engine's this.stairBgl (script.js _initSpring,
+        // 8 entries). Both init paths share one renderer instance, so a shared name would
+        // clobber — the last writer's layout wins and the other path's bind groups go
+        // invalid (poisoning every submit they share an encoder with). Keep them separate.
+        this.sceneStairBgl = dev.createBindGroupLayout({ entries: [
             un(0), ro(1), ro(2), rw(3), rw(4), rw(5), rw(6), rw(7), rw(8) ] });
         const stairMod = dev.createShaderModule({ code: WEBGPU_SCENESTAIR_WGSL });
-        const stairLayout = dev.createPipelineLayout({ bindGroupLayouts: [this.stairBgl] });
+        const stairLayout = dev.createPipelineLayout({ bindGroupLayouts: [this.sceneStairBgl] });
         this.pSceneRanksort = dev.createComputePipeline({ layout: stairLayout, compute: { module: stairMod, entryPoint: "ranksort" } });
         this.pSceneEmit     = dev.createComputePipeline({ layout: stairLayout, compute: { module: stairMod, entryPoint: "emit" } });
 
@@ -1097,9 +1101,9 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
         // ── G2 render: stair line, HV shade, frontier dots ──
         const uV = (b) => ({ binding: b, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } });
         const sV = (b) => ({ binding: b, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } });
-        this.stairLineBgl = dev.createBindGroupLayout({ entries: [ uV(0), sV(1), uV(2) ] });
+        this.sceneStairLineBgl = dev.createBindGroupLayout({ entries: [ uV(0), sV(1), uV(2) ] });   // 3 entries (vs spring's 2) — distinct name avoids clobber
         this.pSceneStairLine = dev.createRenderPipeline({
-            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.stairLineBgl] }),
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.sceneStairLineBgl] }),
             vertex: { module: dev.createShaderModule({ code: WEBGPU_STAIRLINE_GRAPH_WGSL }), entryPoint: "vs" },
             fragment: { module: dev.createShaderModule({ code: WEBGPU_STAIRLINE_GRAPH_WGSL }), entryPoint: "fs", targets: [{ format: this.format, blend }] },
             primitive: { topology: "line-strip" } });
@@ -1662,7 +1666,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
             // built once. Compute + dots bind groups touch growable pos/layerOf → rebuilt
             // on grow below.
             for (let L = 1; L < WEBGPU_GRAPH_MAX_DEPTH; L++) {
-                g.depthStairLineBG[L] = this.device.createBindGroup({ layout: this.stairLineBgl, entries: [
+                g.depthStairLineBG[L] = this.device.createBindGroup({ layout: this.sceneStairLineBgl, entries: [
                     { binding: 0, resource: { buffer: g.uScene } },
                     { binding: 1, resource: { buffer: g.bDepthStair[L] } },
                     { binding: 2, resource: { buffer: g.uDepthCol[L] } },
@@ -1700,7 +1704,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
                 { binding: 4, resource: { buffer: g.bCount } },
             ] });
             const bg = (buf) => ({ buffer: buf });
-            g.stairBindGroup = this.device.createBindGroup({ layout: this.stairBgl, entries: [
+            g.stairBindGroup = this.device.createBindGroup({ layout: this.sceneStairBgl, entries: [
                 { binding: 0, resource: bg(g.uStair) }, { binding: 1, resource: bg(g.bPos) },
                 { binding: 2, resource: bg(g.bFrontIdx) }, { binding: 3, resource: bg(g.bCount) },
                 { binding: 4, resource: bg(g.bFrontSorted) }, { binding: 5, resource: bg(g.bFrontSortedIdx) },
@@ -1713,7 +1717,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
                 { binding: 4, resource: bg(g.bCount) }, { binding: 5, resource: bg(g.bHv) },
                 { binding: 6, resource: bg(g.bFrontRadius) }, { binding: 7, resource: bg(g.bHvScalar) },
             ] });
-            g.stairLineBindGroup = this.device.createBindGroup({ layout: this.stairLineBgl, entries: [
+            g.stairLineBindGroup = this.device.createBindGroup({ layout: this.sceneStairLineBgl, entries: [
                 { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bStaircase) },
                 { binding: 2, resource: bg(g.uGraphCol) },
             ] });
@@ -1744,7 +1748,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
                     { binding: 1, resource: bg(g.bLayerOf) },
                     { binding: 2, resource: bg(g.bDepthIdx[L]) }, { binding: 3, resource: bg(g.bDepthCount[L]) },
                 ] });
-                g.depthStairBG[L] = this.device.createBindGroup({ layout: this.stairBgl, entries: [
+                g.depthStairBG[L] = this.device.createBindGroup({ layout: this.sceneStairBgl, entries: [
                     { binding: 0, resource: bg(g.uStair) }, { binding: 1, resource: bg(g.bPos) },
                     { binding: 2, resource: bg(g.bDepthIdx[L]) }, { binding: 3, resource: bg(g.bDepthCount[L]) },
                     { binding: 4, resource: bg(g.bDepthSorted[L]) }, { binding: 5, resource: bg(g.bDepthSortedIdx[L]) },

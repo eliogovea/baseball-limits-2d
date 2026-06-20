@@ -1,7 +1,48 @@
-# BUG — season animation shows wrong names/values "here and there" (OPEN)
+# BUG — season animation shows wrong names/values "here and there" (FIXED)
 
-**Reported 2026-06-20** (after SA2–SA4 + S2 shipped). **Branch `feat/event-level-pbp`.**
-This is the resume doc for a fresh session. The bug is NOT yet fixed.
+**Reported 2026-06-20** (after SA2–SA4 + S2 shipped). **Fixed 2026-06-21 on branch `feat/event-level-pbp`.**
+
+## RESOLUTION (2026-06-21)
+
+**Root cause — a bind-group-layout property collision, NOT a value/label bug.** The spring/season
+engine (`_initSpring`, script.js) and the G-track scene engine (`_initGraphPipelines`,
+webgpu-graph.js) both assigned `this.stairBgl` and `this.stairLineBgl` on the **same** renderer
+instance, with **different arities**: spring's staircase layout has **8** entries (line / 2 for the
+stair-line render), the G-track's has **9** (/ 3). `_initGraphPipelines` re-runs on every scene
+upload, so the last writer wins. When the G-track's 9-/3-entry layouts were live, the spring
+bind groups `bgStair`/`bgStairU` (8 buffers) and `bgStairLine` (2 buffers) became **invalid** — and
+an invalid bind group **poisons every command submit that shares its encoder**, so the season
+spring/skyline passes silently never landed → frozen/garbage GPU positions rendered as impossible
+values (e.g. 76 HR) at wrong spots, mislabeled by the nearest-CPU-point hover. It was **intermittent**
+because it depended on whether `_initGraphPipelines` or `_initSpring` initialised last.
+
+Why the settled oracles missed it: headless SwiftShader runs the **CPU** season path, which never
+builds the spring bind groups, so no validation error fired there. The flood of
+`Invalid BindGroup … due to a previous error` only appears on a **real GPU** (`snap-realgpu.js`),
+tracing back to two root errors: *"Number of entries (8) did not match the expected (9)"* (compute)
+and *"(2) did not match (3)"* (render).
+
+**Fix.** Renamed the G-track scene layouts to `this.sceneStairBgl` / `this.sceneStairLineBgl`
+(webgpu-graph.js: the two `createBindGroupLayout` defs + their pipeline layouts + 4 bind-group
+usages), so the two engines no longer share a property name. Added a `pushErrorScope("validation")`
+guard around the spring bind-group build (script.js `_initSpringBuffers`) that surfaces any future
+re-collision on `window.__bl2d_springBglError` instead of letting it corrupt silently.
+
+**Verification (real GPU, `snap-realgpu.js`):** full-history sweep 1910→1991 (crossing the **1948**
+repro year) and a 1980→1998 sweep (Hrbek-active era + the 73-HR record) — **0 bad cards, 0 off-axis
+values, 0 GPU validation errors**, `__bl2d_springBglError=null`. `__bl2d_verifySeason([1905,1948,
+2001])` → `allGreen, totalMis 0`; `__bl2d_verifySeasonFrontier([1909,1948,2001])` → `allGreen,
+totalKernel 0, totalFront 0` (the doc had never re-run these at 1948 / pre-1910 — now green). The
+G-track parity matrix is unchanged by the rename (pre-existing 13/15; the two `bat HR×SB`
+`no-verifyGraph` rows fail identically on the committed baseline, unrelated to this fix).
+
+> S2 was **not** the trigger (the bug is a pre-existing SA-track resource-binding collision surfaced
+> on the GPU season path); the planned baseline / multi-season-jump oracle extension was therefore
+> unnecessary — the error-scope guard + real-GPU sweep are the correct regression guards.
+
+---
+
+_Original investigation notes (pre-fix) below — retained for context._
 
 ## Symptoms (user-observed, live real-GPU browser)
 
