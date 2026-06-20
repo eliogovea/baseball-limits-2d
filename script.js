@@ -315,6 +315,7 @@ let pbpCursorIdx = 0;           // global index into the concatenated multi-year
 let pbpExtentCache = null;      // { key, x, y } — axis-extent lock held across the smooth sweep
 let pbpCompletedCache = null;   // { key, points } — completed-season points (yearID < openYear) cached per open year so play doesn't re-filter all of data.points every frame
 let pbpFrontierPrepCache = null; // { key, filtered } — completed-season frontier rows, sorted for merge with the open season
+let pbpGpuCompletedCache = null; // { key, positions, colors } — SA3: completed-season Pareto frontier packed for the GPU union skyline (key folds in the Color-by + theme so dot colours stay live)
 let evtIncFrontier = null;      // { stream, xSign, ySign, engine, comp, applied, lastCursor } — incremental .evt-career Pareto frontier state, replayed across frames (reset on backward seek / model rebuild)
 let pbpRaf = null;              // requestAnimationFrame handle while the cursor is playing
 // Phase-5 spring glide loop: a dedicated rAF that runs the (cheap) GPU present every display
@@ -1755,6 +1756,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         pbpExtentCache = null;
         pbpCompletedCache = null;
         pbpFrontierPrepCache = null;
+        pbpGpuCompletedCache = null;
         evtIncFrontier = null;
         groupCareerMode = false;
         groupTrailHistory.clear();
@@ -1790,6 +1792,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         pbpExtentCache = null;
         pbpCompletedCache = null;
         pbpFrontierPrepCache = null;
+        pbpGpuCompletedCache = null;
         evtIncFrontier = null;
     }
     // Rebuild the timeline span after the group membership changes mid-animation.
@@ -3066,6 +3069,14 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
 // the real frontier never approaches it (this dataset's all-time frontier is ~2).
 const WEBGPU_MAX_FRONT = 2048;
 
+// S-track SA3: cap on the per-open-year completed-season frontier fed into the GPU union
+// skyline as static "phantom" slots after the live open-season players. A 2-D Pareto frontier
+// over the completed season-rows is small (≤ a few hundred for counting axes), so 2048 is ample
+// headroom; if a frontier ever exceeded it the tail clamps (the union skyline then misses the
+// dropped points — caught by __bl2d_verifySeasonFrontier's frontierMis). Drives the extra
+// bPos/bOnFront/bColor slots allocated past `players`.
+const WEBGPU_MAX_COMPLETED = 2048;
+
 // Spring stiffness ω (rad/s): ~0.3 s critically-damped settle, matching the POC. Higher
 // ⇒ snappier; the integrator is stable for any value/Δt.
 const WEBGPU_SPRING_OMEGA = 12;
@@ -3646,7 +3657,11 @@ class WebGPURenderer {
             const pbytes = Math.max(16, players * 4);
             const mkCounter = () => dev.createBuffer({ size: pbytes, usage: BU.STORAGE | BU.COPY_DST | BU.COPY_SRC });
             const bX = mkCounter(), bY = mkCounter();
-            const bColor = dev.createBuffer({ size: pbytes, usage: BU.STORAGE | BU.COPY_DST });
+            // SA3: the colour buffer carries the live open-season players AND a tail of up to
+            // WEBGPU_MAX_COMPLETED completed-frontier "phantom" colours (uploadCompletedFrontier
+            // writes the tail; _refreshEvtColors only rewrites the open [0, players) prefix). The
+            // career/cloud bind groups read it unchanged (a larger buffer is harmless).
+            const bColor = dev.createBuffer({ size: (players + WEBGPU_MAX_COMPLETED) * 4, usage: BU.STORAGE | BU.COPY_DST });
             // small per-frame uniforms: the event window, and the axis scale + viewport.
             const uWin = dev.createBuffer({ size: 16, usage: BU.UNIFORM | BU.COPY_DST });
             const uScale = dev.createBuffer({ size: 32, usage: BU.UNIFORM | BU.COPY_DST });
@@ -3688,9 +3703,15 @@ class WebGPURenderer {
     _initSpringBuffers(model, players) {
         const dev = this.device, BU = GPUBufferUsage;
         const e = this.evt;
-        const pos2 = Math.max(16, players * 8);                 // vec2<f32> per player
+        const pos2 = Math.max(16, players * 8);                 // vec2<f32> per OPEN player (spring state)
         const stor = BU.STORAGE | BU.COPY_DST;
-        const bPos = dev.createBuffer({ size: pos2, usage: stor | BU.COPY_SRC });   // COPY_SRC: verify readback
+        // SA3: pos[] and onFront[] span the OPEN players plus a tail of up to WEBGPU_MAX_COMPLETED
+        // completed-frontier phantom slots, so the GPU skyline can run over (open ∪ completed) and
+        // mark the union frontier. The spring (bVel, dispatched over `players` only) never touches
+        // the tail; the union skyline/staircase use the separate uSpringUnion count (= players+nC).
+        const slotsU = players + WEBGPU_MAX_COMPLETED;
+        const posU = Math.max(16, slotsU * 8);
+        const bPos = dev.createBuffer({ size: posU, usage: stor | BU.COPY_SRC });   // COPY_SRC: verify readback
         const bVel = dev.createBuffer({ size: pos2, usage: stor });
         // S-track season baselines: per-player career counter snapshot at the open season's
         // start−1 (copyBufferToBuffer from bX/bY on a boundary cross). COPY_DST = copy target,
@@ -3699,7 +3720,7 @@ class WebGPURenderer {
         const pbytes = Math.max(16, players * 4);
         const bBaseX = dev.createBuffer({ size: pbytes, usage: stor | BU.COPY_SRC });
         const bBaseY = dev.createBuffer({ size: pbytes, usage: stor | BU.COPY_SRC });
-        const bOnFront = dev.createBuffer({ size: Math.max(16, players * 4), usage: stor | BU.COPY_SRC });
+        const bOnFront = dev.createBuffer({ size: Math.max(16, slotsU * 4), usage: stor | BU.COPY_SRC });
         // GPU-staircase scratch (frontier size bounded by WEBGPU_MAX_FRONT).
         const MF = WEBGPU_MAX_FRONT;
         const bFrontIdx = dev.createBuffer({ size: MF * 4, usage: stor });
@@ -3709,17 +3730,28 @@ class WebGPURenderer {
         const bIndirect = dev.createBuffer({ size: 16, usage: BU.INDIRECT | BU.STORAGE | BU.COPY_DST | BU.COPY_SRC });
         // small per-frame uniforms (the only things that cross the bus each frame).
         const uSpring = dev.createBuffer({ size: 16, usage: BU.UNIFORM | BU.COPY_DST });
+        // SA3: a SECOND copy of the Spring uniform whose `n` field is the UNION count
+        // (open players + completed phantoms). The skyline/staircase read `n` as their loop bound,
+        // but the SPRING shader also reads `n` as its write guard — so the spring must keep
+        // `n = players` (else its rounded-up dispatch would overwrite the phantom tail). Splitting
+        // the uniform lets the spring run over `players` while the union skyline runs over n+nC,
+        // both off the same pos[]/onFront[] buffers. Only the `n` field matters here (dt/omega/mode
+        // are unused by the skyline/staircase passes).
+        const uSpringUnion = dev.createBuffer({ size: 16, usage: BU.UNIFORM | BU.COPY_DST });
         const uSpringScale0 = dev.createBuffer({ size: 48, usage: BU.UNIFORM | BU.COPY_DST });
         const uSpringScale1 = dev.createBuffer({ size: 48, usage: BU.UNIFORM | BU.COPY_DST });
         const bg = (layout, buffers) => dev.createBindGroup({ layout,
             entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })) });
         e.spring = {
             bPos, bVel, bOnFront, bFrontIdx, bFrontSorted, bCount, bStaircase, bIndirect,
-            uSpring, uSpringScale0, uSpringScale1, baseX: bBaseX, baseY: bBaseY,
+            uSpring, uSpringUnion, uSpringScale0, uSpringScale1, baseX: bBaseX, baseY: bBaseY,
             zerosVec2: new Float32Array(players * 2),
             bgSpring:       bg(this.springBgl,      [uSpring, e.bX, e.bY, bPos, bVel, bBaseX, bBaseY]),
             bgSkyline:      bg(this.skylineBgl,     [uSpring, bOnFront, bPos]),
             bgStair:        bg(this.stairBgl,       [uSpring, bOnFront, bPos, bFrontIdx, bFrontSorted, bCount, bStaircase, bIndirect]),
+            // SA3 union variants (uSpringUnion in slot 0; same pos/onFront/scratch buffers).
+            bgSkylineU:     bg(this.skylineBgl,     [uSpringUnion, bOnFront, bPos]),
+            bgStairU:       bg(this.stairBgl,       [uSpringUnion, bOnFront, bPos, bFrontIdx, bFrontSorted, bCount, bStaircase, bIndirect]),
             bgSpringCloud0: bg(this.springCloudBgl, [uSpringScale0, bPos, e.bColor, bOnFront]),
             bgSpringCloud1: bg(this.springCloudBgl, [uSpringScale1, bPos, e.bColor, bOnFront]),
             bgStairLine:    bg(this.stairLineBgl,   [uSpringScale0, bStaircase]),
@@ -3865,13 +3897,34 @@ class WebGPURenderer {
         return baseChanged;
     }
 
-    // SA0/SA2 live season frame: maintain the resident counters + baseline for the open season
+    // SA3: upload the CPU-computed completed-season Pareto frontier as static "phantom" slots in
+    // the pos[]/col[] tail (indices [players, players+nC)), so the GPU union skyline runs over
+    // (open ∪ completed). The completed frontier is static between open-year changes, so this is
+    // keyed + skipped when unchanged. positions: Float32Array [x0,y0,…] (data units, same space as
+    // the spring's career−baseline targets); colors: packed RGBA8 per point (the active Color-by).
+    // nC is clamped to WEBGPU_MAX_COMPLETED; the union skyline/draw are bounded by e.nCompleted, so
+    // a shrink leaves stale higher slots unread (never dispatched). No-op if the spring isn't up.
+    uploadCompletedFrontier(positions, colors, key) {
+        const e = this.evt, s = e && e.spring;
+        if (!e || !s) return;
+        if (e.completedKey === key) return;                 // identical completed frontier already resident
+        const nC = Math.min(colors.length, WEBGPU_MAX_COMPLETED);
+        const dev = this.device;
+        if (nC > 0) {
+            dev.queue.writeBuffer(s.bPos, e.players * 8, positions.buffer, positions.byteOffset, nC * 2 * 4);
+            dev.queue.writeBuffer(e.bColor, e.players * 4, colors.buffer, colors.byteOffset, nC * 4);
+        }
+        e.nCompleted = nC;
+        e.completedKey = key;
+    }
+
+    // SA0/SA2/SA3 live season frame: maintain the resident counters + baseline for the open season
     // at `cursor` (global date index; `start` = its season's first date index), then set up the
     // spring uniforms so present() glides the open-season cloud toward `max(career − baseline, 0)`
-    // (mode=1). The GPU owns ONLY the open cloud here — onFront is zeroed so every active dot
-    // draws (no GPU frontier; the CPU keeps the union frontier until SA3), and present() skips
-    // the skyline/staircase/frontier-dot passes for a season pending. count=0: the accumulate is
-    // done here (it can span multiple ranges + a snapshot), so present runs only the spring+draw.
+    // (mode=1). SA3: the GPU now owns the UNION frontier too — the union skyline/staircase run over
+    // open players ∪ the completed phantoms (count = players + e.nCompleted via uSpringUnion), and
+    // the frontier-dot pass draws over that union. count=0: the accumulate is done here (it can span
+    // multiple ranges + a snapshot), so present runs only the spring + skyline/staircase + draw.
     accumulateSeasonCloud({ cursor, start, scales }) {
         const e = this.evt;
         if (!e || e.failed || !e.spring) return;
@@ -3886,19 +3939,25 @@ class WebGPURenderer {
         this.lastSpringT = now;
         if (!isFinite(dt) || dt <= 0) dt = 1 / 60;
         dt = Math.min(dt, 0.05);
-        // Snap the cloud to rest on the first season frame or a boundary cross (the new season's
-        // values jump to ~0) so it grows from the origin instead of swooping from the old values.
+        // Snap the open cloud to rest on the first season frame or a boundary cross (the new
+        // season's values jump to ~0) so it grows from the origin instead of swooping from the old
+        // values. Only the OPEN prefix [0, players) is zeroed; the completed phantom tail persists.
         if (first || baseChanged) { dev.queue.writeBuffer(s.bPos, 0, s.zerosVec2); dev.queue.writeBuffer(s.bVel, 0, s.zerosVec2); }
-        dev.queue.writeBuffer(s.bOnFront, 0, e.zeros);   // no GPU frontier → every active dot draws in the cloud pass
+        // Reset the staircase scratch (the GPU now emits the union staircase, like the career path).
+        dev.queue.writeBuffer(s.bCount, 0, new Uint32Array([0]));
+        dev.queue.writeBuffer(s.bIndirect, 0, new Uint32Array([0, 1, 0, 0]));
+        const nU = e.players + (e.nCompleted || 0);
         const uSpring = new ArrayBuffer(16);
         new Float32Array(uSpring, 0, 2).set([dt, WEBGPU_SPRING_OMEGA]);
-        new Uint32Array(uSpring, 8, 2).set([e.players, 1]);   // n, mode=1 (season)
+        new Uint32Array(uSpring, 8, 2).set([e.players, 1]);     // n = players (spring write guard), mode=1 (season)
         dev.queue.writeBuffer(s.uSpring, 0, uSpring);
+        dev.queue.writeBuffer(s.uSpringUnion, 0, new Uint32Array([0, 0, nU, 0]));   // n = union count for the skyline/staircase
         const fr = Math.max((scales.radius || 2.5) + 3, 6), ring = 1.5;
         const base = [scales.slopeX, scales.interceptX, scales.slopeY, scales.interceptY,
             scales.vpX, scales.vpY, scales.radius, scales.alpha, fr, ring];
-        dev.queue.writeBuffer(s.uSpringScale0, 0, new Float32Array([...base, 0, 0]));   // cloud pass only
-        e.pending = { count: 0, instanceCount: e.players, spring: true, season: true };
+        dev.queue.writeBuffer(s.uSpringScale0, 0, new Float32Array([...base, 0, 0]));   // cloud pass (open)
+        dev.queue.writeBuffer(s.uSpringScale1, 0, new Float32Array([...base, 1, 0]));   // frontier pass (union)
+        e.pending = { count: 0, instanceCount: e.players, frontInstanceCount: nU, spring: true, season: true };
         e.lastInstanceCount = e.players;
     }
 
@@ -4051,12 +4110,48 @@ class WebGPURenderer {
         return out;
     }
 
+    // ── S-track SA3: GPU union-frontier oracle (one-shot, never in renderAt) ───────────────
+    // Assumes the live season draw has already set the resident open counters/baseline at the
+    // current cursor and uploaded the completed-frontier phantoms (e.nCompleted slots). Settles
+    // the open spring (mode=1, huge dt ⇒ pos snaps to the integer season value), runs the UNION
+    // skyline over (open ∪ completed) = e.players + e.nCompleted slots, reads pos[]/onFront[]
+    // back once, and returns the GPU union-frontier (x,y) list + kernelMis (GPU onFront vs a CPU
+    // brute-force Pareto over the SAME settled positions — the strict tie-break the shader uses).
+    // The caller cross-checks `front` against the CPU `frontier` the app actually drew.
+    async verifySeasonFrontier() {
+        const e = this.evt, s = e && e.spring;
+        if (!e || !s) return null;
+        const dev = this.device, n = e.players, nC = e.nCompleted || 0, nU = n + nC;
+        const us = new ArrayBuffer(16);
+        new Float32Array(us, 0, 2).set([1000, WEBGPU_SPRING_OMEGA]);   // huge dt ⇒ pos snaps to target
+        new Uint32Array(us, 8, 2).set([n, 1]);                         // n = players (spring guard), mode=1
+        dev.queue.writeBuffer(s.uSpring, 0, us);
+        dev.queue.writeBuffer(s.uSpringUnion, 0, new Uint32Array([0, 0, nU, 0]));
+        const enc = dev.createCommandEncoder();
+        const pass = (pipe, bg, wg) => { const cp = enc.beginComputePass(); cp.setPipeline(pipe); cp.setBindGroup(0, bg); cp.dispatchWorkgroups(wg); cp.end(); };
+        pass(this.pSpring, s.bgSpring, Math.ceil(n / 64));             // settle open pos = season values
+        pass(this.pSkyline, s.bgSkylineU, Math.ceil(nU / 64));         // union onFront
+        dev.queue.submit([enc.finish()]);
+        const pos = await this._readback(s.bPos, nU * 8, Float32Array);
+        const onF = await this._readback(s.bOnFront, nU * 4, Uint32Array);
+        let kernelMis = 0; const front = [];
+        for (let i = 0; i < nU; i++) {
+            const xi = pos[i * 2], yi = pos[i * 2 + 1];
+            let dom = (xi === 0 && yi === 0) ? 1 : 0;     // origin slots are off-front (match the shader)
+            if (!dom) for (let j = 0; j < nU; j++) { const xj = pos[j * 2], yj = pos[j * 2 + 1]; if (xj >= xi && yj >= yi && (xj > xi || yj > yi)) { dom = 1; break; } }
+            const cpuFront = dom ? 0 : 1;
+            if ((onF[i] ? 1 : 0) !== cpuFront) kernelMis++;
+            if (onF[i]) front.push([xi, yi]);
+        }
+        return { nU, players: n, nCompleted: nC, kernelMis, front };
+    }
+
     _destroyEvt() {
         const e = this.evt; if (!e) return;
         for (const k of ["bEvents", "bX", "bY", "bColor", "uWin", "uScale"]) e[k]?.destroy();
         if (e.spring) {
             for (const k of ["bPos", "bVel", "bOnFront", "bFrontIdx", "bFrontSorted", "bCount",
-                "bStaircase", "bIndirect", "uSpring", "uSpringScale0", "uSpringScale1", "baseX", "baseY"]) e.spring[k]?.destroy();
+                "bStaircase", "bIndirect", "uSpring", "uSpringUnion", "uSpringScale0", "uSpringScale1", "baseX", "baseY"]) e.spring[k]?.destroy();
         }
         this.evt = null;
     }
@@ -4087,7 +4182,8 @@ class WebGPURenderer {
     _buildSceneDescriptor() {
         const evt = this.evt;
         const gpuCloud = !!(evt && evt.pending && !evt.failed);
-        // S-track season: a cloud-only spring source (no GPU skyline/staircase/frontier-dots).
+        // S-track SA3 season: a spring source that ALSO runs the union skyline/staircase + draws
+        // the union frontier dots (open ∪ completed phantoms).
         const seasonOn = !!(gpuCloud && evt.pending.season && evt.spring);
         const springOn = !!(gpuCloud && evt.pending.spring && evt.spring && !evt.pending.season);
         return {
@@ -4095,6 +4191,7 @@ class WebGPURenderer {
             source: springOn ? "spring" : seasonOn ? "season" : (this.graph && this.graphMode ? "upload" : "hybrid"),
             runAccumulate: !!(gpuCloud && evt.pending.count > 0),
             instanceCount: gpuCloud ? (evt.pending.instanceCount || 0) : 0,
+            frontInstanceCount: gpuCloud ? (evt.pending.frontInstanceCount || evt.pending.instanceCount || 0) : 0,
         };
     }
     present_unified() {
@@ -4124,8 +4221,15 @@ class WebGPURenderer {
             } catch (e3) { evt.failed = true; console.warn("[webgpu] spring passes failed → CPU cloud:", e3.message); }
         } else if (d.source === "season") {
             try {
-                const cp = enc.beginComputePass(); cp.setPipeline(this.pSpring); cp.setBindGroup(0, evt.spring.bgSpring);
-                cp.dispatchWorkgroups(Math.ceil(evt.players / 64)); cp.end();   // open-cloud glide only (mode=1)
+                const s = evt.spring;
+                const wgK = Math.ceil(WEBGPU_MAX_FRONT / 64);
+                const nU = evt.players + (evt.nCompleted || 0), wgU = Math.ceil(nU / 64);
+                const pass = (pipe, bg, wg) => { const cp = enc.beginComputePass(); cp.setPipeline(pipe); cp.setBindGroup(0, bg); cp.dispatchWorkgroups(wg); cp.end(); };
+                pass(this.pSpring, s.bgSpring, Math.ceil(evt.players / 64));   // open-cloud glide (mode=1, n=players)
+                pass(this.pSkyline, s.bgSkylineU, wgU);                       // union skyline (open ∪ completed)
+                pass(this.pStairCompact, s.bgStairU, wgU);
+                pass(this.pStairRanksort, s.bgStairU, wgK);
+                pass(this.pStairEmit, s.bgStairU, wgK);
             } catch (e3) { evt.failed = true; console.warn("[webgpu] season spring pass failed → CPU cloud:", e3.message); }
         }
         // ── render: identical z-order to present_legacy ──
@@ -4148,9 +4252,9 @@ class WebGPURenderer {
         drawPts("fg");
         drawPts("frontier");
         this._drawGraphOverlays?.(rp);
-        if (d.source === "spring" && d.instanceCount > 0) {
-            const s = evt.spring;
-            rp.setPipeline(this.pSpringCloud); rp.setBindGroup(0, s.bgSpringCloud1); rp.draw(6, d.instanceCount);
+        if ((d.source === "spring" || d.source === "season") && d.frontInstanceCount > 0) {
+            const s = evt.spring;   // season draws the UNION frontier (frontInstanceCount = players + nCompleted)
+            rp.setPipeline(this.pSpringCloud); rp.setBindGroup(0, s.bgSpringCloud1); rp.draw(6, d.frontInstanceCount);
             rp.setPipeline(this.pStairLine); rp.setBindGroup(0, s.bgStairLine); rp.drawIndirect(s.bIndirect, 0);
         }
         this._drawGraphText?.(rp);
@@ -4193,27 +4297,33 @@ class WebGPURenderer {
         // accumulate writes, skyline sees spring's pos, and the staircase passes chain
         // compact→ranksort→emit. ranksort/emit over-dispatch to MAX_FRONT and self-guard
         // against the GPU-side K (the host can't know K without a readback).
-        // S-track season frame (`pending.season`): the GPU owns ONLY the open-season cloud, so
-        // it runs the spring glide alone (mode=1, baseline-subtracted) — no GPU skyline/staircase
-        // (the CPU keeps the union frontier until SA3). The full career path runs all 5 passes.
+        // S-track SA3 season frame (`pending.season`): the GPU owns the open cloud AND the UNION
+        // frontier. The spring glides only the open players (mode=1, baseline-subtracted, n=players),
+        // then the skyline/staircase run over the UNION (open ∪ completed phantoms) via uSpringUnion
+        // (n = players + nCompleted). The career path (springOn) runs the same five passes over the
+        // career skyline (uSpring, n=players).
         const seasonOn = gpuCloud && !evt.failed && evt.pending.season && evt.spring;
         const springOn = gpuCloud && !evt.failed && evt.pending.spring && evt.spring && !evt.pending.season;
-        if (springOn) {
+        if (springOn || seasonOn) {
             try {
                 const s = evt.spring;
                 const wgN = Math.ceil(evt.players / 64), wgK = Math.ceil(WEBGPU_MAX_FRONT / 64);
                 const pass = (pipe, bg, wg) => { const cp = enc.beginComputePass(); cp.setPipeline(pipe); cp.setBindGroup(0, bg); cp.dispatchWorkgroups(wg); cp.end(); };
-                pass(this.pSpring, s.bgSpring, wgN);          // glide pos toward the counters
-                pass(this.pSkyline, s.bgSkyline, wgN);        // onFront = GPU Pareto frontier
-                pass(this.pStairCompact, s.bgStair, wgN);     // gather on-front ids
-                pass(this.pStairRanksort, s.bgStair, wgK);    // rank-sort by x
-                pass(this.pStairEmit, s.bgStair, wgK);        // emit step verts + indirect count
+                pass(this.pSpring, s.bgSpring, wgN);          // glide pos toward the counters (career or open-season)
+                if (seasonOn) {
+                    // Union skyline/staircase over open ∪ completed phantoms (n = players + nCompleted).
+                    const nU = evt.players + (evt.nCompleted || 0), wgU = Math.ceil(nU / 64);
+                    pass(this.pSkyline, s.bgSkylineU, wgU);
+                    pass(this.pStairCompact, s.bgStairU, wgU);
+                    pass(this.pStairRanksort, s.bgStairU, wgK);
+                    pass(this.pStairEmit, s.bgStairU, wgK);
+                } else {
+                    pass(this.pSkyline, s.bgSkyline, wgN);        // onFront = GPU Pareto frontier
+                    pass(this.pStairCompact, s.bgStair, wgN);     // gather on-front ids
+                    pass(this.pStairRanksort, s.bgStair, wgK);    // rank-sort by x
+                    pass(this.pStairEmit, s.bgStair, wgK);        // emit step verts + indirect count
+                }
             } catch (e3) { evt.failed = true; console.warn("[webgpu] spring passes failed → CPU cloud:", e3.message); }
-        } else if (seasonOn) {
-            try {
-                const cp = enc.beginComputePass(); cp.setPipeline(this.pSpring); cp.setBindGroup(0, evt.spring.bgSpring);
-                cp.dispatchWorkgroups(Math.ceil(evt.players / 64)); cp.end();   // glide the open cloud toward career−baseline
-            } catch (e3) { evt.failed = true; console.warn("[webgpu] season spring pass failed → CPU cloud:", e3.message); }
         }
         const rp = enc.beginRenderPass({ colorAttachments: [{
             view: this.offTex.createView(), clearValue: this.clearValue, loadOp: "clear", storeOp: "store" }] });
@@ -4235,7 +4345,7 @@ class WebGPURenderer {
         // hybrid path: the original counter-pull cloud.
         if ((springOn || seasonOn) && evt.pending.instanceCount > 0) {
             rp.setPipeline(this.pSpringCloud);
-            rp.setBindGroup(0, evt.spring.bgSpringCloud0);   // pass 0 = cloud (season has onFront=0 ⇒ every active dot draws)
+            rp.setBindGroup(0, evt.spring.bgSpringCloud0);   // pass 0 = cloud over the OPEN players (front dots degenerate → drawn by pass 1)
             rp.draw(6, evt.pending.instanceCount);
             rp.setPipeline(this.pPoints);
         } else if (gpuCloud && !evt.failed && evt.pending.instanceCount > 0) {
@@ -4252,15 +4362,19 @@ class WebGPURenderer {
         this._drawGraphOverlays?.(rp);
         // Phase-5: frontier dots (pass 1, front-only) + the red staircase via drawIndirect,
         // both on top of the cloud/heads. The staircase's vertex count was written by the
-        // GPU emit pass into bIndirect — it never round-tripped through JS.
-        if (springOn && evt.pending.instanceCount > 0) {
+        // GPU emit pass into bIndirect — it never round-tripped through JS. SA3: a season frame
+        // draws the UNION frontier (open ∪ completed phantoms) → frontInstanceCount instances.
+        if (springOn || seasonOn) {
             const s = evt.spring;
-            rp.setPipeline(this.pSpringCloud);
-            rp.setBindGroup(0, s.bgSpringCloud1);
-            rp.draw(6, evt.pending.instanceCount);
-            rp.setPipeline(this.pStairLine);
-            rp.setBindGroup(0, s.bgStairLine);
-            rp.drawIndirect(s.bIndirect, 0);
+            const frontCount = evt.pending.frontInstanceCount || evt.pending.instanceCount;
+            if (frontCount > 0) {
+                rp.setPipeline(this.pSpringCloud);
+                rp.setBindGroup(0, s.bgSpringCloud1);
+                rp.draw(6, frontCount);
+                rp.setPipeline(this.pStairLine);
+                rp.setBindGroup(0, s.bgStairLine);
+                rp.drawIndirect(s.bIndirect, 0);
+            }
         }
         // G-track G3: glyph-atlas text (tick labels + frontier names) on top of all else.
         this._drawGraphText?.(rp);
@@ -4300,14 +4414,17 @@ class WebGPURenderer {
         this.device.queue.writeBuffer(s.bIndirect, 0, new Uint32Array([0, 1, 0, 0]));
         const uSpring = new ArrayBuffer(16);
         new Float32Array(uSpring, 0, 2).set([dt, WEBGPU_SPRING_OMEGA]);
-        // S-track: a season glide frame keeps mode=1 (baseline-subtracted) and re-zeros onFront so
-        // the open cloud keeps drawing every active dot. The counters/baseline stay put — only the
-        // spring keeps gliding pos toward career−baseline.
+        // S-track SA3: a season glide frame keeps mode=1 (baseline-subtracted). The counters/baseline
+        // stay put — only the spring keeps gliding pos. onFront is NOT zeroed: present() re-runs the
+        // union skyline over the gliding open positions + the static completed phantoms, so the
+        // union frontier (dots + staircase) tracks the glide. uSpringUnion (the skyline/staircase
+        // count) persists on-GPU from the last real frame, but re-write it defensively.
         const seasonMode = e.seasonActive ? 1 : 0;
         new Uint32Array(uSpring, 8, 2).set([e.players, seasonMode]);
         this.device.queue.writeBuffer(s.uSpring, 0, uSpring);
-        if (seasonMode) this.device.queue.writeBuffer(s.bOnFront, 0, e.zeros);
-        e.pending = { count: 0, instanceCount: e.lastInstanceCount, spring: true, season: !!seasonMode };
+        const nU = e.players + (seasonMode ? (e.nCompleted || 0) : 0);
+        if (seasonMode) this.device.queue.writeBuffer(s.uSpringUnion, 0, new Uint32Array([0, 0, nU, 0]));
+        e.pending = { count: 0, instanceCount: e.lastInstanceCount, frontInstanceCount: nU, spring: true, season: !!seasonMode };
         this.present();
     }
 
@@ -4615,6 +4732,50 @@ window.__bl2d_verifySeasonLive = async (years = [1998, 2001, 2002, 2001], spotli
     r.season = null; r.seasonActive = false;   // don't leak test state into the live loop
     const totalMis = out.reduce((a, p) => a + p.seasonMis, 0);
     return { axes: `${m.xDim}×${m.yDim}`, totalMis, allGreen: totalMis === 0, probes: out };
+};
+
+// S-track SA3 invariant probe (the GPU UNION-frontier oracle). Drives the LIVE gpuSeason path
+// at end-of-season for each probe year (forces a lite frame so the gate engages → the app
+// computes the CPU union frontier, uploads the completed-frontier phantoms, and accumulates the
+// open counters), then settles the spring and re-runs the union skyline, comparing:
+//   kernelMis   — GPU onFront vs a CPU brute-force Pareto over the SAME settled union positions
+//                 (the skyline-kernel invariant, like verifySpring's skylineMis).
+//   frontierMis — the GPU union-frontier (x,y) set vs the CPU `frontier` the app actually drew
+//                 (the end-to-end check: completed-phantom feed + open counters + skyline).
+// Both must be 0. Spot-checks the max-x frontier point (e.g. HR×SB 2001 → 73 HR, Bonds' record).
+// Requires ?gpuseason=1, a season-smooth page, and GPU-season-eligible axes. Restores the cursor.
+window.__bl2d_verifySeasonFrontier = async (years = [1998, 2001, 2002]) => {
+    if (!(pointRenderer instanceof WebGPURenderer) || !pointRenderer.springMode || !pbpEvt) return null;
+    if (!GPU_SEASON) return { skipped: "needs ?gpuseason=1" };
+    const m = pbpEvt;
+    if (m.xs.rate || m.ys.rate || !evtGpuMonotone(m).ok) return { skipped: "axes not GPU-season-eligible" };
+    const yr = years.filter(y => m.seasonEndByYear.has(y));
+    if (!yr.length) return { skipped: "no covered years" };
+    if (pbpRaf) { cancelAnimationFrame(pbpRaf); pbpRaf = null; }   // stop live playback so it can't race the oracle's cursor
+    const savedLite = smoothLite, savedCursor = pbpCursorIdx;
+    const twoFrames = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const key = a => a[0] + "|" + a[1];
+    const out = [];
+    for (const y of yr) {
+        pbpCursorIdx = Math.min(m.winEnd ?? (m.numDates - 1), m.seasonEndByYear.get(y));
+        smoothLite = true;                 // force a lite playback frame so the gpuSeason gate engages
+        document.dispatchEvent(new Event("bl2d:refresh"));   // refreshChart is a nested closure; this is the bridge
+        await twoFrames();
+        if (!window.__bl2d_evtGpuSeason) { out.push({ year: y, skipped: "gpuSeason gate off" }); continue; }
+        const cpu = window.__bl2d_lastSeasonUnionFrontier || [];
+        const r = await pointRenderer.verifySeasonFrontier();
+        if (!r) { out.push({ year: y, skipped: "no spring" }); continue; }
+        const cpuSet = new Set(cpu.map(key)), gpuSet = new Set(r.front.map(key));
+        let frontierMis = 0;
+        for (const k of cpuSet) if (!gpuSet.has(k)) frontierMis++;
+        for (const k of gpuSet) if (!cpuSet.has(k)) frontierMis++;
+        const maxXonFront = r.front.reduce((mx, p) => Math.max(mx, p[0]), 0);
+        out.push({ year: y, kernelMis: r.kernelMis, frontierMis, nCompleted: r.nCompleted, gpuFrontSize: r.front.length, cpuFrontSize: cpu.length, maxXonFront });
+    }
+    smoothLite = savedLite; pbpCursorIdx = savedCursor; document.dispatchEvent(new Event("bl2d:refresh"));
+    const totalKernel = out.reduce((a, p) => a + (p.kernelMis || 0), 0);
+    const totalFront = out.reduce((a, p) => a + (p.frontierMis || 0), 0);
+    return { axes: `${m.xDim}×${m.yDim}`, allGreen: totalKernel === 0 && totalFront === 0, totalKernel, totalFront, probes: out };
 };
 
 function recordPbpFrameTiming(totalMs, modelMs, renderMs, enabled) {
@@ -5955,7 +6116,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // them would put the shaded area (and a duplicate line) AHEAD of the gliding red line.
     // Skip both while the GPU spring animates; a paused/idle frame is a CPU frame where the
     // line and fill agree, so the shade returns the instant playback stops.
-    if (frontier.length > 0 && !filters.groupCareer && !gpuSpring && !gpuGraph) {
+    if (frontier.length > 0 && !filters.groupCareer && !gpuSpring && !gpuGraph && !gpuSeason) {
         const line = staircaseScreen(frontier);
 
         // Hypervolume shading: gradient fill of the dominated region beneath the
@@ -6291,20 +6452,20 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         strokeWidth: 1.5,
         clear: !filters.groupCareer,               // keep the trails drawn just above
     });
-    if (!filters.groupCareer && pointRenderer.fgCanvas && !gpuSpring && !gpuGraph) {
+    if (!filters.groupCareer && pointRenderer.fgCanvas && !gpuSpring && !gpuGraph && !gpuSeason) {
         // Frontier dots composite over the fg cloud (no clear). They follow the active
         // Color-by encoding (era / league / bats), same as the cloud — staying distinct
         // via size + the white ring, not a fixed colour, so the encoding isn't
-        // misrepresented; career/worst colours win when set. Skipped under gpuSpring —
+        // misrepresented; career/worst colours win when set. Skipped under gpuSpring/gpuSeason —
         // the GPU skyline draws the frontier dots itself (from onFront[]).
         pointRenderer.drawFrontierDots(special, {
             margin, xScale, yScale, radiusFor,
             fillFor: d => careerHighlights.get(d.playerID) || frontierColor || colorOf(d, colorBy, getMeta),
             strokeColor: "#ffffff", strokeWidth: 1.5,
         });
-    } else if ((gpuSpring || gpuGraph) && pointRenderer && pointRenderer.count) {
-        // The GPU spring / G-track draws the frontier dots itself (spring: the skyline
-        // pass over onFront[]; G-track: sceneFront). drawFrontierDots is skipped above,
+    } else if ((gpuSpring || gpuGraph || gpuSeason) && pointRenderer && pointRenderer.count) {
+        // The GPU spring / G-track / SA3 season draws the frontier dots itself (spring/season:
+        // the skyline pass over onFront[]; G-track: sceneFront). drawFrontierDots is skipped above,
         // so the retained legacy `frontier` buffer is NOT refreshed — and present()'s
         // drawPts("frontier") would otherwise keep re-drawing whatever frontier was last
         // uploaded by a static/paused (non-spring) frame ON TOP of the animation (the
@@ -6321,8 +6482,33 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             scales: gpuScaleUniform(xScale, yScale, margin, width, height, pointRadius, cloudOpacity),
         });
     } else if (gpuSeason) {
-        // S-track SA2: maintain the open-season counters/baseline + queue the mode=1 spring so
-        // present() glides the open cloud toward each player's within-season value.
+        // S-track SA3: hand the GPU the completed-season Pareto frontier (static between open-year
+        // changes) as phantom skyline input, then maintain the open counters/baseline + queue the
+        // mode=1 spring. present() runs the UNION skyline over (open ∪ completed) and draws the
+        // union frontier dots + staircase; the CPU draws are suppressed above.
+        if (pbpFrontierPrepCache) {
+            const theme = document.documentElement.dataset.theme || "";
+            const gpuKey = pbpFrontierPrepCache.key + "|" + colorBy + "|" + theme;
+            if (pbpGpuCompletedCache?.key !== gpuKey) {
+                // Completed-frontier = Pareto sweep of the (deduped) completed season rows. Feeding
+                // only the frontier (not every completed row) is exact: a completed point off the
+                // completed frontier is dominated by one on it, so it can't be on the union frontier.
+                const rows = pbpFrontierPrepCache.filtered;
+                const uniq = [];
+                for (let i = 0; i < rows.length; i++) { const p = rows[i]; if (i === 0 || p.x !== rows[i - 1].x || p.y !== rows[i - 1].y) uniq.push(p); }
+                const cf = sweepFrontier(uniq);
+                const nC = Math.min(cf.length, WEBGPU_MAX_COMPLETED);
+                const positions = new Float32Array(nC * 2), colors = new Uint32Array(nC);
+                for (let i = 0; i < nC; i++) {
+                    positions[i * 2] = cf[i].x; positions[i * 2 + 1] = cf[i].y;
+                    colors[i] = packColorRGBA(colorOf(cf[i], colorBy, getMeta), 1);
+                }
+                pbpGpuCompletedCache = { key: gpuKey, positions, colors };
+            }
+            pointRenderer.uploadCompletedFrontier(pbpGpuCompletedCache.positions, pbpGpuCompletedCache.colors, gpuKey);
+        }
+        // Expose the CPU union frontier (the app's reference) for the SA3 verify oracle.
+        window.__bl2d_lastSeasonUnionFrontier = frontier.map(p => [p.x, p.y]);
         const cur = Math.max(pbpEvt.winStart, Math.min(pbpEvt.winEnd, pbpCursorIdx));
         const start = pbpEvt.seasonStartByYear.get(pbpEvt.yearOf[cur]);
         if (start != null) pointRenderer.accumulateSeasonCloud({

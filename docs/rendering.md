@@ -649,7 +649,7 @@ auto-enables, Canvas2D is the silent fallback); these exist to *force* a path fo
 | `?verifyFrontier=1` | off | asserts the incremental frontier == full sweep every smooth frame | smooth-path (`pbpEvt`) incremental gate |
 | `?deviceLossTest=1` | hook not attached | attaches `window.__bl2d_forceDeviceLoss()` | G6d device-loss → Canvas2D recovery test |
 | `?matrixPerturb=1` | off | corrupts one oracle inside `__bl2d_verifyGraphMatrix()` | G6c parity-matrix negative control |
-| `?gpuseason=1` | season cloud on CPU | GPU-springs the open-season cloud (S-track SA2) | season smooth GPU animation — default off until graduated |
+| `?gpuseason=1` | season cloud + frontier on CPU | GPU-springs the open-season cloud AND the hybrid union frontier (S-track SA2 + SA3) | season smooth GPU animation — default off until graduated |
 
 **G6 done ⇒** the full-GPU chart is the production renderer end-to-end (cloud → frontier →
 HV → overlays → text → interaction), one loop owner, one present body, with Canvas2D as the
@@ -752,6 +752,44 @@ values, not career), and its outliers + data→pixel alignment match the CPU-pat
 (`?gpuseason` off) at the same cursor. Settled (paused) frames are non-lite ⇒ the CPU exact cloud
 takes over, same as career. Default season render (no flag) is byte-unchanged. **Remaining:** SA3
 (hybrid GPU frontier over completed ∪ open) then SA4 (polish) + graduating the flag to default.
+
+### [x] SA3 — hybrid GPU union frontier *(shipped, behind `?gpuseason=1`)*
+
+The GPU now owns the season **union frontier** too (dots + staircase), not just the open cloud.
+The completed-season Pareto frontier (static between open-year changes, ≤ a few hundred points)
+is computed on the CPU and uploaded as static **"phantom" slots** in the `pos[]`/`col[]` tail —
+`bPos`/`bOnFront`/`bColor` are allocated with `WEBGPU_MAX_COMPLETED` (2048) extra slots past
+`players`; `uploadCompletedFrontier(positions, colors, key)` writes the tail (keyed by the
+completed-frontier identity + Color-by + theme, so it only re-uploads on change). Feeding only the
+completed *frontier* (not every completed row) is **exact**: a completed point off the completed
+frontier is dominated by one on it, so it can't be on the union frontier.
+
+The crux is the uniform split: the skyline/staircase read `n` as their loop bound, but
+`WEBGPU_SPRING_WGSL` reads the SAME `n` field as its write guard — so a single shared `n` would
+let the spring's rounded-up dispatch overwrite the phantom tail. SA3 adds a second uniform
+**`uSpringUnion`** (only its `n` field matters) bound by new `bgSkylineU`/`bgStairU` bind groups:
+the spring runs over `n = players` (career counters, mode=1, baseline-subtracted), then the union
+skyline/staircase run over `n = players + nCompleted` off the same `pos[]`/`onFront[]` buffers. The
+cloud pass draws the OPEN players (`instanceCount = players`; front dots degenerate → drawn by the
+frontier pass); the frontier-dot pass + the `drawIndirect` staircase draw the UNION
+(`frontInstanceCount = players + nCompleted`). The CPU SVG staircase/HV-shade and the Canvas
+`drawFrontierDots` are suppressed under `gpuSeason` (the `frontier` legacy buffer is zeroed to dodge
+the "previous frontier never clears" class of bug). Both `present_legacy` and `present_unified`
+mirror the season branch; `presentGlide` re-runs the union skyline over the gliding open positions
++ static phantoms each glide frame (onFront is no longer zeroed).
+
+Verified two ways. Headless on the **dev server** via `scripts/snap-gpu.js`, the new oracle
+`window.__bl2d_verifySeasonFrontier(years)` forces a lite season frame per probe year (so the live
+gate computes the CPU union frontier, uploads the phantoms, and accumulates the open counters), then
+settles the spring + re-runs the union skyline and asserts **`kernelMis 0`** (GPU `onFront` vs a CPU
+brute-force Pareto over the SAME settled union positions) **and `frontierMis 0`** (the GPU union
+frontier (x,y) set == the CPU `frontier` the app draws). Of record: `allGreen` across HR×SB
+1998/2001/2002 — GPU union frontier size == CPU (11), and the max-x frontier point spot-checks the
+single-season HR records (1998 → 70, 2001 → 73, Bonds). Career `__bl2d_verifySpring` stays green
+(Bonds 762/514, springMis/skylineMis 0); the G-track parity matrix stays ALL-GREEN. Visually on the
+**real Metal GPU** via `scripts/snap-realgpu.js`: in season play the GPU offscreen layer now shows
+the red union staircase + ringed frontier dots over the season cloud (under SA2 that layer had no
+frontier). **Remaining:** SA4 (polish) + graduating the flag to default.
 
 Invariant:
 career counters are never mutated by the season path, so career↔season mid-play stays
