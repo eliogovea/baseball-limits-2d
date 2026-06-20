@@ -323,8 +323,19 @@ the same Lahman-disambiguated `(b.YYYY)` names `.evt` used, so `metaFor()` is un
 
 ### [ ] S3e (optional) — `qualDeps: ["PA"]`
 
-- BL2S has raw `stat_pa`, so batting rate-stat qualifiers can load 1 file instead of 5
+- BL2S has raw `stat_pa`, so batting rate-stat qualifiers could load 1 file instead of 5
   components. Own commit, only after S3b/S3c parity is green.
+- **⚠ CAVEAT found 2026-06-20 (premise is NOT a free no-op):** `stat_pa` is the **true
+  Retrosheet plate-appearance flag**, NOT `AB+BB+HBP+SH+SF`. They differ for **855 / 16,652
+  players** (career diff up to 31, ~0–2 per season — the extra PAs are catcher-interference
+  reaches the 5-component formula omits). But the app defines `PA = AB+BB+HBP+SH+SF` everywhere:
+  the static path (`parseBattingRows`), the formula card, and the `PA` axis — and the static
+  source is **Lahman, which has no PA/interference data**, so static PA *cannot* be true PA.
+  Switching only the smooth qualifier to `stat_pa` would make **smooth-mode qualification disagree
+  with static-mode** for boundary players in rate-stat season views (a 501-vs-502-PA flip in/out
+  of the frontier) and disagree with the `PA` axis shown beside it. So S3e is a definitional split,
+  not a free optimization. **Deferred (user, 2026-06-20):** left open/undecided — do it only if the
+  app's PA definition is intentionally moved to true PA (which static can't follow), else discard.
 
 ### S3 progress trail
 
