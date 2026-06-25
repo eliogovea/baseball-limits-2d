@@ -4252,9 +4252,16 @@ class WebGPURenderer {
         this._drawGraphScene?.(rp);
         this._drawGraphDepth?.(rp);
         this._drawGraphAux?.(rp);
-        if ((d.source === "spring" || d.source === "season") && d.instanceCount > 0) {
+        // SA3: a season cloud pass draws the UNION count (open ∪ completed phantoms) so a
+        // completed-frontier dot that a gliding open point dominates (onFront→0) demotes to a
+        // background cloud dot instead of vanishing (it's beyond the open `instanceCount`, and
+        // the front-only frontier pass drops it). On-front phantoms stay degenerate here →
+        // drawn red by pass 1; off-front open points are unaffected (index < players). The
+        // career `spring` source has no phantoms → keeps `instanceCount`.
+        const cloudCount = d.source === "season" ? d.frontInstanceCount : d.instanceCount;
+        if ((d.source === "spring" || d.source === "season") && cloudCount > 0) {
             rp.setPipeline(this.pSpringCloud); rp.setBindGroup(0, evt.spring.bgSpringCloud0);
-            rp.draw(6, d.instanceCount); rp.setPipeline(this.pPoints);
+            rp.draw(6, cloudCount); rp.setPipeline(this.pPoints);
         } else if (d.gpuCloud && d.instanceCount > 0) {
             rp.setPipeline(this.pCloud); rp.setBindGroup(0, evt.bgCloud);
             rp.draw(6, d.instanceCount); rp.setPipeline(this.pPoints);
@@ -4354,10 +4361,15 @@ class WebGPURenderer {
         // Phase-5 spring path: vertex-pull the SMOOTHED pos[] (pass 0 = non-front cloud);
         // the frontier dots (pass 1) + the GPU staircase are drawn LAST, on top. Phase-4
         // hybrid path: the original counter-pull cloud.
-        if ((springOn || seasonOn) && evt.pending.instanceCount > 0) {
+        // SA3: a season cloud pass draws the UNION count (open ∪ completed phantoms) so a
+        // dominated completed-frontier dot (onFront→0) demotes to a cloud dot instead of
+        // vanishing — matches the frontier pass's `frontInstanceCount` below. Career (`springOn`)
+        // has no phantoms → keeps `instanceCount`.
+        const cloudCount = seasonOn ? (evt.pending.frontInstanceCount || evt.pending.instanceCount) : evt.pending.instanceCount;
+        if ((springOn || seasonOn) && cloudCount > 0) {
             rp.setPipeline(this.pSpringCloud);
-            rp.setBindGroup(0, evt.spring.bgSpringCloud0);   // pass 0 = cloud over the OPEN players (front dots degenerate → drawn by pass 1)
-            rp.draw(6, evt.pending.instanceCount);
+            rp.setBindGroup(0, evt.spring.bgSpringCloud0);   // pass 0 = cloud over the OPEN players + dominated completed phantoms (front dots degenerate → drawn by pass 1)
+            rp.draw(6, cloudCount);
             rp.setPipeline(this.pPoints);
         } else if (gpuCloud && !evt.failed && evt.pending.instanceCount > 0) {
             rp.setPipeline(this.pCloud);
