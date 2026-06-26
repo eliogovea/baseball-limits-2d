@@ -36,16 +36,28 @@ function relLuminance(hex) {
 })();
 
 // Color palettes per encoding mode. Keep deliberate — Red/Blue echo MLB.
+// Categorical color tables for the two NON-era encodings (handedness, league). Era is
+// NOT here — it's the ordinal ERAS ramp above, because time is ordinal and wants a
+// luminance-ordered ramp, whereas bats/league are unordered categories that want
+// distinct hues. Each entry is an OBJECT (not a bare string) so applyTheme can mutate
+// `.color` in place per theme without any call site (colorOf) needing to change — the
+// indirection is what lets a theme switch re-skin the D3 chart for free. `unknown` is a
+// real bucket, not an error path: Lahman is missing handedness/country for some old
+// players, so colorOf must always resolve to a swatch. League carries a `.dark` variant
+// for chrome that needs a darker shade on light themes (legend dots vs. cloud).
 const COLOR_PALETTES = {
     bats: {
+        // Switch hitters get their own hue; L/R deliberately reuse the league red/blue
+        // (applyTheme overwrites these with the active theme's league colors) so the two
+        // categorical encodings share a palette and the legend stays visually coherent.
         L: { color: "#c8102e", name: "Left" },
         R: { color: "#002d72", name: "Right" },
         S: { color: "#7a3f5f", name: "Switch" },
         unknown: { color: "#94a3b8", name: "Unknown" },
     },
     league: {
-        AL: { color: "#c8102e", dark: "#c8102e", name: "American" },
-        NL: { color: "#002d72", dark: "#002d72", name: "National" },
+        AL: { color: "#c8102e", dark: "#c8102e", name: "American" },   // MLB red
+        NL: { color: "#002d72", dark: "#002d72", name: "National" },   // MLB blue
         unknown: { color: "#94a3b8", dark: "#0f172a", name: "Other" },
     },
 };
@@ -99,42 +111,57 @@ const THEMES = {
 let themeCloudOpacity = THEMES.classic.cloudOpacity;
 
 function applyTheme(name) {
-    const t = THEMES[name] || THEMES.classic;
+    const t = THEMES[name] || THEMES.classic;   // unknown name → Classic (defensive: URL/localStorage could be stale)
     const root = document.documentElement;
+    // 1. CSS chrome: write every theme var onto <html>. styles.css is authored entirely
+    //    against these vars, so the whole UI re-skins with no per-element work here.
     Object.entries(t.vars).forEach(([k, v]) => root.style.setProperty(k, v));
-    root.setAttribute("data-theme", name);
-    // Re-skin the D3-painted chart by mutating the in-place color tables.
-    t.cloud.forEach((c, i) => { if (ERAS[i]) ERAS[i].color = c; });
+    root.setAttribute("data-theme", name);       // a few CSS rules also key off [data-theme]
+    // 2. D3 chart: the chart is painted in JS (canvas/SVG), so CSS vars don't reach it.
+    //    Instead we MUTATE the existing color-table objects in place — colorOf/renderLegend
+    //    hold references to these same objects, so they pick up the new colors on the next
+    //    redraw without being passed the theme. (Reassigning ERAS/COLOR_PALETTES instead
+    //    would orphan those held references — hence in-place mutation.)
+    t.cloud.forEach((c, i) => { if (ERAS[i]) ERAS[i].color = c; });   // era ramp, band-for-band
     COLOR_PALETTES.league.AL.color = COLOR_PALETTES.league.AL.dark = t.league.AL;
     COLOR_PALETTES.league.NL.color = COLOR_PALETTES.league.NL.dark = t.league.NL;
-    COLOR_PALETTES.bats.L.color = t.league.AL;
+    COLOR_PALETTES.bats.L.color = t.league.AL;   // keep handedness sharing the league hues
     COLOR_PALETTES.bats.R.color = t.league.NL;
     COLOR_PALETTES.bats.S.color = t.switchColor;
-    themeCloudOpacity = t.cloudOpacity;
-    try { localStorage.setItem("bl2d-theme", name); } catch (e) {}
+    themeCloudOpacity = t.cloudOpacity;          // darker themes need a higher floor to stay legible
+    try { localStorage.setItem("bl2d-theme", name); } catch (e) {}   // private-mode/quota → ignore, just don't persist
     // Reflect the choice in the header switcher.
     document.querySelectorAll("#theme-switch .theme-btn").forEach(b =>
         b.classList.toggle("active", b.dataset.theme === name));
 }
 
+// Theme to apply at startup: the user's last choice, else Classic. Wrapped in try/catch
+// because localStorage throws in some privacy modes — we degrade to the default, never crash.
 function initialTheme() {
     try { return localStorage.getItem("bl2d-theme") || "classic"; } catch (e) { return "classic"; }
 }
 
+// The single source of truth for a background-cloud dot's fill, given the active
+// "Color by" encoding. Frontier-red / career-gold are decided by the caller and win over
+// this — colorOf only paints the cloud. getMeta is injected (not imported) so this stays
+// a pure function of its inputs, easy to reuse from the canvas and SVG paths alike.
 function colorOf(p, colorBy, getMeta) {
     if (colorBy === "era") {
+        // `p.year ?? p.yearID`: the smooth/streaming rows carry `.year`, the static
+        // season/career rows carry `.yearID` — accept either. `|| {color}` is the
+        // out-of-range guard (a year before 1871 has no era band) → a neutral slate.
         return (eraFor(p.year ?? p.yearID) || { color: "#4a6fa5" }).color;
     }
     if (colorBy === "bats") {
-        const m = getMeta(p.playerID);
-        const k = m && m.bats;
+        const m = getMeta(p.playerID);             // handedness lives in People, not the stat rows
+        const k = m && m.bats;                     // may be undefined (missing meta) → falls to `unknown`
         return (COLOR_PALETTES.bats[k] || COLOR_PALETTES.bats.unknown).color;
     }
     if (colorBy === "league") {
-        const k = p.lgID;
+        const k = p.lgID;                          // lgID is on the row itself (AL/NL/…)
         return (COLOR_PALETTES.league[k] || COLOR_PALETTES.league.unknown).color;
     }
-    return "#4a6fa5";
+    return "#4a6fa5";                              // unknown encoding → neutral (should not happen)
 }
 
 // Keep the chart legend honest: show the key for whatever encoding is actually
@@ -231,7 +258,10 @@ const FRANCHISES = [
     { id: "tor", abbr: "TOR", color: "#134A8E", division: "AL East",    name: "Toronto Blue Jays",                            teams: ["TOR"] },
     { id: "was", abbr: "WSH", color: "#AB0003", division: "NL East",    name: "Washington Nationals",  note: "incl. Montreal Expos",          teams: ["MON","WAS"] },
 ];
-// Fast lookups
+// Fast lookups, flattened from FRANCHISES once at load. A stat row carries a historical
+// Lahman teamID (e.g. "BRO" for 1950s Brooklyn); FRANCHISE_BY_TEAM maps it to the modern
+// franchise id ("lad") so the franchise filter can match a Dodgers career across its
+// Brooklyn→LA move. BY_ID is the reverse, for rendering the dropdown/label from an id.
 const FRANCHISE_BY_TEAM = new Map(FRANCHISES.flatMap(f => f.teams.map(t => [t, f.id])));
 const FRANCHISE_BY_ID   = new Map(FRANCHISES.map(f => [f.id, f]));
 const DIVISIONS = [
@@ -251,11 +281,14 @@ const HIGHLIGHT_COLORS = ["#f59e0b","#14b8a6","#a855f7","#f97316","#84cc16","#ec
 let careerHighlights = new Map(); // playerID → color
 let spotlightPos = new Map();     // playerID → {left, top} once the user drags a card
 
+// Add a player to the highlight set, assigning the first FREE palette color (so two
+// highlighted players never collide, and removing+re-adding reuses a freed color rather
+// than cycling off the end). No-op if already highlighted or the 6-slot palette is full.
 function addHighlight(playerID) {
     if (!playerID || careerHighlights.has(playerID)) return;
     if (careerHighlights.size >= HIGHLIGHT_COLORS.length) return;
     const used = new Set(careerHighlights.values());
-    const color = HIGHLIGHT_COLORS.find(c => !used.has(c));
+    const color = HIGHLIGHT_COLORS.find(c => !used.has(c));   // lowest-index unused color
     careerHighlights.set(playerID, color);
 }
 function removeHighlight(playerID) { careerHighlights.delete(playerID); }
@@ -274,10 +307,93 @@ let tooltipPinned = false;
 let viewDomain = null;          // {x: [a,b], y: [c,d]} | null
 let zoomMode = "off";
 let showWorstFrontier = false;  // toggle: false = best (default), true = worst
+const VERIFY_FRONTIER = new URLSearchParams(location.search).has("verifyFrontier"); // ?verifyFrontier=1 → assert incremental == full sweep each frame
 let hvEncodingEnabled = true;  // scale frontier dot radius by hypervolume contribution (always on)
-let isolationPinned = null;     // data-point reference for the pinned isolation ring, or null
 let animTimer = null;           // setInterval handle while frontier animation is running
 let animExtentCache = null;     // { key, x, y } — full-range axis extents cached per animation session
+let pbpCursorIdx = 0;           // global index into the concatenated multi-year game-date space
+let pbpExtentCache = null;      // { key, x, y } — axis-extent lock held across the smooth sweep
+let pbpCompletedCache = null;   // { key, points } — completed-season points (yearID < openYear) cached per open year so play doesn't re-filter all of data.points every frame
+let pbpFrontierPrepCache = null; // { key, filtered } — completed-season frontier rows, sorted for merge with the open season
+let pbpGpuCompletedCache = null; // { key, positions, colors } — SA3: completed-season Pareto frontier packed for the GPU union skyline (key folds in the Color-by + theme so dot colours stay live)
+let evtIncFrontier = null;      // { stream, xSign, ySign, engine, comp, applied, lastCursor } — incremental .evt-career Pareto frontier state, replayed across frames (reset on backward seek / model rebuild)
+let pbpRaf = null;              // requestAnimationFrame handle while the cursor is playing
+// Phase-5 spring glide loop: a dedicated rAF that runs the (cheap) GPU present every display
+// refresh so the spring animates smoothly, DECOUPLED from the ~15fps-throttled refreshChart
+// (which still owns the expensive CPU frontier/cards/quadtree). See docs / the plan file.
+let springRaf = null;           // rAF handle for the continuous GPU glide present (null = idle)
+// G5h (converged path, ?legacyPresent=0) — a scope bridge so WebGPURenderer.presentInteraction()
+// (a top-level class method) can hand an overlay re-present to the single damage-flag graphLoop
+// owner, which lives inside the UI-setup closure with the spring/playback state. Stays null
+// (legacy path: presentInteraction uses its own one-shot rAF) until that closure assigns it.
+let requestGraphPresent = null;
+let springLoopUntil = 0;        // performance.now() deadline for the post-playback settle tail
+let springFinalPending = false; // a final interactive (non-lite) refreshChart owed once the settle tail drains
+let lastGpuSpringFrame = false; // did the most recent real refreshChart render the GPU spring? (gates glide)
+const SPRING_SETTLE_MS = 500;   // keep gliding this long after the cursor stops so springs visibly settle
+let pendingCursorYmd = null;    // a t=YYYYMMDD from a deep-link, applied once data is loaded
+// The point-cloud renderer (Canvas2DRenderer) owns the bg/fg canvas layers + the
+// background cache key — see the class near the export/render helpers below.
+let groupCareerMode = false;    // group-career animation: the selected players' cumulative careers race through stat-space (vs. the all-player accumulating cloud)
+let groupTrailHistory = new Map(); // playerID → [{x,y,cursor}] recent career positions (DATA coords) for the fading trail
+const GROUP_TRAIL_LEN = 40;     // max retained positions per player in a group-career trail (~ the last few seconds at 15fps)
+let pbpEvt = null;              // resident .evt full-history model (one counting-stat pair) when active, else null
+let smoothLite = false;        // while playing/scrubbing: skip interaction-only work (HV, cards, rings, quadtree) for demo-smooth frames; a full render fires when idle
+let smoothLiteTimer = null;    // debounce → full (interactive) render after the user stops scrubbing
+let playbackSpeed = 1;         // ▶ playback speed multiplier (1× = the default sweep pace); live-adjustable
+let pbpGranularity = "pbp";    // cursor granularity: "pbp" (game-by-game, full date) | "season" (year-by-year, year only)
+const evtStreamCache = new Map(); // `${dataset}:${stat}` -> Promise<decoded BL2S stat>; also `:__dim__`/`:__dates__` (resident once loaded)
+// Per-dataset smooth-mode registry. `stats` = raw counting columns available as BL2S
+// stat files (data/pbp/stat_<prefix><stat>.bl2s.gz); `derived` = axes computed per player
+// from cumulative components (rate:true → ratio needing the qualifier threshold + qualified
+// axis lock; rate:false → monotonic sum). `qual` = the playing-time total (PA / IP) for the
+// rate-axis threshold and axis-lock floor. Keep `stats` in sync with the built BL2S layer
+// (scripts/build_stat_files.py).
+const EVT_REGISTRY = {
+    batting: {
+        prefix: "", thresholdField: "PA", qualDeps: ["AB", "BB", "HBP", "SH", "SF"],
+        qual: (c) => c.AB + c.BB + c.HBP + c.SH + c.SF,
+        stats: new Set(["HR", "SB", "H", "2B", "3B", "RBI", "R", "BB", "SO", "CS", "AB", "HBP", "SF", "SH", "IBB", "GIDP", "G"]),
+        derived: {
+            TB:   { deps: ["H", "2B", "3B", "HR"], rate: false, fn: (c) => c.H + c["2B"] + 2 * c["3B"] + 3 * c.HR },
+            PA:   { deps: ["AB", "BB", "HBP", "SH", "SF"], rate: false, fn: (c) => c.AB + c.BB + c.HBP + c.SH + c.SF },
+            AVG:  { deps: ["H", "AB"], rate: true, fn: (c) => c.AB > 0 ? c.H / c.AB : NaN },
+            SLG:  { deps: ["H", "2B", "3B", "HR", "AB"], rate: true, fn: (c) => c.AB > 0 ? (c.H + c["2B"] + 2 * c["3B"] + 3 * c.HR) / c.AB : NaN },
+            ISO:  { deps: ["2B", "3B", "HR", "AB"], rate: true, fn: (c) => c.AB > 0 ? (c["2B"] + 2 * c["3B"] + 3 * c.HR) / c.AB : NaN },
+            OBP:  { deps: ["H", "BB", "HBP", "AB", "SF"], rate: true, fn: (c) => { const d = c.AB + c.BB + c.HBP + c.SF; return d > 0 ? (c.H + c.BB + c.HBP) / d : NaN; } },
+            OPS:  { deps: ["H", "2B", "3B", "HR", "AB", "BB", "HBP", "SF"], rate: true, fn: (c) => { const slg = c.AB > 0 ? (c.H + c["2B"] + 2 * c["3B"] + 3 * c.HR) / c.AB : NaN; const d = c.AB + c.BB + c.HBP + c.SF; const obp = d > 0 ? (c.H + c.BB + c.HBP) / d : NaN; return obp + slg; } },
+            BABIP:{ deps: ["H", "HR", "AB", "SO", "SF"], rate: true, fn: (c) => { const d = c.AB - c.SO - c.HR + c.SF; return d > 0 ? (c.H - c.HR) / d : NaN; } },
+            "BB%":{ deps: ["BB", "AB", "HBP", "SH", "SF"], rate: true, fn: (c) => { const pa = c.AB + c.BB + c.HBP + c.SH + c.SF; return pa > 0 ? c.BB / pa : NaN; } },
+            "K%": { deps: ["SO", "AB", "BB", "HBP", "SH", "SF"], rate: true, fn: (c) => { const pa = c.AB + c.BB + c.HBP + c.SH + c.SF; return pa > 0 ? c.SO / pa : NaN; } },
+            // RC (Runs Created) is a volume stat (rate:false → no qualifier), recomputed from
+            // cumulative components so it matches aggregateCareer's career formula exactly.
+            RC:   { deps: ["H", "2B", "3B", "HR", "AB", "BB"], rate: false, fn: (c) => { const tb = c.H + c["2B"] + 2 * c["3B"] + 3 * c.HR; const den = c.AB + c.BB; return den > 0 ? (c.H + c.BB) * tb / den : NaN; } },
+        },
+    },
+    pitching: {
+        prefix: "p_", thresholdField: "IP", qualDeps: ["IPouts"],
+        qual: (c) => c.IPouts / 3,
+        stats: new Set(["W", "L", "G", "GS", "CG", "SHO", "SV", "IPouts", "H", "ER", "HR", "BB", "SO", "IBB", "WP", "HBP", "BK", "BFP", "GF", "R", "SH", "SF", "GIDP"]),
+        derived: {
+            // ERA = 9·ER / (IPouts/3) = 27·ER / IPouts, etc. (per-9-innings → ×27/IPouts).
+            IP:     { deps: ["IPouts"], rate: false, fn: (c) => c.IPouts / 3 },
+            ERA:    { deps: ["ER", "IPouts"], rate: true, fn: (c) => c.IPouts > 0 ? 27 * c.ER / c.IPouts : NaN },
+            WHIP:   { deps: ["BB", "H", "IPouts"], rate: true, fn: (c) => c.IPouts > 0 ? 3 * (c.BB + c.H) / c.IPouts : NaN },
+            "K/9":  { deps: ["SO", "IPouts"], rate: true, fn: (c) => c.IPouts > 0 ? 27 * c.SO / c.IPouts : NaN },
+            "BB/9": { deps: ["BB", "IPouts"], rate: true, fn: (c) => c.IPouts > 0 ? 27 * c.BB / c.IPouts : NaN },
+            "H/9":  { deps: ["H", "IPouts"], rate: true, fn: (c) => c.IPouts > 0 ? 27 * c.H / c.IPouts : NaN },
+            "HR/9": { deps: ["HR", "IPouts"], rate: true, fn: (c) => c.IPouts > 0 ? 27 * c.HR / c.IPouts : NaN },
+            "K/BB": { deps: ["SO", "BB"], rate: true, fn: (c) => c.BB > 0 ? c.SO / c.BB : NaN },
+            "K%":   { deps: ["SO", "BFP"], rate: true, fn: (c) => c.BFP > 0 ? c.SO / c.BFP : NaN },
+            "BB%":  { deps: ["BB", "BFP"], rate: true, fn: (c) => c.BFP > 0 ? c.BB / c.BFP : NaN },
+            "K-BB%":{ deps: ["SO", "BB", "BFP"], rate: true, fn: (c) => c.BFP > 0 ? (c.SO - c.BB) / c.BFP : NaN },
+            BAOpp:  { deps: ["H", "BFP", "BB", "HBP", "SH", "SF"], rate: true, fn: (c) => { const ab = c.BFP - c.BB - c.HBP - c.SH - c.SF; return ab > 0 ? c.H / ab : NaN; } },
+        },
+    },
+};
+const evtReg = () => EVT_REGISTRY[activeDatasetKey];
+const PBP_PLAY_FRAME_MS = 66;   // min ms between full chart re-renders while playing (~15fps) — keeps the main thread responsive on wide windows
+const PBP_PLAY_MAX_MS = 45000;  // cap a full sweep so a 100-season window doesn't take ~18 minutes
 
 // URL state defaults — params at their default value are omitted from the
 // hash to keep it short.
@@ -286,10 +402,25 @@ const URL_DEFAULTS = {
     x: "HR", y: "SB", sy: "1920", ey: "2024", pa: "502",
     m: "season", lg: "all", bt: "all", cb: "era", co: "all",
     fr: "all", hl: "", d: "1", c2: "0", sy2: "1900", ey2: "1919",
+    t: "",
 };
 
-// Per-dataset metadata. The Stats toggle in the UI switches `activeDataset`;
-// every read of selectors / threshold field / dimensions goes through here.
+// Per-dataset metadata — the central declaration that makes batting vs. pitching a
+// data difference, not a code difference. The Stats toggle sets `activeDatasetKey`;
+// every read of axis options / threshold / formatting goes through here, so adding a
+// dataset is mostly a matter of adding an entry. Field families and why each exists:
+//   • dimensions      — the ordered axis-dropdown options.
+//   • defaultX/Y      — the fresh-view axes (also the URL_DEFAULTS).
+//   • thresholdField  — the playing-time gate (PA / IP); rows below the slider value are
+//                       dropped before the Pareto sweep so cup-of-coffee outliers don't
+//                       distort the frontier.
+//   • rateStats       — ratios (AVG, ERA, …); used for number formatting (decimals) and
+//                       to decide when the qualifier threshold matters.
+//   • lowerIsBetter   — stats where SMALL is good (ERA, SO, GIDP). The frontier sweep
+//                       finds the upper-right envelope, so for these axes the sign is
+//                       flipped (xSign/ySign) to find the correct (lower-left) limit.
+//   • thresholdConfig — per-mode slider range/step/default/presets (Season defaults to the
+//                       qualifier minimum; Career to 0 — see the inline note).
 const DATASETS = {
     batting: {
         label: "Batting",
@@ -386,6 +517,13 @@ const PITCHING_COUNT_COLS = ["W","L","G","GS","CG","SHO","SV","IPouts","H","ER",
 // frontier.
 const z = (v) => (isFinite(v) ? v : 0);
 
+// CSV rows arrive as all-strings. This turns each row into a typed point with every
+// derived stat PRE-COMPUTED once at load, so the hot frontier path (which runs per
+// frame) only reads numbers, never parses or divides. The formulas mirror
+// EVT_REGISTRY.batting.derived — they must agree, since the same axis can be fed by a
+// static season row (here) OR a streamed .evt cumulative (there). Rate stats are NaN
+// when their denominator is 0 (no AB yet); NaN is deliberate — it drops the point from
+// the chart rather than plotting a bogus 0.000.
 function parseBattingRows(rawPoints) {
     const out = [];
     for (const r of rawPoints) {
@@ -448,6 +586,10 @@ function parsePitchingRows(rawPoints) {
     return out;
 }
 
+// Group all of a player's season rows under their playerID, once at load. This is the
+// O(1) lookup the click-to-highlight career trail needs: clicking one frontier season
+// must instantly find that player's OTHER seasons to plot the gold trail, without
+// re-scanning the whole points array each click.
 function buildPlayerIndex(points) {
     const idx = new Map();
     for (const p of points) {
@@ -458,6 +600,12 @@ function buildPlayerIndex(points) {
     return idx;
 }
 
+// Load + parse one dataset. The same call serves both run modes: in the multi-file dev
+// site `d3.csv` fetches from data/; in the single-file bundle the bundler regex-swaps
+// these exact two calls for in-memory decoders (so keep the literal paths stable — see
+// CLAUDE.md "Single-file bundle"). The decoder also attaches a `.metaFor` (People lookup)
+// to its result array; the CSV path leaves it undefined and buildMetaFromPeopleCsv fills
+// `metaFor` instead — either way `metaFor(playerID)` resolves handedness/country.
 async function loadDataset(key) {
     // The bundler swaps these two d3.csv() calls for the inline decoders.
     const rawPoints = key === "pitching"
@@ -466,6 +614,530 @@ async function loadDataset(key) {
     if (typeof rawPoints.metaFor === "function") metaFor = rawPoints.metaFor;
     const points = key === "pitching" ? parsePitchingRows(rawPoints) : parseBattingRows(rawPoints);
     return { points, playerIndex: buildPlayerIndex(points) };
+}
+
+// Axis-extent lock for the smooth sweep: the extent of every season in the full
+// selected window (sYear..eYear) at its full totals, so the axes are fixed from
+// the first frame and the accumulating frontier visibly grows into that frame
+// instead of the axes jittering as cumulative totals climb. Computed from the
+// always-available Lahman season points (windowPoints), so it needs no PBP files
+// loaded and is stable for the whole animation. Cheap point-level filters
+// (league, franchise) are applied; bats/country are not — they can only shrink
+// the envelope, and a slightly-wider stable axis is preferable to one that jitters.
+function pbpComputeExtent(tl, xDim, yDim, filters, windowPoints, mode, datasetKey, group = null) {
+    const grpKey = group ? [...group].sort().join(",") : "";
+    const key = `${tl.dataset}|${mode}|${xDim}|${yDim}|${filters.league}|${filters.franchise}|${tl.sYear}|${tl.eYear}|grp=${grpKey}`;
+    if (pbpExtentCache && pbpExtentCache.key === key) return { x: pbpExtentCache.x, y: pbpExtentCache.y };
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    const acc = (vx, vy) => {
+        if (isFinite(vx)) { if (vx < x0) x0 = vx; if (vx > x1) x1 = vx; }
+        if (isFinite(vy)) { if (vy < y0) y0 = vy; if (vy > y1) y1 = vy; }
+    };
+    const inWindow = (p) => p.yearID >= tl.sYear && p.yearID <= tl.eYear
+        && (filters.league === "all" || p.lgID === filters.league)
+        && (filters.franchise === "all" || FRANCHISE_BY_TEAM.get(p.teamID) === filters.franchise);
+    if (mode === "career") {
+        // Career mode aggregates each player's seasons into one career point, so the
+        // envelope must be over FULL career totals (career HR reaches the hundreds),
+        // not season totals — otherwise the axes lock to season maxima (~80 HR) and
+        // the growing career dots run off the chart.
+        const byPlayer = new Map();
+        for (const p of windowPoints) {
+            if (!inWindow(p)) continue;
+            if (group && !group.has(p.playerID)) continue;   // group-career: envelope over just the selected players' careers
+            let arr = byPlayer.get(p.playerID);
+            if (!arr) { arr = []; byPlayer.set(p.playerID, arr); }
+            arr.push(p);
+        }
+        for (const seasons of byPlayer.values()) {
+            seasons.sort((a, b) => a.yearID - b.yearID);
+            const agg = aggregateCareer(seasons, datasetKey);
+            acc(+agg[xDim], +agg[yDim]);
+        }
+        // Anchor the group-career frame at the origin so trajectories grow outward
+        // from (0,0) into the fixed career-end envelope rather than starting cramped.
+        if (group) acc(0, 0);
+    } else {
+        for (const p of windowPoints) {
+            if (!inWindow(p)) continue;
+            acc(+p[xDim], +p[yDim]);
+        }
+    }
+    const x = isFinite(x0) ? [x0, x1] : undefined;
+    const y = isFinite(y0) ? [y0, y1] : undefined;
+    pbpExtentCache = { key, x, y };
+    return { x, y };
+}
+
+// ── Group-career mode ────────────────────────────────────────────────────────
+// The selected players (careerHighlights) race their CUMULATIVE careers through
+// stat-space as the cursor sweeps calendar time. Shares the whole BL2S smooth-mode
+// engine (cursor, scrubber, play loop, the resident pbpEvt model) — only the per-frame
+// point-builder differs: one cumulative-career point per player instead of the
+// all-player accumulating cloud.
+
+function groupCareerActive() {
+    return groupCareerMode && pbpEvt && careerHighlights.size >= 1;
+}
+
+// The group's combined career span: earliest debut → latest final season, across
+// every selected player's Lahman seasons. Used to set the timeline window so a
+// short-career player and a long-career one both fit in one animation.
+function groupCareerSpan(datasetKey) {
+    const idx = datasetState[datasetKey]?.playerIndex;
+    let lo = Infinity, hi = -Infinity;
+    if (idx) {
+        for (const pid of careerHighlights.keys()) {
+            const seasons = idx.get(pid);
+            if (!seasons || !seasons.length) continue;
+            for (const s of seasons) {
+                if (s.yearID < lo) lo = s.yearID;
+                if (s.yearID > hi) hi = s.yearID;
+            }
+        }
+    }
+    return isFinite(lo) ? { lo, hi } : null;
+}
+
+// Group-career per-frame builder (BL2S-backed; the old .bl2p version was removed in S4b).
+// Hybrid: prior completed seasons at full Lahman totals (covers pre-1910, which BL2S lacks
+// until S2) + the OPEN season's game-by-game partial sourced from the BL2S model
+// (cumulative as-of the cursor minus the season's starting cumulative). The
+// model is built with allComponents, so the open-season row carries every counting stat
+// aggregateCareer sums. `d` is the model's global date index (the smooth-mode cursor).
+function evtBuildGroupCareer(model, d, xDim, yDim, filt, datasetKey) {
+    const cur = Math.max(0, Math.min(model.numDates - 1, d));
+    const O = model.yearOf[cur];
+    const start = model.seasonStartByYear.get(O);     // first global date index of the open year
+    const before = (start == null ? cur : start) - 1; // last index of year O-1 (evtAsOf → 0 at -1)
+    const group = new Set(careerHighlights.keys());
+    const seasonIndex = datasetState[datasetKey]?.playerIndex;
+    if (!model._byName) model._byName = new Map(model.players.map((p) => [p.name, p]));
+    const pts = [];
+    for (const pid of group) {
+        const seasons = (seasonIndex && seasonIndex.get(pid)) || [];
+        const priorFull = seasons.filter((s) => s.yearID < O);   // strict: open year only via its partial
+        const p = model._byName.get(pid);
+        let openRow = null;
+        if (p && start != null) {
+            const raw = { playerID: pid, yearID: String(O) };
+            let any = false;
+            for (const dep of model.depList) {
+                const v = evtAsOf(p.comp[dep], cur) - evtAsOf(p.comp[dep], before);
+                raw[dep] = v; if (v) any = true;
+            }
+            if (any) {                                  // ≥1 game in O by the cursor date
+                const s = seasons.find((r) => r.yearID === O);
+                raw.teamID = s ? s.teamID : "—"; raw.lgID = s ? s.lgID : "—";
+                openRow = (datasetKey === "pitching" ? parsePitchingRows([raw]) : parseBattingRows([raw]))[0];
+            }
+        }
+        const careerSeasons = openRow ? priorFull.concat(openRow) : priorFull;
+        if (!careerSeasons.length) continue;            // career not started by the cursor
+        careerSeasons.sort((a, b) => a.yearID - b.yearID);
+        pts.push(aggregateCareer(careerSeasons, datasetKey));
+    }
+    const pbpExtent = pbpComputeExtent({ dataset: datasetKey, sYear: model.winStartYear, eYear: model.winEndYear },
+        xDim, yDim, filt, datasetState[datasetKey].points, "career", datasetKey, group);
+    window.__bl2d_groupCareerPoints = pts.map((p) => ({ pid: p.playerID, x: p[xDim], y: p[yDim] }));
+    window.__bl2d_groupCareerActive = true;
+    return { points: pts, sY: model.winStartYear, eY: O, pbpExtent };
+}
+
+// ── Full-history smooth mode (single counting-stat pair) ────────────────────
+// When both chart axes are counting stats (or rates derived from them), load the few
+// BL2S stat files the pair needs and animate every player's cumulative-as-of-date career
+// across ALL history — one resident model, no lazy per-season load/release. (Rate axes
+// like AVG ride the same path now, computed from their component series — S3.)
+// Resolve a chart dimension to {deps, fn, rate}: a raw streamed column, or a derived
+// stat whose components are all streamed. Returns null if not .evt-eligible.
+function evtDimSpec(dim) {
+    const reg = evtReg(); if (!reg) return null;
+    if (reg.derived[dim]) return reg.derived[dim].deps.every((d) => reg.stats.has(d)) ? reg.derived[dim] : null;
+    return reg.stats.has(dim) ? { deps: [dim], rate: false, fn: (c) => c[dim] } : null;
+}
+function evtEligible(xDim, yDim) {
+    // .evt drives BOTH modes over all history, batting AND pitching. Career: one
+    // cumulative point per player. Season: one point per player per season (completed
+    // from Lahman data.points, open growing from .evt — pitching is all step events).
+    return !!evtReg() && !!evtDimSpec(xDim) && !!evtDimSpec(yDim);
+}
+// ── BL2S decoders (the normalized stat layer that replaced the old STEV/.evt files; see
+// docs/data-formats.md §BL2S and scripts/decode_stat.py, the reference reader these
+// mirror). Three file kinds share the 'BL2S' magic: kind 0 = the shared player dimension,
+// kind 1 = one counting stat's per-player date-keyed timeline, kind 2 = the global
+// game-date table the cursor steps over. buildEvtModel stitches them into the model shape
+// the smooth-mode pipeline expects, so everything downstream is unchanged.
+function bl2sHeader(buf, expectKind) {
+    if (new TextDecoder().decode(buf.subarray(0, 4)) !== "BL2S") throw new Error("bad BL2S magic");
+    const kind = buf[6];                              // [4]=major [5]=minor [6]=kind
+    if (kind !== expectKind) throw new Error(`BL2S expected kind ${expectKind}, got ${kind}`);
+    return 7;
+}
+// kind 0 — players[gpid] = { retroID, name (display), birthYear, bats }. gpid = array index.
+function decodeBl2sPlayers(buf) {
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const dec = new TextDecoder(); let off = bl2sHeader(buf, 0);
+    off += 4;                                         // epoch (u16 year, u8 month, u8 day) — unused here
+    const n = dv.getUint32(off, true); off += 4;
+    const players = new Array(n);
+    for (let i = 0; i < n; i++) {
+        const il = buf[off++]; const rid = dec.decode(buf.subarray(off, off + il)); off += il;
+        const nl = buf[off++]; const nm = dec.decode(buf.subarray(off, off + nl)); off += nl;
+        const by = dv.getUint16(off, true); off += 2; const bats = buf[off++];
+        players[i] = { retroID: rid, name: nm, birthYear: by, bats };
+    }
+    return { players };
+}
+// kind 2 — the global game-date table: sorted distinct days since the file's epoch
+// (prefix-summed from the stored varint deltas), plus the epoch itself.
+function decodeBl2sDates(buf) {
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    let off = bl2sHeader(buf, 2);
+    const ey = dv.getUint16(off, true); off += 2; const em = buf[off++], ed = buf[off++];
+    const n = dv.getUint32(off, true); off += 4;
+    const rv = () => { let v = 0, s = 0, b; do { b = buf[off++]; v |= (b & 127) << s; s += 7; } while (b & 128); return v >>> 0; };
+    const dates = new Int32Array(n); let day = 0;
+    for (let i = 0; i < n; i++) { day += rv(); dates[i] = day; }
+    return { epoch: [ey, em, ed], dates };
+}
+// kind 1 — one counting stat: series.get(gpid) = { dates: Int32Array (absolute days since
+// the file epoch), counts: Uint16Array (per-date increments — NOT cumulative; buildEvtModel
+// prefix-sums these into the model's `cum`) }. Player records are gpid-ascending (delta).
+function decodeBl2sStat(buf) {
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const dec = new TextDecoder(); let off = bl2sHeader(buf, 1);
+    const nl = buf[off++]; const stat = dec.decode(buf.subarray(off, off + nl)); off += nl;
+    const ey = dv.getUint16(off, true); off += 2; const em = buf[off++], ed = buf[off++];
+    const nP = dv.getUint32(off, true); off += 4;
+    const rv = () => { let v = 0, s = 0, b; do { b = buf[off++]; v |= (b & 127) << s; s += 7; } while (b & 128); return v >>> 0; };
+    const series = new Map(); let gpid = 0;
+    for (let i = 0; i < nP; i++) {
+        gpid += rv();
+        const nc = rv();
+        const dates = new Int32Array(nc); const counts = new Uint16Array(nc); let day = 0;
+        for (let k = 0; k < nc; k++) { day += rv(); dates[k] = day; counts[k] = rv(); }
+        series.set(gpid, { dates, counts });
+    }
+    return { stat, epoch: [ey, em, ed], series };
+}
+// One-time-per-dataset loads: the shared dimension and the global date table (cached in
+// evtStreamCache under sentinel keys so a chart only fetches them once).
+function loadEvtDim() {
+    const reg = evtReg();
+    const key = `${activeDatasetKey}:__dim__`;
+    if (evtStreamCache.has(key)) return evtStreamCache.get(key);
+    const p = fetch(`data/pbp/stat_${reg.prefix}players.bl2s.gz`).then(async (r) => {
+        if (!r.ok) return null;
+        const ds = r.body.pipeThrough(new DecompressionStream("gzip"));
+        return decodeBl2sPlayers(new Uint8Array(await new Response(ds).arrayBuffer()));
+    }).catch(() => null);
+    evtStreamCache.set(key, p);
+    return p;
+}
+function loadEvtDates() {
+    const reg = evtReg();
+    const key = `${activeDatasetKey}:__dates__`;
+    if (evtStreamCache.has(key)) return evtStreamCache.get(key);
+    const p = fetch(`data/pbp/stat_${reg.prefix}dates.bl2s.gz`).then(async (r) => {
+        if (!r.ok) return null;
+        const ds = r.body.pipeThrough(new DecompressionStream("gzip"));
+        return decodeBl2sDates(new Uint8Array(await new Response(ds).arrayBuffer()));
+    }).catch(() => null);
+    evtStreamCache.set(key, p);
+    return p;
+}
+function loadEvtStat(stat) {
+    const reg = evtReg();
+    const key = `${activeDatasetKey}:${stat}`;
+    if (evtStreamCache.has(key)) return evtStreamCache.get(key);
+    const p = fetch(`data/pbp/stat_${reg.prefix}${stat.toLowerCase()}.bl2s.gz`).then(async (r) => {
+        if (!r.ok) return null;
+        const ds = r.body.pipeThrough(new DecompressionStream("gzip"));
+        return decodeBl2sStat(new Uint8Array(await new Response(ds).arrayBuffer()));
+    }).catch(() => null);
+    evtStreamCache.set(key, p);
+    return p;
+}
+async function buildEvtModel(xDim, yDim, allComponents = false) {
+    const reg = evtReg();
+    const xs = evtDimSpec(xDim), ys = evtDimSpec(yDim);
+    if (!xs || !ys) return null;
+    const usesQual = xs.rate || ys.rate;                  // a rate axis → need the qualifier (PA/IP) for the threshold
+    const deps = new Set([...xs.deps, ...ys.deps]);
+    if (usesQual) reg.qualDeps.forEach((d) => deps.add(d));
+    // Group-career needs every counting component (not just the axis pair) so each player's
+    // open-season partial row can feed aggregateCareer's full sum + rate recomputation.
+    if (allComponents) for (const s of reg.stats) deps.add(s);
+    const depList = [...deps];
+    // BL2S: the shared dimension + the global date table (one-time) plus the per-stat
+    // files this axis pair needs. All three kinds must load for the model to be valid.
+    const [dim, dateTable, ...loaded] = await Promise.all([loadEvtDim(), loadEvtDates(), ...depList.map(loadEvtStat)]);
+    if (!dim || !dateTable || loaded.some((s) => !s)) return null;
+    const streams = {}; depList.forEach((d, i) => streams[d] = loaded[i]);
+
+    // Global date table → numDates + the per-index calendar tables (yearOf/doy) and the
+    // season boundaries the cursor steps over. STEV baked these into each stat file; BL2S
+    // factors them into stat_dates, so we rebuild them here from the epoch + day list.
+    // `dayToIdx` turns each stat cell's absolute epoch-day into a global date index (the
+    // unit every model consumer — evtAsOf, evtSeasonSnap, yearOf[], doy[] — speaks).
+    const absDays = dateTable.dates;                  // sorted distinct days since the epoch
+    const numDates = absDays.length;
+    const [ey, em, ed] = dateTable.epoch;
+    const epochMs = Date.UTC(ey, em - 1, ed);
+    const dayToIdx = new Map();
+    const yearOf = new Int16Array(numDates);          // calendar year per global date index
+    const doy = new Uint16Array(numDates);            // 1-based day-of-year (Jan 1 = 1), matching pbpDayToYmd
+    for (let i = 0; i < numDates; i++) {
+        dayToIdx.set(absDays[i], i);
+        const dt = new Date(epochMs + absDays[i] * 86400000);
+        const y = dt.getUTCFullYear(); yearOf[i] = y;
+        doy[i] = Math.round((Date.UTC(y, dt.getUTCMonth(), dt.getUTCDate()) - Date.UTC(y, 0, 1)) / 86400000) + 1;
+    }
+    // Season boundaries = calendar-year runs (the day list is sorted, so each year's dates
+    // are contiguous): first index of each year, and the last index before the next year.
+    const seasonStartByYear = new Map();              // year → first global date index (season-mode differencing)
+    for (let i = 0; i < numDates; i++) { const y = yearOf[i]; if (!seasonStartByYear.has(y)) seasonStartByYear.set(y, i); }
+    const seasonEndByYear = new Map();                // year → last global date index (season-granularity snapping)
+    { const yrs = [...seasonStartByYear.keys()].sort((a, b) => a - b);
+      for (let i = 0; i < yrs.length; i++) seasonEndByYear.set(yrs[i], (i + 1 < yrs.length ? seasonStartByYear.get(yrs[i + 1]) : numDates) - 1); }
+
+    // One record per gpid that appears in any needed stream. Convert each BL2S cell list
+    // (absolute epoch-day + per-date count) into the model's (global-index + cumulative)
+    // component shape, carry debut/last year (debut → era colour; both → season-mode
+    // active-window skip), and track the career-end value for the axis lock.
+    const empty = { dates: new Uint16Array(0), cum: new Uint16Array(0) };
+    const gpids = new Set(); for (const d of depList) for (const g of streams[d].series.keys()) gpids.add(g);
+    const players = [];
+    let xMax = 0, yMax = 0;
+    const cEnd = {};
+    for (const gpid of [...gpids].sort((a, b) => a - b)) {
+        const comp = {}; let debut = numDates, last = 0;
+        for (const d of depList) {
+            const cells = streams[d].series.get(gpid);
+            if (!cells || !cells.dates.length) { comp[d] = empty; continue; }
+            const nc = cells.dates.length;
+            const dates = new Uint16Array(nc), cum = new Uint16Array(nc); let run = 0;
+            for (let k = 0; k < nc; k++) { dates[k] = dayToIdx.get(cells.dates[k]); run += cells.counts[k]; cum[k] = run; }
+            comp[d] = { dates, cum };
+            debut = Math.min(debut, dates[0]); last = Math.max(last, dates[nc - 1]);
+        }
+        const name = (dim.players[gpid] && dim.players[gpid].name) || String(gpid);
+        const debutYear = debut < numDates ? yearOf[debut] : yearOf[0];
+        const lastYear = yearOf[last] || debutYear;
+        players.push({ name, comp, debutYear, lastYear });
+        // axis lock: career-end value; for rate axes only count players with enough PA
+        // so a 3-for-3 cup-of-coffee 1.000 AVG doesn't blow out the frame.
+        for (const d of depList) cEnd[d] = (comp[d].cum.length ? comp[d].cum[comp[d].cum.length - 1] : 0);
+        const qEnd = usesQual ? reg.qual(cEnd) : Infinity;
+        const xv = xs.fn(cEnd), yv = ys.fn(cEnd);
+        const qual = qEnd >= 1000;                         // ~career qualifier (1000 PA / 1000 IP) for axis framing
+        if (isFinite(xv) && (!xs.rate || qual)) xMax = Math.max(xMax, xv);
+        if (isFinite(yv) && (!ys.rate || qual)) yMax = Math.max(yMax, yv);
+    }
+    return { xDim, yDim, xs, ys, usesQual, qual: reg.qual, thresholdField: reg.thresholdField, depList,
+             numDates, players, doy, yearOf, seasonStartByYear, seasonEndByYear,
+             xMax, yMax, minYear: yearOf[0], maxYear: yearOf[numDates - 1] };
+}
+// Season granularity: snap a global date index to its season's LAST date (so the cursor
+// steps year-by-year and shows the full-season state).
+function evtSeasonSnap(model, gi) {
+    const d = Math.max(0, Math.min(model.numDates - 1, Math.floor(gi)));
+    return Math.min(model.winEnd ?? (model.numDates - 1), model.seasonEndByYear.get(model.yearOf[d]) ?? d);
+}
+// Season mode: one point per player for the OPEN season `O`, accumulated game-by-game to
+// date `d` (within-season = cumulative at d minus cumulative at the season's start). The
+// completed seasons (year < O) come from Lahman data.points, so this only builds the
+// growing open-season points (a few hundred active players).
+function evtOpenSeasonPoints(model, d, O) {
+    const start = model.seasonStartByYear.get(O);
+    if (start == null) return [];
+    const before = start - 1;
+    const rows = [], c = {};
+    for (const p of model.players) {
+        if (O < p.debutYear || O > p.lastYear) continue;   // player not active in O
+        let any = false;
+        for (const dep of model.depList) { const v = evtAsOf(p.comp[dep], d) - evtAsOf(p.comp[dep], before); c[dep] = v; if (v) any = true; }
+        if (!any) continue;                                 // no games yet in O by date d
+        const x = model.xs.fn(c), y = model.ys.fn(c);
+        if (!isFinite(x) || !isFinite(y)) continue;
+        if (!model.xs.rate && !model.ys.rate && x === 0 && y === 0) continue;
+        const q = model.usesQual ? model.qual(c) : 1e9;
+        rows.push({ playerID: p.name, teamID: "—", lgID: "—", yearID: O, [model.thresholdField]: q, [model.xDim]: x, [model.yDim]: y });
+    }
+    return rows;
+}
+function evtAsOf(series, d) {                          // cumulative value as of global date d
+    const a = series.dates; let lo = 0, hi = a.length - 1, ans = -1;
+    while (lo <= hi) { const m = (lo + hi) >> 1; if (a[m] <= d) { ans = m; lo = m + 1; } else hi = m - 1; }
+    return ans < 0 ? 0 : series.cum[ans];
+}
+function evtPointsAsOf(model, d) {                      // season-shaped rows for the frontier pipeline
+    d = Math.max(0, Math.min(model.numDates - 1, d));
+    const rows = [];
+    const c = {};
+    for (const p of model.players) {
+        for (const dep of model.depList) c[dep] = evtAsOf(p.comp[dep], d);
+        const x = model.xs.fn(c), y = model.ys.fn(c);
+        if (!isFinite(x) || !isFinite(y)) continue;        // rate undefined (no AB yet) → not on chart
+        if (!model.xs.rate && !model.ys.rate && x === 0 && y === 0) continue;
+        // yearID = the player's debut year so the era colour reflects their cohort
+        // (an as-of career point has no single season year). sY/eY span all history,
+        // so this never filters anyone out.
+        const q = model.usesQual ? model.qual(c) : 1e9;
+        rows.push({ playerID: p.name, teamID: "—", lgID: "—", yearID: p.debutYear, [model.thresholdField]: q, [model.xDim]: x, [model.yDim]: y });
+    }
+    return rows;
+}
+// Flat, date-sorted event stream derived from the resident .evt model — the
+// `g_ev[]` the incremental frontier replays (poc-webgpu/core.c). One entry per
+// (player, dep, date) carrying that date's delta (cum[k]-cum[k-1]). Struct-of-
+// arrays of typed arrays, counting-sorted by date (date ∈ [0,numDates), so O(n)).
+// Memoized on the model so only the first incremental use pays for it.
+function buildEvtEventStream(model) {
+    if (model.evStream) return model.evStream;
+    const players = model.players, depList = model.depList;
+    let n = 0;
+    for (const p of players) for (const d of depList) n += (p.comp[d]?.dates.length || 0);
+    const date = new Uint16Array(n), player = new Uint32Array(n), dep = new Uint8Array(n), delta = new Int32Array(n);
+    let w = 0;
+    for (let pi = 0; pi < players.length; pi++) {
+        const comp = players[pi].comp;
+        for (let di = 0; di < depList.length; di++) {
+            const s = comp[depList[di]]; if (!s) continue;
+            const dts = s.dates, cum = s.cum; let prev = 0;
+            for (let k = 0; k < dts.length; k++) { date[w] = dts[k]; player[w] = pi; dep[w] = di; delta[w] = cum[k] - prev; prev = cum[k]; w++; }
+        }
+    }
+    // Counting sort by date (stable: preserves per-date player/dep order — irrelevant
+    // to the final frontier, which is read only after a whole date window is applied).
+    const D = model.numDates;
+    const cnt = new Uint32Array(D + 1);
+    for (let i = 0; i < n; i++) cnt[date[i] + 1]++;
+    for (let i = 0; i < D; i++) cnt[i + 1] += cnt[i];
+    const sd = new Uint16Array(n), sp = new Uint32Array(n), sdep = new Uint8Array(n), sdl = new Int32Array(n);
+    for (let i = 0; i < n; i++) { const pos = cnt[date[i]]++; sd[pos] = date[i]; sp[pos] = player[i]; sdep[pos] = dep[i]; sdl[pos] = delta[i]; }
+    model.evStream = { date: sd, player: sp, dep: sdep, delta: sdl, n };
+    return model.evStream;
+}
+
+// Can this .evt model's axis pair be GPU compute-accumulated? YES when each axis value
+// is a LINEAR, MONOTONE-NONDECREASING combination of the streamed counting components —
+// which is exactly the class the per-player atomic running-sum represents. That covers:
+//   • single-component counting stats (HR, SB, R, RBI, …) — coefficient 1; and
+//   • composite counting stats that never decrease (TB = 1·H+2·2B+3·3B+4·HR, PA, …).
+// It excludes rate stats (AVG/OBP/SLG: xs.rate true — they can DECREASE, so a running
+// sum is meaningless) and any combination with a negative coefficient (e.g. a net stat
+// like SB−CS), which would break monotonicity and the incremental frontier.
+//
+// We discover each component's coefficient WITHOUT parsing the stat formula: a linear
+// fn satisfies coeff_d = fn(unit_d) − fn(0). Probing one unit of each component gives the
+// whole coefficient vector. Caches { ok, cx[], cy[] } (per-component X/Y coefficients,
+// aligned to model.depList) on the model. Requires integer, ≥ 0 coefficients and a zero
+// intercept (true for counting stats — keeps the GPU's u32 atomic exact).
+function evtGpuMonotone(model) {
+    if (model._gpuMono !== undefined) return model._gpuMono;
+    let ok = !model.xs.rate && !model.ys.rate && model.xDim !== model.yDim;
+    const cx = [], cy = [];
+    if (ok) {
+        const dl = model.depList, zero = {};
+        for (const d of dl) zero[d] = 0;
+        const x0 = model.xs.fn(zero), y0 = model.ys.fn(zero);
+        if (x0 !== 0 || y0 !== 0) ok = false;          // counting stats have no constant term
+        for (let i = 0; i < dl.length && ok; i++) {
+            const u = { ...zero, [dl[i]]: 1 };
+            const dx = model.xs.fn(u) - x0, dy = model.ys.fn(u) - y0;
+            // integer, non-negative ⇒ a valid monotone counting coefficient.
+            if (!Number.isInteger(dx) || !Number.isInteger(dy) || dx < 0 || dy < 0) ok = false;
+            cx.push(dx); cy.push(dy);
+        }
+    }
+    model._gpuMono = ok ? { ok, cx, cy } : { ok: false };
+    return model._gpuMono;
+}
+
+// Express the D3 LINEAR scales as slope+intercept so the cloud vertex shader can map a
+// player's counter straight to the SAME CSS pixel the CPU path uses (px = margin.left +
+// xScale(value)). For any linear scale xScale(v) = xScale(0) + slope·v, hence:
+//   interceptX = margin.left + xScale(0);  slopeX = xScale(1) − xScale(0).
+// vpX/vpY are the CSS chart dimensions (the same width/height passed to resize() and
+// used by uViewport), so the shader's px→NDC step matches the instanced pPoints shader.
+function gpuScaleUniform(xScale, yScale, margin, width, height, radius, alpha) {
+    return {
+        slopeX: xScale(1) - xScale(0), interceptX: margin.left + xScale(0),
+        slopeY: yScale(1) - yScale(0), interceptY: margin.top + yScale(0),
+        vpX: width, vpY: height, radius, alpha,
+    };
+}
+
+// Incremental Pareto frontier — JS port of poc-webgpu/core.c `frontier_apply_event`
+// (commit a1e0ad0). Works in CANONICAL coords X=x*xSign, Y=y*ySign so it is always
+// "higher is better" (matching the +x/+y POC); the frontier stays sorted X-ascending /
+// Y-descending. Events must be monotone non-decreasing in canonical space — true for
+// the counting (.evt) axes this path is gated to. Each event moves exactly one player,
+// which can evict a contiguous dominated run and re-insert; nothing else is promoted.
+function createIncrementalFrontier(playerCount, xSign, ySign) {
+    // The live frontier as three PARALLEL arrays (struct-of-arrays, kept sorted by
+    // canonical X ascending ⇒ canonical Y descending — a staircase). frP[i] is the player
+    // owning slot i. onFront[p] is a fast membership test (avoids scanning frP). All math
+    // is in CANONICAL space (X = x·xSign): with xSign/ySign ∈ {+1,−1} a "lower is better"
+    // axis becomes "higher is better", so one piece of code handles all four quadrants.
+    const frX = [], frY = [], frP = [];
+    const onFront = new Uint8Array(playerCount);
+    function reset() { frX.length = 0; frY.length = 0; frP.length = 0; onFront.fill(0); }
+    // Apply ONE event: player p's stat just advanced to (x, y). Because the .evt streams
+    // are counting stats, a player's canonical (X, Y) only ever moves UP and/or RIGHT — it
+    // never regresses. That monotonicity is what makes the update O(frontier) instead of a
+    // full O(N) re-sweep: p can only ENTER the frontier or push further out, dominating a
+    // CONTIGUOUS run of neighbours; nothing else changes membership.
+    function applyEvent(p, x, y) {
+        const X = x * xSign, Y = y * ySign;
+        if (onFront[p]) {
+            // p was already on the frontier and just moved up-right; remove its stale slot
+            // so we can re-insert at the correct (now further-out) position below.
+            const i = frP.indexOf(p);
+            if (i >= 0) { frX.splice(i, 1); frY.splice(i, 1); frP.splice(i, 1); }
+            onFront[p] = 0;
+        }
+        // Dominance test: find the first slot with X' ≥ X. If that neighbour also has
+        // Y' ≥ Y, it dominates p (≥ in both) → p is not on the frontier, nothing to do.
+        let k = 0; while (k < frP.length && frX[k] < X) k++;
+        if (k < frP.length && frY[k] >= Y) return;
+        // p IS on the frontier. Find the contiguous run [j, e) of existing slots that p now
+        // dominates (X' ≤ X AND Y' ≤ Y) — the staircase ordering guarantees they're adjacent.
+        let j = 0; while (j < frP.length && !(frX[j] <= X && frY[j] <= Y)) j++;
+        let e = j; while (e < frP.length && frX[e] <= X && frY[e] <= Y) e++;
+        if (e > j) {                               // evict that run (they're no longer extreme)
+            for (let t = j; t < e; t++) onFront[frP[t]] = 0;
+            frX.splice(j, e - j); frY.splice(j, e - j); frP.splice(j, e - j);
+        }
+        // Insert p in canonical-X order: at j if it replaced a run, else binary-walk to the
+        // first slot with X' ≥ X (an insert that dominates nobody, e.g. a new low-X/high-Y point).
+        let ins = (e > j) ? j : 0;
+        if (e === j) while (ins < frP.length && frX[ins] < X) ins++;
+        frX.splice(ins, 0, X); frY.splice(ins, 0, Y); frP.splice(ins, 0, p);
+        onFront[p] = 1;
+    }
+    // Frontier as data-space [x,y] pairs in canonical-X-ascending order (staircase-ready;
+    // x = X*xSign since xSign is ±1). Maps back to point objects by coordinate in the driver.
+    function frontierXY() {
+        const out = new Array(frP.length);
+        for (let i = 0; i < frP.length; i++) out[i] = [frX[i] * xSign, frY[i] * ySign];
+        return out;
+    }
+    return { reset, applyEvent, frontierXY, onFront, get size() { return frP.length; } };
+}
+
+const evtClampedDate = (model) => Math.max(0, Math.min(model.numDates - 1, pbpCursorIdx));
+
+// Day-of-year ↔ calendar helpers for the cursor's URL token (YYYYMMDD) and label.
+function pbpDayToYmd(year, doy) {
+    const d = new Date(Date.UTC(year, 0, doy));
+    return `${year}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+function pbpYmdToDay(ymd) {
+    const y = +ymd.slice(0, 4), m = +ymd.slice(4, 6), d = +ymd.slice(6, 8);
+    return Math.round((Date.UTC(y, m - 1, d) - Date.UTC(y, 0, 1)) / 86400000) + 1;
 }
 
 Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batting, pitching]) => {
@@ -502,6 +1174,7 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     setupExportButton();
     setupShareButton();
     setupGlossary();
+    syncRendererStatus();   // seed the read-only GPU/CPU indicator (chooseRenderer re-syncs once WebGPU resolves)
     applyModeConfig("season");
     setupModeToggle("mode-toggle", () => {
         const mode = getCurrentMode();
@@ -513,9 +1186,15 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             mode === "career"
                 ? "Each dot is one player's career totals across the selected year window."
                 : "Each dot is one player's single season.";
-        refreshChart();
+        // Smooth on: the resident full-history model drives every mode now,
+        // so re-init to switch. Group-career is its own thing — leave it.
+        if (!groupCareerMode && pbpEvt) { stopAnimation(); disableSmooth(); enableSmooth(); }
+        else refreshChart();
     });
     setupModeToggle("stats-toggle", () => {
+        // The smooth cursor is tied to one dataset's corpus; switching datasets
+        // drops it (the pitching corpus / read path lands in a later phase).
+        if (pbpEvt) disableSmooth();
         activeDatasetKey = getActiveModeBtnData("stats-toggle", "stats") || "batting";
         playerIndex = datasetState[activeDatasetKey].playerIndex;
         clearHighlights();
@@ -524,7 +1203,10 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         populateSelectorsForActive();
         resetThresholdToDefault();
         applyModeConfig(getCurrentMode());
-        refreshChart();
+        // Smooth is the default: re-enable it on the new dataset if its axes are
+        // .evt-eligible (pitching now has its own streams), else stay static.
+        if (evtEligible(document.getElementById("x-axis-select").value, document.getElementById("y-axis-select").value)) enableSmooth();
+        else refreshChart();
     });
     setupSegGroup("league-seg", () => { clearHighlights(); syncPlayerHint(); refreshChart(); });
     setupSegGroup("bats-seg",   () => { clearHighlights(); syncPlayerHint(); refreshChart(); });
@@ -569,7 +1251,19 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     const loadingIndicator = document.getElementById("loading-indicator");
     let pendingRender = null;
 
+    // The bridge between the DOM and drawScatterPlot. It is the SINGLE place that reads
+    // the current control values (axes, year range, mode, filters), resolves the active
+    // dataset/data, decides which animation path is live (static |
+    // .evt full-history | group-career), assembles the per-mode `filters` bag, and calls
+    // drawScatterPlot. Every interaction handler ends in refreshChart() rather than poking
+    // the chart directly — so there's exactly one render path to reason about. Reads from
+    // the DOM (not a JS state object) so the controls are the source of truth and
+    // applyUrlState can drive everything just by setting them.
     function refreshChart() {
+        // Drop any draw still queued from a prior call: the guards below early-return
+        // to hold the current frame, and a stale rAF would otherwise run against
+        // now-mutated cursor/openYearIdx state (e.g. a released season).
+        cancelAnimationFrame(pendingRender);
         const xDim = document.getElementById("x-axis-select").value;
         const yDim = document.getElementById("y-axis-select").value;
         const sYear = parseInt(document.getElementById("s-year-select").value);
@@ -587,6 +1281,46 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         const def = activeDataset();
         const data = activeData();
 
+        // Smooth (game-by-game) cursor: swap in each player's cumulative stats as
+        // of the cursor date and pin the window to that one season. The synthetic
+        // points are season-shaped, so the frontier pipeline is otherwise untouched.
+        let points = data.points;
+        let sY = sYear, eY = eYear;
+        let pbpExtent = null;
+        let groupCareer = false;
+        let evtCareer = false, evtSeason = false;
+        if (pbpEvt) {
+            const cur = Math.max(pbpEvt.winStart, Math.min(pbpEvt.winEnd, pbpCursorIdx));
+            if (groupCareerActive()) {
+                // Group-career: one cumulative-career point per selected player (hybrid —
+                // Lahman priors + BL2S open-season partial). Drawn as moving heads + trails.
+                const built = evtBuildGroupCareer(pbpEvt, cur, xDim, yDim, { league, franchise }, activeDatasetKey);
+                points = built.points;
+                sY = built.sY; eY = built.eY; pbpExtent = built.pbpExtent;
+                groupCareer = true;
+            } else if (mode === "career") {
+                // Career: every player's cumulative (xDim,yDim) as of the cursor date —
+                // one point per player, all moving each frame. Axes lock to career maxima.
+                points = evtPointsAsOf(pbpEvt, cur);
+                sY = pbpEvt.minYear; eY = pbpEvt.maxYear;
+                pbpExtent = { x: [0, pbpEvt.xMax], y: [0, pbpEvt.yMax] };
+                evtCareer = true;
+            } else {
+                // Season: one point per player per season. Completed seasons (year < open)
+                // sit at their full Lahman totals (data.points, static → cached on the bg
+                // canvas); the open season's point grows game-by-game from the .evt streams.
+                const O = pbpEvt.yearOf[cur];
+                const completedKey = `evtS|${activeDatasetKey}|${pbpEvt.winStartYear}|${O}`;
+                if (!pbpCompletedCache || pbpCompletedCache.key !== completedKey)
+                    pbpCompletedCache = { key: completedKey, points: data.points.filter((p) => p.yearID >= pbpEvt.winStartYear && p.yearID < O) };
+                points = pbpCompletedCache.points.concat(evtOpenSeasonPoints(pbpEvt, cur, O));
+                sY = pbpEvt.winStartYear; eY = O;          // eY = open year → smooth split caches year<O on bg
+                pbpExtent = pbpComputeExtent({ dataset: activeDatasetKey, sYear: pbpEvt.winStartYear, eYear: pbpEvt.winEndYear },
+                    xDim, yDim, { league: "all", franchise: "all" }, data.points, "season", activeDatasetKey);
+                evtSeason = true;
+            }
+        }
+
         // The playing-time threshold only matters for rate stats — for counting
         // stats every season qualifies, so we hide the control and apply no
         // minimum. The dropdown's own value is still written to the URL so the
@@ -601,14 +1335,46 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
 
         updateYearHint(sYear, eYear);
         syncPlayerHint();
-        syncMobileAxisBar();
 
 
-        loadingIndicator.classList.add("active");
+        // The "Loading data…" indicator is for the initial load and heavy filter
+        // changes — NOT the smooth/group-career sweep, where every ~66ms frame would
+        // strobe it on and off. Each cursor draw is only a couple of ms, so skip it.
+        const showLoader = !pbpEvt;
+        if (showLoader) loadingIndicator.classList.add("active");
         cancelAnimationFrame(pendingRender);
         pendingRender = requestAnimationFrame(() => {
-            drawScatterPlot(data.points, xDim, yDim, sYear, eYear, minThreshold, formatStat, mode,
-                { league, bats, colorBy, depth, compareEras, sB, eB, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey });
+            // Group-career: the N points are already aggregated careers, so draw them
+            // as-is (season pipeline, no re-aggregation) and neutralize the attribute
+            // filters — the selected group IS the filter, and career points carry no
+            // single lgID/team, so a league filter would otherwise drop them all.
+            // .evt career: points are pre-aggregated careers → draw "season" (no
+            // re-aggregation). .evt season uses the real mode.
+            const drawMode = (groupCareer || evtCareer) ? "season" : mode;
+            // .evt as-of points carry only a player + cumulative stat (no per-season
+            // team/league), so neutralize league/franchise; bats/country still work via
+            // metaFor(name). evtCareer → all-fg moving cloud (`evt`); evtSeason → the
+            // static/dynamic split (completed seasons cached on bg, open season on fg).
+            const evtFilters = {
+                league: "all", bats, colorBy, depth, compareEras: false, country, franchise: "all",
+                thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey,
+                pbpExtent, smooth: true, lite: smoothLite,
+            };
+            const drawFilters = groupCareer
+                ? { league: "all", bats: "all", colorBy, depth: 1, compareEras: false, country: "all", franchise: "all",
+                    thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey,
+                    pbpExtent, smooth: true, groupCareer: true, group: new Set(careerHighlights.keys()) }
+                : evtCareer ? { ...evtFilters, evt: true }
+                : evtSeason ? evtFilters
+                : { league, bats, colorBy, depth, compareEras, sB, eB, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey, pbpExtent, smooth: false, lite: false };
+            drawScatterPlot(points, xDim, yDim, sY, eY, minThreshold, formatStat, drawMode, drawFilters);
+            // Remove unconditionally: a draw means we're no longer loading. Gating this on
+            // `showLoader` left the spinner stuck whenever line 1345's cancelAnimationFrame
+            // cancelled the rAF that would have removed it — e.g. at smooth startup, an early
+            // (!pbpEvt → showLoader) call adds .active, then once pbpEvt loads every subsequent
+            // (showLoader=false) frame cancels the pending remover without re-scheduling one, so
+            // it never clears during the animation. In smooth mode the add never fires, so the
+            // remove is just a harmless no-op each frame.
             loadingIndicator.classList.remove("active");
             writeUrlState({ xDim, yDim, sYear, eYear, minPa: thresholdValue, mode, league, bats, colorBy, depth, compareEras, sB, eB, country, franchise });
         });
@@ -664,6 +1430,10 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     syncPlayerHint();
     refreshChart();
 
+    // First paint is Canvas 2D (default + fallback); under ?renderer=webgpu this
+    // async ladder may swap in the WebGPU backend and redraw. Never blocks first paint.
+    chooseRenderer();
+
     // Lets nested call sites (like the chart's click handler) trigger a
     // refresh without holding a reference to the closure.
     document.addEventListener("bl2d:refresh", refreshChart);
@@ -675,26 +1445,30 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
     };
     const axisOrViewChanged = () => {
         // Axis dimension changes invalidate any zoom rectangle (the domain
-        // values are in the old dimension's units).
+        // values are in the old dimension's units) and any group-career trail
+        // (its stored x/y are in the OLD stat dimensions).
         viewDomain = null;
+        groupTrailHistory.clear();
+        // In group-career mode keep the selected group and just re-plot their
+        // careers on the new axes — swapping HR×SB → AVG×OBP keeps them racing.
+        if (groupCareerActive()) { refreshChart(); return; }
+        // Smooth on: the axes changed, so rebuild the resident model and
+        // reload the matching streams for the new pair.
+        if (pbpEvt) { stopAnimation(); disableSmooth(); enableSmooth(); return; }
         filterChanged();
     };
     ["x-axis-select", "y-axis-select"].forEach((id) => {
         document.getElementById(id).addEventListener("change", axisOrViewChanged);
     });
-    // Mobile axis bar: forward its changes to the real selects (which fire the
-    // handler above). The bar stays in sync via syncMobileAxisBar() in refreshChart.
-    ["x", "y"].forEach((ax) => {
-        document.getElementById(`${ax}-axis-mobile`)?.addEventListener("change", (e) => {
-            const main = document.getElementById(`${ax}-axis-select`);
-            main.value = e.target.value;
-            main.dispatchEvent(new Event("change"));
-        });
-    });
     ["s-year-select", "e-year-select"].forEach((id) => {
         document.getElementById(id).addEventListener("change", () => {
             stopAnimation();
-            filterChanged();
+            // Smooth on: the window changed, so rebuild the timeline (re-landing
+            // at the new window's last covered season). Otherwise just refilter.
+            // (.evt mode spans all history, so the year range is moot there — a
+            // rebuild simply re-lands on the present-day frame.)
+            if (pbpEvt) { disableSmooth(); enableSmooth(); }
+            else filterChanged();
         });
     });
     document.getElementById("pa-min-select").addEventListener("change", filterChanged);
@@ -709,7 +1483,20 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         document.getElementById("anim-icon-play").hidden = false;
         document.getElementById("anim-icon-stop").hidden = true;
     }
+    // On mobile the play controls live inside the Filters drawer; collapsing it when
+    // playback starts hands the chart the full height (the on-chart pbp scrubber stays
+    // pinned over the chart for feedback, and the Controls toggle reopens it to pause).
+    // No-op on desktop, where `.controls-panel.collapsed` keeps display:flex and the
+    // toggle is hidden.
+    function collapseControlsForPlay() {
+        const panel = document.getElementById("controls-panel");
+        const toggle = document.getElementById("controls-toggle");
+        if (!panel || !toggle) return;
+        panel.classList.add("collapsed");
+        toggle.setAttribute("aria-expanded", "false");
+    }
     function startAnimation() {
+        collapseControlsForPlay();
         const sInput = document.getElementById("s-year-select");
         const eInput = document.getElementById("e-year-select");
         const maxYear = parseInt(eInput.max);
@@ -728,8 +1515,359 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
         }, 400);
     }
     document.getElementById("anim-play-btn").addEventListener("click", () => {
+        if (pbpEvt) { if (pbpRaf) stopPbpPlay(); else startPbpPlay(); return; }
         if (animTimer) stopAnimation(); else startAnimation();
     });
+
+    // ── Play-by-play cursor controls ───────────────────────────────────────
+    const granSeg = document.getElementById("pbp-gran-seg");
+    const scrubber = document.getElementById("pbp-scrubber");
+    const dateLabel = document.getElementById("pbp-date");
+    const speedRow = document.getElementById("pbp-speed-row");
+    setupSegGroup("pbp-speed-seg", () => { playbackSpeed = parseFloat(getSegValue("pbp-speed-seg", "speed")) || 1; });
+    // Fixed-width date readout: separate day / month / year spans so the label never
+    // reflows as the cursor sweeps. setPbpDate(year, doy) for a real date; setPbpMsg(txt)
+    // for status text ("—", "Loading…") without destroying the span structure.
+    const dtD = dateLabel?.querySelector(".pbp-dt-d");
+    const dtM = dateLabel?.querySelector(".pbp-dt-m");
+    const dtY = dateLabel?.querySelector(".pbp-dt-y");
+    const setPbpDate = (year, doy) => {
+        if (!dtD) return;
+        const dt = new Date(Date.UTC(year, 0, doy));
+        dtD.textContent = String(dt.getUTCDate());
+        dtM.textContent = dt.toLocaleDateString("en-US", { month: "short", timeZone: "UTC" });
+        dtY.textContent = String(year);
+    };
+    const setPbpMsg = (txt) => { if (dtD) { dtD.textContent = ""; dtM.textContent = txt; dtY.textContent = ""; } };
+    const setPbpYear = (year) => { if (dtD) { dtD.textContent = ""; dtM.textContent = ""; dtY.textContent = String(year); } };
+    // Paint the "played" portion of the progress bar (the ::track gradient reads --pct).
+    const updateScrubFill = () => {
+        const lo = +scrubber.min, hi = +scrubber.max, v = +scrubber.value;
+        scrubber.style.setProperty("--pct", (hi > lo ? ((v - lo) / (hi - lo)) * 100 : 0) + "%");
+    };
+
+    function syncScrubber() {
+        if (pbpEvt) {
+            const d = evtClampedDate(pbpEvt);
+            scrubber.min = String(pbpEvt.winStart ?? 0);
+            scrubber.max = String(pbpEvt.winEnd ?? (pbpEvt.numDates - 1));
+            scrubber.value = String(pbpCursorIdx);
+            updateScrubFill();
+            // Season granularity shows just the year; play-by-play shows the full date.
+            if (pbpGranularity === "season") setPbpYear(pbpEvt.yearOf[d]);
+            else setPbpDate(pbpEvt.yearOf[d], pbpEvt.doy[d]);
+            window.__bl2d_pbpCursorYmd = pbpDayToYmd(pbpEvt.yearOf[d], pbpEvt.doy[d]);
+        }
+    }
+    const pbpOverlay = document.getElementById("pbp-overlay");
+    function showSmoothControls(on) {
+        // The progress bar + date readout live on the chart (pbp-overlay), shown whenever
+        // the cursor is active. When off (a non-eligible axis pair → static scatter) the
+        // overlay is hidden and the sidebar granularity buttons are disabled.
+        granSeg?.classList.toggle("disabled", !on);
+        granSeg?.querySelectorAll(".seg-btn").forEach((b) => { b.disabled = !on; });
+        if (pbpOverlay) pbpOverlay.hidden = !on;
+        if (speedRow) speedRow.hidden = !on;
+    }
+    // [Play-by-play | Season] granularity. Both keep the .evt cursor on — switching just
+    // changes the cursor step (game-by-game vs year-by-year) and the date readout.
+    setupSegGroup("pbp-gran-seg", () => {
+        pbpGranularity = getSegValue("pbp-gran-seg", "gran") || "pbp";
+        if (!pbpEvt) {                                 // currently static → turn the cursor on
+            const xd = document.getElementById("x-axis-select").value, yd = document.getElementById("y-axis-select").value;
+            if (evtEligible(xd, yd)) { enableSmooth(); return; }
+        }
+        if (pbpEvt && pbpGranularity === "season") pbpCursorIdx = evtSeasonSnap(pbpEvt, pbpCursorIdx);
+        syncScrubber();
+        refreshChart();
+    });
+    // ── Phase-5 spring glide loop ───────────────────────────────────────────────
+    // A dedicated rAF that calls the cheap GPU present every display refresh, so the spring
+    // animates at the panel's full rate (60Hz, or 120Hz on ProMotion — vsync-locked, free)
+    // even though refreshChart (the expensive CPU path) only fires ~15fps during playback.
+    // Stays alive while playing OR within a short settle tail so the springs visibly come to
+    // rest after the cursor stops, exactly like the standalone POC.
+    function springLoop(now) {
+        springRaf = null;
+        if (!(pointRenderer instanceof WebGPURenderer) || !pointRenderer.springMode) { finalizeSpringStop(); return; }
+        const alive = !!pbpRaf || now < springLoopUntil;   // playing OR draining the settle tail
+        if (!alive) { finalizeSpringStop(); return; }
+        // Only present when the last real frame actually drew the GPU spring (a CPU-fallback
+        // frame — filters, evt.failed, etc. — parks the loop instead of drawing a stale cloud).
+        if (lastGpuSpringFrame && pointRenderer.evt && !pointRenderer.evt.failed) pointRenderer.presentGlide();
+        springRaf = requestAnimationFrame(springLoop);
+    }
+    function startSpringLoop() {
+        if (!LEGACY_PRESENT) { requestPresent("motion"); return; }   // G5h: converged path uses graphLoop
+        if (!springRaf && pointRenderer instanceof WebGPURenderer && pointRenderer.springMode) {
+            springRaf = requestAnimationFrame(springLoop);
+        }
+    }
+    // ── G5h: single damage-flag loop owner (converged path; ?legacyPresent=0) ─────
+    // ONE rAF owns every reason to re-present: `motion` (the spring glide — subsumes
+    // springLoop) and `overlay` (a coalesced hover/pin re-present — subsumes
+    // presentInteraction's one-shot rAF). The invariant the gate asserts: when nothing
+    // is animating and no overlay is pending, NO rAF is scheduled (`__bl2d_rafScheduled`
+    // false) — the loop parks instead of busy-spinning. The spring MATH is untouched: the
+    // motion branch calls the same presentGlide() under the same alive-condition as
+    // springLoop, so cadence/dt are identical; only the scheduler is unified.
+    const graphDamage = { motion: false, overlay: false };
+    let graphRaf = null;
+    window.__bl2d_rafScheduled = false;
+    function scheduleGraphLoop() {
+        if (!graphRaf) { graphRaf = requestAnimationFrame(graphLoop); window.__bl2d_rafScheduled = true; }
+    }
+    function requestPresent(kind) {
+        if (kind === "motion") graphDamage.motion = true; else graphDamage.overlay = true;
+        scheduleGraphLoop();
+    }
+    function graphLoop(now) {
+        graphRaf = null; window.__bl2d_rafScheduled = false;
+        if (!(pointRenderer instanceof WebGPURenderer)) { graphDamage.motion = graphDamage.overlay = false; finalizeSpringStop(); return; }
+        let presented = false;
+        if (graphDamage.motion && pointRenderer.springMode) {
+            const alive = !!pbpRaf || now < springLoopUntil;             // playing OR settle tail (== springLoop)
+            if (lastGpuSpringFrame && pointRenderer.evt && !pointRenderer.evt.failed) { pointRenderer.presentGlide(); presented = true; }
+            if (!alive) { graphDamage.motion = false; finalizeSpringStop(); }
+        } else { graphDamage.motion = false; }
+        // A glide frame already re-presented the whole scene (incl. interaction overlays), so
+        // only present again for a standalone overlay change.
+        if (graphDamage.overlay) { graphDamage.overlay = false; if (!presented) pointRenderer.present(); }
+        if (graphDamage.motion) scheduleGraphLoop();                     // keep gliding; else park (idle)
+    }
+    requestGraphPresent = requestPresent;                                // export to presentInteraction
+    // hard=true cancels immediately (teardown / filter change); hard=false starts the settle
+    // tail and lets the loop drain itself over SPRING_SETTLE_MS.
+    function stopSpringLoop(hard) {
+        if (hard) {
+            if (springRaf) cancelAnimationFrame(springRaf);
+            springRaf = null;
+            if (graphRaf) { cancelAnimationFrame(graphRaf); graphRaf = null; window.__bl2d_rafScheduled = false; }  // G5h
+            graphDamage.motion = false;
+            springLoopUntil = 0;
+            springFinalPending = false;        // teardown owns its own refreshChart
+            smoothLite = false;                // teardown ends playback; restore full interactive frames
+        } else {
+            springLoopUntil = (typeof performance !== "undefined" ? performance.now() : Date.now()) + SPRING_SETTLE_MS;
+        }
+    }
+    // Once the settle tail drains (or the loop bails), do the single interactive render we
+    // deferred so the cards/quadtree/hit-test rebuild on the settled positions.
+    function finalizeSpringStop() {
+        if (!springFinalPending) return;
+        springFinalPending = false;
+        if (smoothLite) { smoothLite = false; refreshChart(); }
+    }
+    function stopPbpPlay() {
+        const wasPlaying = !!pbpRaf;
+        if (pbpRaf) { cancelAnimationFrame(pbpRaf); pbpRaf = null; }
+        const btn = document.getElementById("anim-play-btn");
+        btn.classList.remove("playing");
+        document.getElementById("anim-icon-play").hidden = false;
+        document.getElementById("anim-icon-stop").hidden = true;
+        // If a GPU spring was animating, keep gliding through a settle tail and DEFER the
+        // final interactive render until it drains (an immediate non-lite refreshChart would
+        // repopulate the CPU cloud and flip lastGpuSpringFrame off, cutting the settle short).
+        if (wasPlaying && smoothLite && lastGpuSpringFrame &&
+            pointRenderer instanceof WebGPURenderer && pointRenderer.springMode) {
+            springFinalPending = true;
+            stopSpringLoop(false);             // start the tail; springLoop fires finalizeSpringStop when it ends
+            startSpringLoop();                 // (no-op if already running) ensure something drives the tail
+        } else if (wasPlaying && smoothLite) {
+            smoothLite = false; refreshChart();   // non-GPU path: finalize immediately
+        }
+    }
+    function startPbpPlay() {
+        if (!pbpEvt) return;
+        stopAnimation();
+        collapseControlsForPlay();                 // mobile: give the chart full height during playback
+        smoothLite = true;                         // lighten frames during playback
+        springFinalPending = false;                // a fresh play cancels any pending settle-finalize from a prior stop
+        clearTimeout(smoothLiteTimer);
+        const perYearMs = 10000;                   // ~10s per covered season at 1× …
+        // .evt sweeps only the selected-year window.
+        const lo = pbpEvt ? pbpEvt.winStart : 0;
+        const hi = pbpEvt ? pbpEvt.winEnd : null;
+        // Advance the cursor incrementally by elapsed time × speed, so changing the
+        // speed mid-play smoothly changes the pace without jumping the cursor.
+        let pos = lo, lastNow = performance.now(), lastDraw = 0;
+        pbpCursorIdx = lo;
+        groupTrailHistory.clear();                 // restart trails from the sweep's origin
+        const btn = document.getElementById("anim-play-btn");
+        btn.classList.add("playing");
+        document.getElementById("anim-icon-play").hidden = true;
+        document.getElementById("anim-icon-stop").hidden = false;
+        const tick = (now) => {
+            // total & covered-count grow as lazy loads land; recompute each frame.
+            const end = hi;
+            const coveredYears = pbpEvt.yearOf[hi] - pbpEvt.yearOf[lo] + 1;
+            const durMs = Math.min(PBP_PLAY_MAX_MS, perYearMs * coveredYears) / playbackSpeed;  // capped, then scaled by speed
+            const dt = now - lastNow; lastNow = now;
+            pos = Math.min(end, pos + (end - lo) * dt / Math.max(1, durMs));
+            pbpCursorIdx = (pbpEvt && pbpGranularity === "season") ? evtSeasonSnap(pbpEvt, pos) : Math.min(end, Math.floor(pos));
+            syncScrubber();                         // cheap: scrubber position + date label only
+            // Throttle the expensive chart re-render to ~15fps so a wide-window sweep
+            // doesn't peg the main thread; always draw the final frame.
+            const done = pos >= end;
+            if (done || now - lastDraw >= PBP_PLAY_FRAME_MS) { refreshChart(); lastDraw = now; }
+            if (!done) pbpRaf = requestAnimationFrame(tick);
+            else stopPbpPlay();
+        };
+        pbpRaf = requestAnimationFrame(tick);
+        startSpringLoop();                     // glide the GPU spring at display refresh, independent of the 15fps data tick
+    }
+    // Decode + hold the two resident streams, then drive the cursor over all history.
+    async function enableEvt(startIdx) {
+        const xDim = document.getElementById("x-axis-select").value;
+        const yDim = document.getElementById("y-axis-select").value;
+        setPbpMsg("Loading…");
+        const model = await buildEvtModel(xDim, yDim, groupCareerMode);   // group-career → all components
+        // Guard a rapid axis/dataset change: if the selectors moved while we awaited,
+        // a newer enableEvt is in flight — discard this stale model.
+        if (document.getElementById("x-axis-select").value !== xDim ||
+            document.getElementById("y-axis-select").value !== yDim ||
+            !evtEligible(xDim, yDim)) return;
+        if (!model) { showSmoothControls(false); setPbpMsg("No streams for these stats"); return; }
+        // Clamp the played window to the selected year range (values stay all-time
+        // career-cumulative; only the swept dates narrow). Full history if unset.
+        const sYear = parseInt(document.getElementById("s-year-select").value) || model.minYear;
+        const eYear = parseInt(document.getElementById("e-year-select").value) || model.maxYear;
+        let winStart = 0, winEnd = model.numDates - 1;
+        for (let i = 0; i < model.numDates; i++) if (model.yearOf[i] >= sYear) { winStart = i; break; }
+        for (let i = model.numDates - 1; i >= 0; i--) if (model.yearOf[i] <= eYear) { winEnd = i; break; }
+        if (winEnd < winStart) { winStart = 0; winEnd = model.numDates - 1; }
+        model.winStart = winStart; model.winEnd = winEnd;
+        model.winStartYear = model.yearOf[winStart]; model.winEndYear = model.yearOf[winEnd];
+        pbpEvt = model; pbpExtentCache = null;
+        window.__bl2d_pbpFallback = false;
+        pbpCursorIdx = (startIdx != null) ? Math.max(winStart, Math.min(winEnd, startIdx)) : winEnd;
+        if (pbpGranularity === "season") pbpCursorIdx = evtSeasonSnap(model, pbpCursorIdx);
+        showSmoothControls(true);
+        syncScrubber();
+        refreshChart();
+    }
+    async function enableSmooth(startIdx) {
+        const xDimNow = document.getElementById("x-axis-select").value;
+        const yDimNow = document.getElementById("y-axis-select").value;
+        // Every counting/derived axis pair is BL2S-eligible (the per-season .bl2p path was
+        // retired in S4), so smooth mode is always the resident full-history model that
+        // enableEvt builds. An ineligible pair just stays static.
+        if (evtEligible(xDimNow, yDimNow)) { await enableEvt(startIdx); return; }
+        showSmoothControls(false);
+        setPbpMsg("No streams for these stats");
+    }
+    function disableSmooth() {
+        stopPbpPlay();
+        stopSpringLoop(true); lastGpuSpringFrame = false;   // teardown: hard-cancel the glide loop (no settle tail, no stale cloud)
+        pbpEvt = null;
+        pbpExtentCache = null;
+        pbpCompletedCache = null;
+        pbpFrontierPrepCache = null;
+        pbpGpuCompletedCache = null;
+        evtIncFrontier = null;
+        groupCareerMode = false;
+        groupTrailHistory.clear();
+        window.__bl2d_groupCareerActive = false;
+        syncGroupCareerToggle();
+        showSmoothControls(false);
+        refreshChart();
+    }
+
+    // ── Group-career mode ───────────────────────────────────────────────────
+    // Reuses the entire smooth engine; sets the year window to the group's combined
+    // career span first, then turns on the cursor with groupCareerMode flagged.
+    const groupCareerToggle = document.getElementById("group-career-toggle");
+    async function enableGroupCareer() {
+        const span = groupCareerSpan(activeDatasetKey);
+        if (!span) return;
+        const sInput = document.getElementById("s-year-select");
+        const eInput = document.getElementById("e-year-select");
+        sInput.value = String(Math.max(parseInt(sInput.min) || span.lo, span.lo));
+        eInput.value = String(Math.min(parseInt(eInput.max) || span.hi, span.hi));
+        groupCareerMode = true;
+        groupTrailHistory.clear();
+        if (pbpEvt) disableSmoothQuiet();
+        await enableSmooth(0);                 // start at the group's earliest debut (BL2S all-components model)
+        syncGroupCareerToggle();
+    }
+    // Tear down the timeline without resetting groupCareerMode (used when rebuilding
+    // the span after the group changes, so the flag survives the rebuild).
+    function disableSmoothQuiet() {
+        stopPbpPlay();
+        stopSpringLoop(true); lastGpuSpringFrame = false;   // teardown: hard-cancel the glide loop
+        pbpEvt = null;
+        pbpExtentCache = null;
+        pbpCompletedCache = null;
+        pbpFrontierPrepCache = null;
+        pbpGpuCompletedCache = null;
+        evtIncFrontier = null;
+    }
+    // Rebuild the timeline span after the group membership changes mid-animation.
+    window.__bl2d_rebuildGroupCareer = null;
+    async function rebuildGroupCareer() {
+        groupTrailHistory.clear();
+        await enableGroupCareer();
+    }
+    window.__bl2d_rebuildGroupCareer = rebuildGroupCareer;
+    groupCareerToggle?.addEventListener("click", () => {
+        if (groupCareerMode) disableSmooth();
+        else enableGroupCareer();
+    });
+
+    scrubber?.addEventListener("input", () => {
+        if (!pbpEvt) return;
+        if (pbpRaf) stopPbpPlay();
+        const raw = parseInt(scrubber.value) || 0;
+        pbpCursorIdx = (pbpEvt && pbpGranularity === "season") ? evtSeasonSnap(pbpEvt, raw) : raw;
+        // Keep trails causal on a backward scrub: drop positions recorded ahead of
+        // the new cursor so the comet-tail never points "into the future".
+        if (groupCareerMode) {
+            for (const [pid, hist] of groupTrailHistory) {
+                groupTrailHistory.set(pid, hist.filter(e => e.cursor <= pbpCursorIdx));
+            }
+        }
+        // Lite frames while dragging; one full (interactive) render when it settles.
+        smoothLite = true;
+        syncScrubber();
+        refreshChart();
+        clearTimeout(smoothLiteTimer);
+        smoothLiteTimer = setTimeout(() => { smoothLite = false; refreshChart(); }, 160);
+    });
+    // Expose for headless verification (scripts/snap.js evalJS).
+    window.__bl2d_pbpCursorIdx = () => pbpCursorIdx;
+    window.__bl2d_pbpEvt = () => pbpEvt;   // resident BL2S smooth-mode model (full-history) or null
+    window.__bl2d_evtCursorYear = () => pbpEvt ? pbpEvt.yearOf[evtClampedDate(pbpEvt)] : null;
+    window.__bl2d_evtPoints = () => pbpEvt ? evtPointsAsOf(pbpEvt, pbpCursorIdx) : null;
+    window.__bl2d_enableSmooth = enableSmooth;
+
+    // Deep-link with t=YYYYMMDD: point the season at that year, load its PBP,
+    // and snap the cursor to the nearest game date.
+    if (pendingCursorYmd) {
+        const ymd = pendingCursorYmd;
+        pendingCursorYmd = null;
+        const year = parseInt(ymd.slice(0, 4));
+        const sSel = document.getElementById("s-year-select");
+        const eSel = document.getElementById("e-year-select");
+        eSel.value = String(year);                         // open the window on the link's year
+        if (parseInt(sSel.value) > year) sSel.value = String(year);
+        enableSmooth().then(() => {                        // builds the timeline + lands the year
+            if (pbpEvt) {                                  // .evt mode: map the date to a global index
+                const day = pbpYmdToDay(ymd);
+                let d = -1;
+                for (let i = 0; i < pbpEvt.numDates; i++) {
+                    if (pbpEvt.yearOf[i] === year) { if (pbpEvt.doy[i] <= day) d = i; else if (d >= 0) break; }
+                    else if (pbpEvt.yearOf[i] > year) break;
+                }
+                if (d >= 0) { pbpCursorIdx = Math.max(pbpEvt.winStart, Math.min(pbpEvt.winEnd, d)); syncScrubber(); refreshChart(); }
+            }
+        });
+    } else if (evtEligible(document.getElementById("x-axis-select").value, document.getElementById("y-axis-select").value)) {
+        // Smooth is the default view: auto-enable it on load whenever the axes are
+        // .evt-eligible (full-history animation, lands on the present-day frame). The
+        // Smooth toggle still turns it off → the static scatter (the fallback for
+        // pre-1920-only/pitching/offline/filtered cases the .evt path can't cover).
+        enableSmooth();
+    }
 
     setupZoomToolbar();
 
@@ -917,7 +2055,6 @@ function populateSelectorsForActive() {
     });
     xSelect.value = def.defaultX;
     ySelect.value = def.defaultY;
-    syncMobileAxisBar();
 
     document.getElementById("threshold-label").textContent = def.thresholdLabel;
 
@@ -940,16 +2077,6 @@ function populateSelectorsForActive() {
 // Mirror the in-drawer axis selects into the mobile axis bar (options + value).
 // The bar's selects are display clones; their change handler drives the real
 // selects, and this keeps them in sync after dataset swaps / on-chart picks.
-function syncMobileAxisBar() {
-    ["x", "y"].forEach((ax) => {
-        const main = document.getElementById(`${ax}-axis-select`);
-        const mob = document.getElementById(`${ax}-axis-mobile`);
-        if (!main || !mob) return;
-        if (mob.innerHTML !== main.innerHTML) mob.innerHTML = main.innerHTML;
-        mob.value = main.value;
-    });
-}
-
 function parseUrlHash() {
     const raw = (window.location.hash || "").replace(/^#/, "");
     if (!raw) return {};
@@ -975,6 +2102,12 @@ function setEraCompareEnabled(on) {
     if (eb) eb.disabled = !on;
 }
 
+// Inverse of writeUrlState: read the hash once at startup and drive the controls to match
+// BEFORE the first render, so a deep link lands on the right view with no visible reflow.
+// It sets the DOM controls (selects/segmented buttons) rather than internal state, then
+// lets the normal change handlers + refreshChart flow from there — one code path, no
+// divergence between "user clicked" and "loaded from URL". Order matters (see below): the
+// dataset toggle must flip first so the dataset-specific axis options exist to select.
 function applyUrlState() {
     const u = parseUrlHash();
     const setSelect = (id, val) => {
@@ -1034,6 +2167,9 @@ function applyUrlState() {
     updateChipSelection(frVal);
     updateFranchiseDimming(getSegValue("league-seg", "league") || "all");
     if (u.hl) { u.hl.split(",").forEach(id => addHighlight(id.trim())); }
+    // The as-of-date cursor loads async (lazy PBP fetch); stash it and let the
+    // bootstrap apply it once the season file is decoded.
+    pendingCursorYmd = (u.t && /^\d{8}$/.test(u.t)) ? u.t : null;
 }
 
 // ── Curated story presets ───────────────────────────────────────────────
@@ -1076,6 +2212,13 @@ function renderPresetShelf() {
 }
 
 let urlWriteTimer = null;
+// Serialize the full view into the URL hash so any view is a shareable/bookmarkable
+// deep link, and a reload restores exactly where you were. Debounced 120ms because it's
+// called on every refresh (incl. animation frames) — we don't want to thrash
+// history.replaceState. Two deliberate choices: (1) params at their DEFAULT value are
+// OMITTED (see URL_DEFAULTS) so a fresh view has a clean empty hash and links stay short;
+// (2) replaceState (not pushState) so dragging a slider doesn't bury the back button under
+// hundreds of history entries. applyUrlState() is the inverse, run once at startup.
 function writeUrlState(state) {
     clearTimeout(urlWriteTimer);
     urlWriteTimer = setTimeout(() => {
@@ -1097,6 +2240,12 @@ function writeUrlState(state) {
             co: state.country,
             fr: state.franchise,
             hl: [...careerHighlights.keys()].join(","),
+            // The as-of-date cursor (smooth game-by-game mode). Absent unless on.
+            // Emits the open year's date resolved from the global multi-year cursor.
+            t: (() => {
+                if (pbpEvt) { const d = evtClampedDate(pbpEvt); return pbpDayToYmd(pbpEvt.yearOf[d], pbpEvt.doy[d]); }
+                return "";
+            })(),
         };
         // Drop defaults to keep the URL short.
         const parts = [];
@@ -1424,7 +2573,7 @@ function openAxisStatMenu(anchorEl, selectId, placement) {
     };
 }
 
-function buildExportSvgString() {
+function buildExportSvgString(dataUrls) {
     const svg = document.getElementById("scatter-plot");
     if (!svg) return null;
 
@@ -1454,7 +2603,7 @@ function buildExportSvgString() {
         "paint-order", "font-family", "font-size", "font-weight", "text-anchor",
     ];
     // Interaction-only / affordance layers don't belong in a static image.
-    const DROP = ".hit, .zoom-overlay, .brush, .axis-caret, .isolation-ring-group, .regret-line-group";
+    const DROP = ".hit, .hit-surface, .zoom-overlay, .brush, .axis-caret, .isolation-ring-group, .regret-line-group";
     const srcNodes = [svg, ...svg.querySelectorAll("*")];
     const dstNodes = [clone, ...clone.querySelectorAll("*")];
     const toRemove = [];
@@ -1471,13 +2620,2217 @@ function buildExportSvgString() {
     }
     toRemove.forEach((n) => n.remove());
 
+    // Canvas carries the high-cardinality point layers. Embed transparent PNGs
+    // behind the SVG overlay so SVG download and share-preview rasterisation keep
+    // the complete chart instead of labels/axes only. `dataUrls` comes from the
+    // active renderer's exportDataURLs() (Canvas 2D: [bg,fg]; WebGPU: one readback
+    // composite) — kept here as a param so this stays synchronous.
+    const urls = dataUrls || (pointRenderer.bgCanvas ? [pointRenderer.bgCanvas, pointRenderer.fgCanvas].filter(Boolean).map((c) => c.toDataURL("image/png")) : []);
+    const firstChild = clone.firstChild;
+    for (const href of urls) {
+        if (!href) continue;
+        const img = document.createElementNS("http://www.w3.org/2000/svg", "image");
+        img.setAttribute("x", "0");
+        img.setAttribute("y", "0");
+        img.setAttribute("width", Math.round(width));
+        img.setAttribute("height", Math.round(height));
+        img.setAttribute("href", href);
+        clone.insertBefore(img, firstChild);
+    }
+
     let svgStr = new XMLSerializer().serializeToString(clone);
     // The SVG's own background can't be captured as a presentation property.
     return svgStr.replace(/(<svg[^>]*>)/, `$1<style>svg{background:${bg};}</style>`);
 }
 
-function exportChartSVG() {
-    const svgStr = buildExportSvgString();
+// PointRenderer seam (docs/rendering.md §A): the high-
+// cardinality point cloud is drawn through this object so a future WebGPU backend
+// can slot in behind the same method surface. Canvas2DRenderer is the only
+// implementation (the default + the offline bundle's only renderer). It owns the two
+// <canvas> layers under the SVG overlay (bg = key-cached completed-season cloud, fg =
+// per-frame open cloud + group-career trails + frontier dots), their DPR/sizes, and
+// the background-layer cache key. Method surface (the "interface" a WebGPURenderer
+// must match): resize(w,h)→layers|null; clear(); drawBackground(points,opts);
+// drawForeground(points,opts); drawTrails(trails,opts); drawFrontierDots(points,opts);
+// get dpr/bgCanvas/fgCanvas; get/set bgCacheKey; destroy().
+class Canvas2DRenderer {
+    constructor() { this.layers = null; this.bgCacheKey = null; }
+    get dpr() { return this.layers?.dpr || 1; }
+    get bgCanvas() { return this.layers?.bg || null; }
+    get fgCanvas() { return this.layers?.fg || null; }
+
+    // Lazily create the bg+fg canvases under the SVG overlay; size both to
+    // width*dpr × height*dpr (dpr clamped to [1,3]). Returns the layer handle, or
+    // null if the chart region / SVG isn't in the DOM yet.
+    resize(width, height) {
+        const region = document.querySelector(".chart-region");
+        const svg = document.getElementById("scatter-plot");
+        if (!region || !svg) return null;
+        if (!this.layers) {
+            const bg = document.createElement("canvas");
+            const fg = document.createElement("canvas");
+            bg.className = "plot-canvas plot-canvas--background";
+            fg.className = "plot-canvas plot-canvas--foreground";
+            bg.setAttribute("aria-hidden", "true");
+            fg.setAttribute("aria-hidden", "true");
+            region.insertBefore(bg, svg);
+            region.insertBefore(fg, svg);
+            this.layers = { bg, fg };
+        }
+        const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 3));
+        for (const canvas of [this.layers.bg, this.layers.fg]) {
+            const bw = Math.max(1, Math.round(width * dpr));
+            const bh = Math.max(1, Math.round(height * dpr));
+            if (canvas.width !== bw || canvas.height !== bh) {
+                canvas.width = bw;
+                canvas.height = bh;
+            }
+            canvas.style.width = `${width}px`;
+            canvas.style.height = `${height}px`;
+        }
+        this.layers.dpr = dpr;
+        this.layers.width = width;
+        this.layers.height = height;
+        return this.layers;
+    }
+
+    clear() {
+        if (!this.layers) return;
+        this.bgCacheKey = null;
+        for (const canvas of [this.layers.bg, this.layers.fg]) {
+            const ctx = canvas.getContext("2d");
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+    }
+
+    drawBackground(points, opts) { this._drawPoints(this.bgCanvas, points, opts); }
+    drawForeground(points, opts) { this._drawPoints(this.fgCanvas, points, opts); }
+
+    _drawPoints(canvas, points, opts) {
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        const dpr = this.dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const { margin, xScale, yScale, radius, fillFor, alpha = 1, alphaFor = null, strokeFor = null, strokeWidth = 0, clear = true } = opts;
+        // clear=false lets a caller composite dots ON TOP of an under-layer it already
+        // drew on this same canvas (group-career: trails first, then head-dots).
+        if (clear) ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
+        if (!points || !points.length) return;
+        for (const d of points) {
+            const cx = margin.left + xScale(d.x);
+            const cy = margin.top + yScale(d.y);
+            if (!isFinite(cx) || !isFinite(cy)) continue;
+            ctx.globalAlpha = alphaFor ? alphaFor(d) : alpha;
+            ctx.beginPath();
+            ctx.arc(cx, cy, typeof radius === "function" ? radius(d) : radius, 0, Math.PI * 2);
+            ctx.fillStyle = fillFor(d);
+            ctx.fill();
+            const stroke = strokeFor && strokeFor(d);
+            if (stroke && strokeWidth > 0) {
+                ctx.globalAlpha = 1;
+                ctx.lineWidth = strokeWidth;
+                ctx.strokeStyle = stroke;
+                ctx.stroke();
+            }
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    // Group-career trails: clears the fg, then for each player strokes their recent
+    // career positions as a poly-line whose alpha ramps 0→1 from oldest to newest, so
+    // the head pulls a short fading comet-tail. Positions are DATA coords (so zoom/pan
+    // re-projects). The caller follows this with drawForeground(clear:false) so the
+    // head-dots composite over the tails on the same canvas.
+    drawTrails(trails, opts) {
+        const canvas = this.fgCanvas;
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        const dpr = this.dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
+        const { margin, xScale, yScale, width = 2 } = opts;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.lineWidth = width;
+        for (const { color, points } of trails) {
+            if (!points || points.length < 2) continue;
+            const n = points.length;
+            for (let i = 1; i < n; i++) {
+                const a = points[i - 1], b = points[i];
+                const ax = margin.left + xScale(a.x), ay = margin.top + yScale(a.y);
+                const bx = margin.left + xScale(b.x), by = margin.top + yScale(b.y);
+                if (![ax, ay, bx, by].every(isFinite)) continue;
+                ctx.globalAlpha = (i / (n - 1)) * 0.85;   // oldest faint → newest near-opaque
+                ctx.strokeStyle = color;
+                ctx.beginPath();
+                ctx.moveTo(ax, ay);
+                ctx.lineTo(bx, by);
+                ctx.stroke();
+            }
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    // Frontier (special) dots, composited over the fg cloud with NO clear (they sit on
+    // top of drawForeground's output). fillFor resolves the career/worst/encoding colour
+    // in the caller's scope; radiusFor sizes by the active size-by stat.
+    drawFrontierDots(points, opts) {
+        const canvas = this.fgCanvas;
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        const dpr = this.dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const { margin, xScale, yScale, radiusFor, fillFor, strokeColor = "#ffffff", strokeWidth = 1.5 } = opts;
+        for (const d of points) {
+            const cx = margin.left + xScale(d.x);
+            const cy = margin.top + yScale(d.y);
+            if (!isFinite(cx) || !isFinite(cy)) continue;
+            ctx.beginPath();
+            ctx.arc(cx, cy, radiusFor(d), 0, Math.PI * 2);
+            ctx.fillStyle = fillFor(d);
+            ctx.fill();
+            ctx.lineWidth = strokeWidth;
+            ctx.strokeStyle = strokeColor;
+            ctx.stroke();
+        }
+    }
+
+    // Canvas 2D paints immediately in each draw* call, so compositing is already done.
+    present() { /* no-op — the WebGPU backend submits its single render pass here */ }
+
+    // Export source: the two layer PNGs, bg first (same z-order exportChartSVG embeds).
+    exportDataURLs() {
+        return [this.bgCanvas, this.fgCanvas].filter(Boolean).map((c) => c.toDataURL("image/png"));
+    }
+
+    destroy() {
+        if (!this.layers) return;
+        for (const canvas of [this.layers.bg, this.layers.fg]) canvas.remove();
+        this.layers = null;
+        this.bgCacheKey = null;
+    }
+}
+
+// Pack a CSS colour (era/league/handedness palette, tiny → memoized) + an extra alpha
+// multiplier into a little-endian RGBA8 u32 the WGSL shaders unpack byte-by-byte.
+const _rgbaPackCache = new Map();
+function packColorRGBA(css, alpha = 1) {
+    const key = css + "|" + alpha;
+    let v = _rgbaPackCache.get(key);
+    if (v !== undefined) return v;
+    let r = 0, g = 0, b = 0, a = 255;
+    const c = d3.color(css);
+    if (c) { const rc = c.rgb(); r = rc.r & 255; g = rc.g & 255; b = rc.b & 255;
+        a = Math.max(0, Math.min(255, Math.round(255 * (rc.opacity ?? 1) * alpha))); }
+    v = ((r | (g << 8) | (b << 16) | (a << 24)) >>> 0);
+    _rgbaPackCache.set(key, v);
+    return v;
+}
+
+// WGSL: instanced-quad point cloud. Per-instance (px,py,radius,ring,fill,stroke) is
+// vertex-pulled from a storage buffer; positions are CSS px → NDC (+Y up, so a Y flip);
+// the fragment does the round-disc test + an optional white ring, with a ~1px AA edge.
+const WEBGPU_POINTS_WGSL = `
+struct U { vp: vec2<f32> };
+@group(0) @binding(0) var<uniform> u: U;
+struct Inst { px: f32, py: f32, radius: f32, ring: f32, fill: u32, stroke: u32 };
+@group(0) @binding(1) var<storage, read> inst: array<Inst>;
+struct VSOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) off: vec2<f32>,
+  @location(1) @interpolate(flat) fill: u32,
+  @location(2) @interpolate(flat) stroke: u32,
+  @location(3) @interpolate(flat) radius: f32,
+  @location(4) @interpolate(flat) ring: f32,
+};
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(-1.0,1.0),
+  vec2<f32>(-1.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>( 1.0,1.0));
+fn unpack(c: u32) -> vec4<f32> {
+  return vec4<f32>(f32(c & 0xffu), f32((c >> 8u) & 0xffu), f32((c >> 16u) & 0xffu), f32((c >> 24u) & 0xffu)) / 255.0;
+}
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  let d = inst[ii];
+  let corner = C[vi];
+  let ext = d.radius + d.ring;                 // grow the quad so the rim isn't clipped
+  let cx = d.px / u.vp.x * 2.0 - 1.0;
+  let cy = 1.0 - d.py / u.vp.y * 2.0;          // pixel-down → NDC-up
+  var o: VSOut;
+  o.pos = vec4<f32>(cx + corner.x * ext / u.vp.x * 2.0, cy + corner.y * ext / u.vp.y * 2.0, 0.0, 1.0);
+  o.off = corner * ext;                        // px offset from centre (interpolated)
+  o.fill = d.fill; o.stroke = d.stroke; o.radius = d.radius; o.ring = d.ring;
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let dist = length(i.off);
+  let outer = i.radius + i.ring * 0.5;
+  let aa = 1.0 - smoothstep(outer - 0.75, outer + 0.75, dist);
+  if (aa <= 0.0) { discard; }
+  var col: vec4<f32>;
+  if (i.ring > 0.0 && dist > i.radius - i.ring * 0.5) { col = unpack(i.stroke); }
+  else { col = unpack(i.fill); }
+  return vec4<f32>(col.rgb, col.a * aa);
+}`;
+
+// WGSL: group-career trail segments as instanced thin quads (line-strip can't vary
+// width/alpha per segment). Per-instance (x0,y0,x1,y1,width,color); alpha is baked into
+// the colour (the oldest→newest ramp), so the comet-tail matches the Canvas-2D path.
+const WEBGPU_LINE_WGSL = `
+struct U { vp: vec2<f32> };
+@group(0) @binding(0) var<uniform> u: U;
+struct Seg { x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: u32 };
+@group(0) @binding(1) var<storage, read> seg: array<Seg>;
+struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) @interpolate(flat) color: u32 };
+const TS = array<vec2<f32>, 6>(
+  vec2<f32>(0.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(0.0,1.0),
+  vec2<f32>(0.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>(1.0,1.0));
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  let s = seg[ii];
+  let ts = TS[vi];
+  let p0 = vec2<f32>(s.x0, s.y0);
+  let p1 = vec2<f32>(s.x1, s.y1);
+  let dir = normalize(p1 - p0 + vec2<f32>(1e-5, 0.0));
+  let nrm = vec2<f32>(-dir.y, dir.x);
+  let px = mix(p0, p1, ts.x) + nrm * (ts.y * s.width * 0.5);
+  var o: VSOut;
+  o.pos = vec4<f32>(px.x / u.vp.x * 2.0 - 1.0, 1.0 - px.y / u.vp.y * 2.0, 0.0, 1.0);
+  o.color = s.color;
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let c = vec4<f32>(f32(i.color & 0xffu), f32((i.color >> 8u) & 0xffu), f32((i.color >> 16u) & 0xffu), f32((i.color >> 24u) & 0xffu)) / 255.0;
+  return c;
+}`;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GPU compute-accumulate path (the ?renderer=webgpu .evt-career scaling track).
+//
+// Background — what problem this solves. In the play-by-play CAREER animation the
+// CPU otherwise rebuilds EVERY player's point object each frame (evtPointsAsOf:
+// one binary-search-per-stat per player, ~11 k players) and then re-flattens all
+// of them into a GPU instance buffer (_uploadPoints). That O(players) per-frame
+// churn is the cost the README's "scaling path toward pitch-by-pitch volumes"
+// item targets. The POC (poc-webgpu/) proved a better shape: upload the flat,
+// date-sorted EVENT STREAM to the GPU ONCE, and each frame dispatch a compute
+// shader only over the NEW events since the last cursor — accumulating per-player
+// running totals into two storage buffers — then render the cloud by reading those
+// totals straight out of the buffers in the vertex shader (no CPU readback, no
+// per-frame point rebuild). This is the in-app adaptation of that approach.
+//
+// TWO GPU buffer "roles" appear below and it's worth fixing the distinction now,
+// because every WebGPU pipeline is built around it:
+//   • UNIFORM buffer  — small, read-only, the SAME value for every shader
+//     invocation this frame (e.g. the event window {lo,count}, or the axis scale).
+//     Think "per-frame constants". Bound with buffer:{type:"uniform"}.
+//   • STORAGE buffer  — large, indexable like an array, one element per player /
+//     per event; can be read-write in compute (atomic counters) or read-only in
+//     the vertex shader (vertex-pull). Bound with type "storage" / "read-only-
+//     storage". Think "the data arrays".
+// ─────────────────────────────────────────────────────────────────────────────
+
+// WGSL (compute): accumulate one event per invocation into per-player running
+// AXIS totals. The CPU advances a cursor over the date-sorted event stream and
+// dispatches us ONLY over the new [lo, lo+count) slice each frame — we never
+// rescan history. xcount[] holds the running X-AXIS VALUE per player, ycount[] the
+// Y-axis value. atomicAdd (not a plain `+=`) because the 64 threads in a workgroup
+// run concurrently and several events in one slice can target the SAME player (e.g.
+// a multi-hit game) — without the atomic those adds would race and lose updates.
+//
+// Generalisation beyond the POC's fixed HR/SB: each axis stat is a LINEAR, monotone-
+// nondecreasing combination of streamed counting components (HR and SB are the trivial
+// 1-component case; TB = 1·H + 2·2B + 3·3B + 4·HR is a 4-component case — it still only
+// ever grows). The CPU pre-multiplies each event's raw component delta by that axis's
+// coefficient for the component, so each event already carries the X-axis delta and the
+// Y-axis delta directly: {player, xAdd, yAdd}. The shader just adds them. This is why
+// the same atomicAdd works for HR, SB, TB, PA, … — but NOT for rate stats (AVG/OBP/SLG),
+// which can DECREASE frame-to-frame and so can't be maintained by a monotone running
+// sum (those stay on the CPU cloud; see evtGpuMonotone).
+const WEBGPU_ACCUM_WGSL = `
+struct Win { lo: u32, count: u32 };
+@group(0) @binding(0) var<uniform> W: Win;
+@group(0) @binding(1) var<storage, read>       events: array<u32>;   // {player,xAdd,yAdd} ×3 per event
+@group(0) @binding(2) var<storage, read_write> xcount: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read_write> ycount: array<atomic<u32>>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let g = gid.x;
+  if (g >= W.count) { return; }          // the last workgroup is usually partial — guard it
+  let e = (W.lo + g) * 3u;               // 3 u32 stride into the flat event array
+  let player = events[e + 0u];
+  let xAdd   = events[e + 1u];           // this date's X-axis delta for that player (≥ 0)
+  let yAdd   = events[e + 2u];           // this date's Y-axis delta (≥ 0; usually one of the two is 0)
+  if (xAdd != 0u) { atomicAdd(&xcount[player], xAdd); }
+  if (yAdd != 0u) { atomicAdd(&ycount[player], yAdd); }
+}`;
+
+// WGSL (render): the vertex-PULL point cloud. There is no vertex/instance buffer of
+// positions — instead instance_index IS the player index, and the vertex shader
+// reads that player's accumulated (xcount, ycount) directly from the storage buffers
+// the compute pass just wrote. That "vertex-pull, no readback" is the whole point:
+// the data never round-trips back to the CPU between accumulate and draw.
+//
+// Coordinate mapping (the load-bearing bit — it MUST match the CPU/SVG axes pixel
+// for pixel, or the GPU cloud drifts off the D3 axes). The CPU path computes a dot's
+// screen position as `px = margin.left + xScale(value)` where xScale is a D3 LINEAR
+// scale. Any linear scale is `xScale(v) = xScale(0) + slope*v`, so we can reproduce
+// it on the GPU with just two numbers per axis: slope and intercept, passed in the
+// uScale uniform (interceptX = margin.left + xScale(0); slopeX = xScale(1)-xScale(0)).
+// Because this path is gated to single-dep "passthrough" counting axes, the stat
+// VALUE equals the accumulated COUNTER, so `px = interceptX + slopeX*xcount` is the
+// exact same pixel the CPU produces. The yScale's slope is negative (its range runs
+// [plotHeight, 0]), so high Y maps to a small py — no separate Y flip is needed
+// beyond the standard pixel→NDC flip below.
+//
+// CSS-px vs NDC vs DPR: positions are in CSS pixels (vpX,vpY = the CSS chart size,
+// same as the Canvas-2D path and the instanced pPoints shader). The offscreen
+// texture may be larger (devicePixelRatio), but NDC always spans the whole texture,
+// so mapping in CSS px and letting the rasteriser scale to texels keeps DPR handling
+// identical to pPoints. The +Y-up flip `1 - py/vp*2` converts pixel-down to NDC-up.
+//
+// Colour: we DON'T recompute the era ramp here — the CPU packs each player's era
+// colour (which is per-theme) into the col[] buffer once, and we just unpack it.
+// Frontier emphasis is NOT done in this shader: the app draws frontier dots as a
+// separate, larger, white-ringed era-coloured layer on top (drawFrontierDots), so
+// the cloud is a uniform era cloud for ALL players — exactly what the CPU cloud is.
+// (0,0) points — players with no events yet at this cursor — are dropped to match
+// evtPointsAsOf, by emitting an off-screen degenerate quad.
+const WEBGPU_EVTCLOUD_WGSL = `
+struct S { slopeX: f32, interceptX: f32, slopeY: f32, interceptY: f32, vpX: f32, vpY: f32, radius: f32, alpha: f32 };
+@group(0) @binding(0) var<uniform> u: S;
+@group(0) @binding(1) var<storage, read> xc:  array<u32>;
+@group(0) @binding(2) var<storage, read> yc:  array<u32>;
+@group(0) @binding(3) var<storage, read> col: array<u32>;   // packed RGBA8 era colour per player
+struct VSOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) off: vec2<f32>,
+  @location(1) @interpolate(flat) fill: vec4<f32>,
+  @location(2) @interpolate(flat) radius: f32,
+};
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(-1.0,1.0),
+  vec2<f32>(-1.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>( 1.0,1.0));
+fn unpack(c: u32) -> vec4<f32> {
+  return vec4<f32>(f32(c & 0xffu), f32((c >> 8u) & 0xffu), f32((c >> 16u) & 0xffu), f32((c >> 24u) & 0xffu)) / 255.0;
+}
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  var o: VSOut;
+  let vx = f32(xc[ii]);
+  let vy = f32(yc[ii]);
+  if (vx == 0.0 && vy == 0.0) {          // no events yet → drop (matches evtPointsAsOf)
+    o.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);   // outside the clip cube → discarded by the rasteriser
+    o.off = vec2<f32>(0.0); o.fill = vec4<f32>(0.0); o.radius = 0.0;
+    return o;
+  }
+  let px = u.interceptX + u.slopeX * vx;     // counter → data value → CSS px (== D3 xScale)
+  let py = u.interceptY + u.slopeY * vy;
+  let r = u.radius;
+  let corner = C[vi];
+  let cx = px / u.vpX * 2.0 - 1.0;            // CSS px → NDC, +Y-up flip
+  let cy = 1.0 - py / u.vpY * 2.0;
+  o.pos = vec4<f32>(cx + corner.x * r / u.vpX * 2.0, cy + corner.y * r / u.vpY * 2.0, 0.0, 1.0);
+  o.off = corner * r;                         // px offset from centre, for the disc test
+  o.radius = r;
+  o.fill = vec4<f32>(unpack(col[ii]).rgb, u.alpha);
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let dist = length(i.off);                   // distance from the dot centre, in px
+  let aa = 1.0 - smoothstep(i.radius - 0.75, i.radius + 0.75, dist);   // ~1px soft edge (matches pPoints)
+  if (aa <= 0.0) { discard; }
+  return vec4<f32>(i.fill.rgb, i.fill.a * aa);
+}`;
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Phase 5 — the `gpuStreaming` ENGINE: GPU spring motion + GPU Pareto skyline +
+// a fully-GPU staircase (port of poc-webgpu-spring/). This is a SECOND, explicit
+// streaming engine, selected by ?renderer=webgpu&gpustream=1. The shipped Phase-4
+// path (?renderer=webgpu alone) is a HYBRID: GPU accumulates the cloud but the JS
+// incremental frontier stays authoritative and the staircase is SVG. Phase 5 moves
+// the WHOLE picture onto the GPU — positions glide (spring), the frontier is
+// recomputed on the GPU each frame (skyline), and the red staircase is built and
+// drawn entirely on the GPU (compact→rank-sort→emit→drawIndirect). The CPU keeps
+// the cheap incremental frontier ONLY to feed DOM/interaction (cards, quadtree,
+// labels); it no longer drives the GPU picture. Full design + the "why two engines,
+// not a hybrid" rationale: docs/rendering.md §"Phase 5".
+//
+// The frame graph (one command encoder; separate compute passes serialize):
+//   accumulate (Phase-4, reused) → spring → skyline → reset/compact/ranksort/emit
+//   → render: spring-cloud (vertex-pull from pos[]) + staircase via drawIndirect.
+//
+// MINIMIZING CPU↔GPU TRAFFIC (the design's core question): the event stream is
+// uploaded ONCE (uploadEvtStream, reused from Phase 4); per frame only tiny
+// uniforms cross the bus ({lo,count} window + {dt,omega} spring), and there is
+// ZERO per-frame GPU→CPU readback (a per-frame mapAsync is the documented headless
+// device-loss trigger). The frontier/positions are read back ONCE, only in the
+// __bl2d_verify* hooks, never in the render loop.
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Frontier-size bound for the GPU staircase scratch buffers (matches the POC's
+// MAX_FRONT). The compact pass guards writes against this; the verify hook asserts
+// the real frontier never approaches it (this dataset's all-time frontier is ~2).
+const WEBGPU_MAX_FRONT = 2048;
+
+// S-track SA3: cap on the per-open-year completed-season frontier fed into the GPU union
+// skyline as static "phantom" slots after the live open-season players. A 2-D Pareto frontier
+// over the completed season-rows is small (≤ a few hundred for counting axes), so 2048 is ample
+// headroom; if a frontier ever exceeded it the tail clamps (the union skyline then misses the
+// dropped points — caught by __bl2d_verifySeasonFrontier's frontierMis). Drives the extra
+// bPos/bOnFront/bColor slots allocated past `players`.
+const WEBGPU_MAX_COMPLETED = 2048;
+
+// Spring stiffness ω (rad/s): ~0.3 s critically-damped settle, matching the POC. Higher
+// ⇒ snappier; the integrator is stable for any value/Δt.
+const WEBGPU_SPRING_OMEGA = 12;
+
+// WGSL (compute): critically-damped spring. Glides pos[] toward the integer counters
+// (xcount,ycount) — which Phase-4's accumulate already maintains — with NO overshoot,
+// using the unconditionally-stable polynomial-e integrator (Game Programming Gems 4 /
+// SmoothDamp). Derivation: the offset (x−target) obeys x'' + 2ζω·x' + ω²(x−target)=0;
+// at the critical ratio ζ=1 there is no overshoot, and replacing the exact decay e^{−ωΔt}
+// with the polynomial 1/(1+wd+½wd²+…) keeps it in (0,1] for ANY Δt, so a frame-time spike
+// can't blow it up. The counters are declared atomic for accumulate; here there are no
+// concurrent writers, so we bind the SAME buffers through a plain read-only array<u32> view
+// (a well-defined non-atomic read of atomic storage).
+const WEBGPU_SPRING_WGSL = `
+struct Spring { dt: f32, omega: f32, n: u32, mode: u32 };   // mode: 0 career, 1 season (S-track)
+@group(0) @binding(0) var<uniform>             S:   Spring;
+@group(0) @binding(1) var<storage, read>       hr:  array<u32>;        // target X (the accumulated CAREER counter)
+@group(0) @binding(2) var<storage, read>       sb:  array<u32>;        // target Y
+@group(0) @binding(3) var<storage, read_write> pos: array<vec2<f32>>;  // rendered position (data units)
+@group(0) @binding(4) var<storage, read_write> vel: array<vec2<f32>>;  // motion state
+@group(0) @binding(5) var<storage, read>       baseHr: array<u32>;     // S-track season baseline: career X at the open season's start−1
+@group(0) @binding(6) var<storage, read>       baseSb: array<u32>;     // career Y at season start−1
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= S.n) { return; }
+  var tgt = vec2<f32>(f32(hr[i]), f32(sb[i]));   // 'target' is reserved in WGSL → tgt
+  if (S.mode == 1u) {
+    // S-track season targeting: seasonValue = cum(d) − cum(seasonStart−1). The axis fn is
+    // linear with a zero intercept (evtGpuMonotone), so career-counter − baseline equals the
+    // within-season value exactly — clamp at 0 to absorb any pre-snapshot race.
+    tgt = max(tgt - vec2<f32>(f32(baseHr[i]), f32(baseSb[i])), vec2<f32>(0.0, 0.0));
+  }
+  let x = pos[i];
+  let v = vel[i];
+  let wd = S.omega * S.dt;
+  let e  = 1.0 / (1.0 + wd + 0.5*wd*wd + (1.0/6.0)*wd*wd*wd + (1.0/24.0)*wd*wd*wd*wd);
+  let change = x - tgt;
+  let temp   = (v + S.omega * change) * S.dt;
+  pos[i] = tgt + (change + temp) * e;            // decays toward target, no overshoot
+  vel[i] = (v - S.omega * temp) * e;
+}`;
+
+// WGSL (compute): per-frame GPU Pareto skyline. onFront[i]=1 iff no j STRICTLY dominates
+// pos[i] (pj ≥ pi on both axes, strictly greater on one). Brute-force O(n²) over the
+// smoothed positions — n≈11k ⇒ ~124M comparisons/frame, sub-ms on real hardware. We use
+// brute force (not spatial tiling) because tiling's "influence is local" premise is FALSE
+// for Pareto domination: one high point dominates an entire lower-left quadrant spanning
+// arbitrarily many tiles. Same strict tie-break as core.c's verify_career oracle, so settled
+// positions (pos ≈ integer) reproduce the CPU frontier exactly. The (0,0) "no events yet"
+// players are dominated by everyone ⇒ onFront=0 ⇒ not drawn as frontier (matches the cloud's
+// (0,0) drop).
+const WEBGPU_SKYLINE_WGSL = `
+struct Spring { dt: f32, omega: f32, n: u32, _pad: u32 };
+@group(0) @binding(0) var<uniform>             S:       Spring;
+@group(0) @binding(1) var<storage, read_write> onFront: array<u32>;
+@group(0) @binding(2) var<storage, read>       pos:     array<vec2<f32>>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= S.n) { return; }
+  let pi = pos[i];
+  if (pi.x == 0.0 && pi.y == 0.0) { onFront[i] = 0u; return; }   // no events yet → off-front
+  var dom = 0u;
+  for (var j = 0u; j < S.n; j = j + 1u) {
+    let pj = pos[j];
+    if (pj.x >= pi.x && pj.y >= pi.y && (pj.x > pi.x || pj.y > pi.y)) { dom = 1u; break; }
+  }
+  onFront[i] = select(1u, 0u, dom == 1u);
+}`;
+
+// WGSL (compute): the fully-GPU staircase — three @compute entry points in one module,
+// sharing one (superset) bind-group layout. WHY fully-GPU (vs the Vulkan twin's cheap CPU
+// staircase): WebGPU can't read pos[]/onFront[] back per frame (async mapAsync = the headless
+// device-loss trigger), so we turn onFront[] into an ordered line-strip + a GPU-written draw
+// count without ever touching the CPU. The frontier size K is tiny (≤ WEBGPU_MAX_FRONT):
+//   1. compact  — one thread/player; append on-front ids into frontIdx[0..K), K via atomicAdd.
+//   2. ranksort — one thread/frontier-slot; O(K²) rank (count smaller-x, ties by index),
+//                 scatter pos into frontSorted[rank]. Trivial at this K.
+//   3. emit     — one thread/sorted-slot; write the two step vertices (corner + vertical drop);
+//                 thread 0 writes the left cap and indirect.vertexCount = 1 + 2K.
+// Separate compute passes in one encoder serialize, so each pass sees the prior's writes. The
+// host resets count→0 and indirect→{0,1,0,0} each frame, so K==0 draws nothing.
+const WEBGPU_STAIRCASE_WGSL = `
+const MAX_FRONT : u32 = ${WEBGPU_MAX_FRONT}u;
+struct Spring   { dt: f32, omega: f32, n: u32, _pad: u32 };
+struct DrawArgs { vertexCount: u32, instanceCount: u32, firstVertex: u32, firstInstance: u32 };
+@group(0) @binding(0) var<uniform>             S:           Spring;
+@group(0) @binding(1) var<storage, read>       onFront:     array<u32>;
+@group(0) @binding(2) var<storage, read>       pos:         array<vec2<f32>>;
+@group(0) @binding(3) var<storage, read_write> frontIdx:    array<u32>;
+@group(0) @binding(4) var<storage, read_write> frontSorted: array<vec2<f32>>;
+@group(0) @binding(5) var<storage, read_write> count:       array<atomic<u32>>;
+@group(0) @binding(6) var<storage, read_write> staircase:   array<vec2<f32>>;
+@group(0) @binding(7) var<storage, read_write> indirect:    DrawArgs;
+@compute @workgroup_size(64)
+fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= S.n) { return; }
+  if (onFront[i] != 0u) {
+    let k = atomicAdd(&count[0], 1u);
+    if (k < MAX_FRONT) { frontIdx[k] = i; }
+  }
+}
+@compute @workgroup_size(64)
+fn ranksort(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let kk = gid.x;
+  let K = atomicLoad(&count[0]);
+  if (kk >= K) { return; }
+  let p  = frontIdx[kk];
+  let pp = pos[p];
+  var rank = 0u;
+  for (var j = 0u; j < K; j = j + 1u) {
+    let q  = frontIdx[j];
+    let qx = pos[q].x;
+    if (qx < pp.x || (qx == pp.x && q < p)) { rank = rank + 1u; }
+  }
+  frontSorted[rank] = pp;
+}
+@compute @workgroup_size(64)
+fn emit(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let r = gid.x;
+  let K = atomicLoad(&count[0]);
+  if (r >= K) { return; }
+  if (r == 0u) {
+    staircase[0] = vec2<f32>(0.0, frontSorted[0].y);   // left cap on the y-axis
+    indirect.vertexCount   = 1u + 2u * K;
+    indirect.instanceCount = 1u;
+    indirect.firstVertex   = 0u;
+    indirect.firstInstance = 0u;
+  }
+  let here = frontSorted[r];
+  let next = r + 1u;
+  let hasNext = next < K;
+  let safe = select(0u, next, hasNext);
+  let dropY = select(0.0, frontSorted[safe].y, hasNext);   // last point drops to the x-axis
+  staircase[1u + 2u*r]      = here;
+  staircase[1u + 2u*r + 1u] = vec2<f32>(here.x, dropY);
+}`;
+
+// WGSL (render): the spring CLOUD. Like WEBGPU_EVTCLOUD_WGSL but vertex-pulls the smoothed
+// vec2 pos[] (not the raw u32 counters) and reads onFront[] so the GPU draws the frontier
+// emphasis itself (bigger radius + white ring) — no CPU frontier dots in this engine. To keep
+// the frontier dots strictly ON TOP of the cloud (instanced draw order ≠ depth), present()
+// draws this pipeline TWICE with two bind groups differing only in `frontierPass`: pass 0 draws
+// the non-front cloud (front instances degenerate), pass 1 draws only the front dots over it.
+// Coordinate mapping is identical to the Phase-4 cloud (slope/intercept = the D3 linear scale),
+// so the GPU picture lands pixel-for-pixel on the SVG axes.
+const WEBGPU_SPRINGCLOUD_WGSL = `
+struct S { slopeX: f32, interceptX: f32, slopeY: f32, interceptY: f32, vpX: f32, vpY: f32,
+           radius: f32, alpha: f32, frontierRadius: f32, ring: f32, frontierPass: f32, _pad: f32 };
+@group(0) @binding(0) var<uniform> u: S;
+@group(0) @binding(1) var<storage, read> pos:     array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> col:     array<u32>;   // packed RGBA8 era colour per player
+@group(0) @binding(3) var<storage, read> onFront: array<u32>;
+struct VSOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) off: vec2<f32>,
+  @location(1) @interpolate(flat) fill: vec4<f32>,
+  @location(2) @interpolate(flat) stroke: vec4<f32>,
+  @location(3) @interpolate(flat) radius: f32,
+  @location(4) @interpolate(flat) ring: f32,
+};
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(-1.0,1.0),
+  vec2<f32>(-1.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>( 1.0,1.0));
+fn unpack(c: u32) -> vec4<f32> {
+  return vec4<f32>(f32(c & 0xffu), f32((c >> 8u) & 0xffu), f32((c >> 16u) & 0xffu), f32((c >> 24u) & 0xffu)) / 255.0;
+}
+fn degenerate() -> VSOut {
+  var o: VSOut;
+  o.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);   // outside the clip cube → discarded
+  o.off = vec2<f32>(0.0); o.fill = vec4<f32>(0.0); o.stroke = vec4<f32>(0.0); o.radius = 0.0; o.ring = 0.0;
+  return o;
+}
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  let p = pos[ii];
+  if (p.x == 0.0 && p.y == 0.0) { return degenerate(); }      // no events yet → drop
+  let front = onFront[ii] != 0u;
+  if (u.frontierPass > 0.5 && !front) { return degenerate(); } // front pass: only frontier dots
+  if (u.frontierPass < 0.5 &&  front) { return degenerate(); } // cloud pass: skip frontier dots
+  let r    = select(u.radius, u.frontierRadius, front);
+  let ring = select(0.0, u.ring, front);
+  let ext  = r + ring;
+  let px = u.interceptX + u.slopeX * p.x;
+  let py = u.interceptY + u.slopeY * p.y;
+  let cx = px / u.vpX * 2.0 - 1.0;
+  let cy = 1.0 - py / u.vpY * 2.0;            // pixel-down → NDC-up
+  let corner = C[vi];
+  var o: VSOut;
+  o.pos = vec4<f32>(cx + corner.x * ext / u.vpX * 2.0, cy + corner.y * ext / u.vpY * 2.0, 0.0, 1.0);
+  o.off = corner * ext;
+  o.radius = r; o.ring = ring;
+  o.fill = vec4<f32>(unpack(col[ii]).rgb, select(u.alpha, 1.0, front));  // frontier dots are opaque
+  o.stroke = vec4<f32>(1.0, 1.0, 1.0, 1.0);                              // white ring
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let dist = length(i.off);
+  let outer = i.radius + i.ring * 0.5;
+  let aa = 1.0 - smoothstep(outer - 0.75, outer + 0.75, dist);
+  if (aa <= 0.0) { discard; }
+  var col: vec4<f32>;
+  if (i.ring > 0.0 && dist > i.radius - i.ring * 0.5) { col = i.stroke; }
+  else { col = i.fill; }
+  return vec4<f32>(col.rgb, col.a * aa);
+}`;
+
+// WGSL (render): the GPU staircase line. Vertex-pulls the staircase[] vertices the emit pass
+// wrote (in data units), maps them with the SAME slope/intercept as the cloud so the red step
+// line sits exactly on the axes, and draws them as a line-strip via drawIndirect — the vertex
+// count came from the GPU (emit wrote indirect.vertexCount), never plumbed through JS. Reuses
+// the spring-cloud's S uniform (only the first six scale fields matter here).
+const WEBGPU_STAIRLINE_WGSL = `
+struct S { slopeX: f32, interceptX: f32, slopeY: f32, interceptY: f32, vpX: f32, vpY: f32,
+           radius: f32, alpha: f32, frontierRadius: f32, ring: f32, frontierPass: f32, _pad: f32 };
+@group(0) @binding(0) var<uniform> u: S;
+@group(0) @binding(1) var<storage, read> staircase: array<vec2<f32>>;
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+  let p = staircase[vi];
+  let px = u.interceptX + u.slopeX * p.x;
+  let py = u.interceptY + u.slopeY * p.y;
+  return vec4<f32>(px / u.vpX * 2.0 - 1.0, 1.0 - py / u.vpY * 2.0, 0.0, 1.0);
+}
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+  return vec4<f32>(0.85, 0.12, 0.20, 1.0);   // MLB red — the frontier staircase
+}`;
+
+// WebGPURenderer — the experimental ?renderer=webgpu backend (a learning/headroom
+// track; never the default, gated so it can never regress production). Implements the
+// same PointRenderer surface as Canvas2DRenderer but accumulates each draw* call into a
+// resident GPU instance buffer and submits ONE render pass in present(). One <canvas> +
+// one offscreen texture; the frontier staircase, axes, labels all stay SVG. See
+// docs/rendering.md §"Phase 3".
+class WebGPURenderer {
+    constructor(device, adapter) {
+        this.device = device;
+        this.adapter = adapter;            // retained: headless Dawn GCs the instance otherwise
+        this.canvas = null;
+        this.ctx = null;
+        this.canvasOk = true;
+        this.layers = null;                // { width, height, dpr } — mirrors the 2D shape for the bgKey
+        this.bgCacheKey = null;
+        this.offTex = null; this.offW = 0; this.offH = 0;
+        this.format = navigator.gpu.getPreferredCanvasFormat();
+        // resident instance buffers + counts (grown on demand)
+        this.buf = { bg: null, fg: null, frontier: null, trail: null };
+        this.count = { bg: 0, fg: 0, frontier: 0, trail: 0 };
+        this._scratch = new ArrayBuffer(0);
+        // GPU compute-accumulate state (the .evt-career scaling path). null until the
+        // first eligible frame uploads the event stream via uploadEvtStream(); see the
+        // WEBGPU_ACCUM_WGSL / WEBGPU_EVTCLOUD_WGSL block above for the why.
+        this.evt = null;
+        // Phase-5 gpuStreaming engine: the FULL-GPU playback pipeline (spring + skyline +
+        // GPU staircase). Now the DEFAULT animation engine (GPU is non-optional) — it runs
+        // whenever it's eligible (monotone counting axes, no attribute filter) and falls back
+        // to the hybrid Phase-4 cloud automatically otherwise. ?gpustream=0 forces the hybrid
+        // cloud (debug). See docs/rendering.md §"Phase 5".
+        this.springMode = new URLSearchParams(location.search).get("gpustream") !== "0";
+        this.lastSpringT = 0;   // wall-clock of the previous spring frame (for dt)
+        // G-track (webgpu-graph.js): ?gpugraph=1 opts the STATIC chart into the
+        // retained-scene GPU path (docs/rendering.md §G0). The
+        // scene state itself lives in this.graph, owned entirely by webgpu-graph.js
+        // — script.js only carries this flag + the optional-chained hooks below.
+        // G-track is now the default static path (the committed rendering destination):
+        // ON unless explicitly disabled with ?gpugraph=0 (the G6 graduation escape hatch).
+        this.graphMode = new URLSearchParams(location.search).get("gpugraph") !== "0";
+        this.graph = null;
+        // Per-frame: does the retained G-track scene own THIS frame? Set false while the
+        // career animation (spring/smooth) is active so present()'s _drawGraph* hooks don't
+        // re-draw the stale static scene over the animation. drawScatterPlot writes it each
+        // refresh (= gpuGraph); glide/interaction re-presents inherit the last value.
+        this.graphActive = false;
+        // G5a — coalesced interaction re-present. Hover/pin overlays (G5b–e) want to
+        // re-draw the GPU scene on every mousemove, but a synchronous present() per
+        // mousemove would submit dozens of command buffers per frame for no visual gain
+        // (the display only refreshes once per vsync). presentInteraction() instead sets a
+        // dirty flag and schedules a SINGLE requestAnimationFrame; any further calls before
+        // that frame fires collapse into it, so N mousemoves in one frame cost exactly one
+        // present(). _interactRaf holds the pending rAF id (0 = none scheduled).
+        this._interactRaf = 0;
+    }
+    get dpr() { return this.layers?.dpr || 1; }
+    get bgCanvas() { return this.canvas; }   // truthy → drawScatterPlot's fg-gated blocks run
+    get fgCanvas() { return this.canvas; }
+
+    async init() {
+        const dev = this.device;
+        this.uViewport = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const bgl = dev.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+            { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        ] });
+        this.bgl = bgl;
+        const layout = dev.createPipelineLayout({ bindGroupLayouts: [bgl] });
+        // Alpha blending so overlapping dots accumulate like the Canvas-2D cloud. The
+        // colour channels use straight src-over (src·a + dst·(1−a)); the ALPHA channel
+        // uses one·(1−a) so the result is correctly PREMULTIPLIED — which is what the
+        // canvas context expects (alphaMode "premultiplied" in resize()). Shared by every
+        // render pipeline below (points, lines, the evt cloud) so they composite uniformly.
+        const blend = {
+            color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+            alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+        };
+        const ptMod = dev.createShaderModule({ code: WEBGPU_POINTS_WGSL });
+        const lnMod = dev.createShaderModule({ code: WEBGPU_LINE_WGSL });
+        this.pPoints = dev.createRenderPipeline({ layout,
+            vertex: { module: ptMod, entryPoint: "vs" },
+            fragment: { module: ptMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+        this.pLine = dev.createRenderPipeline({ layout,
+            vertex: { module: lnMod, entryPoint: "vs" },
+            fragment: { module: lnMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+
+        // GPU compute-accumulate pipelines (the .evt-career path). Two more pipelines,
+        // each with its OWN bind-group layout because they bind different buffers:
+        //
+        //  • pAccum (COMPUTE): {uWin uniform, events ro-storage, xcount rw-storage,
+        //    ycount rw-storage}. read_write storage in WGSL ⇒ buffer type "storage";
+        //    read-only ⇒ "read-only-storage". This is the only place we declare a
+        //    compute stage, so it needs its own layout (the point/line pipelines are
+        //    vertex+fragment only).
+        const accumBgl = dev.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+            { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+            { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        ] });
+        this.accumBgl = accumBgl;
+        const accumMod = dev.createShaderModule({ code: WEBGPU_ACCUM_WGSL });
+        this.pAccum = dev.createComputePipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [accumBgl] }),
+            compute: { module: accumMod, entryPoint: "main" } });
+
+        //  • pCloud (VERTEX-pull render): {uScale uniform, xcount ro-storage, ycount
+        //    ro-storage, col ro-storage}. The compute pass writes xcount/ycount; here we
+        //    READ them (read-only-storage) — the same physical buffers, different access.
+        const cloudBgl = dev.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+            { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+            { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+            { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        ] });
+        this.cloudBgl = cloudBgl;
+        const cloudMod = dev.createShaderModule({ code: WEBGPU_EVTCLOUD_WGSL });
+        this.pCloud = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [cloudBgl] }),
+            vertex: { module: cloudMod, entryPoint: "vs" },
+            fragment: { module: cloudMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+
+        // ── Phase-5 gpuStreaming pipelines (only built when ?gpustream=1) ──────────
+        // Skipped entirely in the shipped Phase-4 hybrid so it carries zero extra cost.
+        if (this.springMode) this._initSpring(dev, blend);
+
+        // clear colour = the chart background (transparent so the page/SVG shows through;
+        // dots blend over it). Premultiplied alpha mode → clear to 0.
+        this.clearValue = { r: 0, g: 0, b: 0, a: 0 };
+    }
+
+    // Build the full-GPU streaming pipelines: spring + skyline (compute), the 3-entry-point
+    // GPU staircase (compute), the spring cloud + staircase line (render). Each compute pass
+    // gets its own bind-group layout (it binds different buffers); the staircase's three
+    // entry points SHARE one superset layout (a pass using a subset of the bindings is legal).
+    _initSpring(dev, blend) {
+        const C = GPUShaderStage.COMPUTE, V = GPUShaderStage.VERTEX;
+        const ro = (b, vis) => ({ binding: b, visibility: vis, buffer: { type: "read-only-storage" } });
+        const rw = (b, vis) => ({ binding: b, visibility: vis, buffer: { type: "storage" } });
+        const un = (b, vis) => ({ binding: b, visibility: vis, buffer: { type: "uniform" } });
+        const mkPipe = (code, layout, entry) => dev.createComputePipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [layout] }),
+            compute: { module: dev.createShaderModule({ code }), entryPoint: entry } });
+
+        // spring: {uSpring, hr ro, sb ro, pos rw, vel rw, baseHr ro, baseSb ro}
+        // (baseHr/baseSb are the S-track season baselines; ignored when uSpring.mode==0)
+        this.springBgl = dev.createBindGroupLayout({ entries: [
+            un(0, C), ro(1, C), ro(2, C), rw(3, C), rw(4, C), ro(5, C), ro(6, C) ] });
+        this.pSpring = mkPipe(WEBGPU_SPRING_WGSL, this.springBgl, "main");
+        // skyline: {uSpring, onFront rw, pos ro}
+        this.skylineBgl = dev.createBindGroupLayout({ entries: [ un(0, C), rw(1, C), ro(2, C) ] });
+        this.pSkyline = mkPipe(WEBGPU_SKYLINE_WGSL, this.skylineBgl, "main");
+        // staircase (shared layout for compact/ranksort/emit):
+        //   {uSpring, onFront ro, pos ro, frontIdx rw, frontSorted rw, count rw, staircase rw, indirect rw}
+        this.stairBgl = dev.createBindGroupLayout({ entries: [
+            un(0, C), ro(1, C), ro(2, C), rw(3, C), rw(4, C), rw(5, C), rw(6, C), rw(7, C) ] });
+        const stairLayout = dev.createPipelineLayout({ bindGroupLayouts: [this.stairBgl] });
+        const stairMod = dev.createShaderModule({ code: WEBGPU_STAIRCASE_WGSL });
+        const mkStair = (entry) => dev.createComputePipeline({ layout: stairLayout, compute: { module: stairMod, entryPoint: entry } });
+        this.pStairCompact = mkStair("compact");
+        this.pStairRanksort = mkStair("ranksort");
+        this.pStairEmit = mkStair("emit");
+        // spring cloud (render): {uSpringScale, pos ro, col ro, onFront ro}
+        this.springCloudBgl = dev.createBindGroupLayout({ entries: [
+            un(0, V), ro(1, V), ro(2, V), ro(3, V) ] });
+        this.pSpringCloud = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.springCloudBgl] }),
+            vertex: { module: dev.createShaderModule({ code: WEBGPU_SPRINGCLOUD_WGSL }), entryPoint: "vs" },
+            fragment: { module: dev.createShaderModule({ code: WEBGPU_SPRINGCLOUD_WGSL }), entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+        // staircase line (render, line-strip via drawIndirect): {uSpringScale, staircase ro}
+        this.stairLineBgl = dev.createBindGroupLayout({ entries: [ un(0, V), ro(1, V) ] });
+        this.pStairLine = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.stairLineBgl] }),
+            vertex: { module: dev.createShaderModule({ code: WEBGPU_STAIRLINE_WGSL }), entryPoint: "vs" },
+            fragment: { module: dev.createShaderModule({ code: WEBGPU_STAIRLINE_WGSL }), entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "line-strip" } });
+    }
+
+    // Lazily create + size the single canvas (same .plot-canvas slot as the 2D layers)
+    // and the offscreen render target. Never configures the canvas under headless.
+    resize(width, height) {
+        const region = document.querySelector(".chart-region");
+        const svg = document.getElementById("scatter-plot");
+        if (!region || !svg) return null;
+        if (!this.canvas) {
+            const c = document.createElement("canvas");
+            c.className = "plot-canvas plot-canvas--webgpu";
+            c.setAttribute("aria-hidden", "true");
+            region.insertBefore(c, svg);
+            this.canvas = c;
+            this.canvasOk = !navigator.webdriver && !/HeadlessChrome/i.test(navigator.userAgent);
+            if (this.canvasOk) {
+                try {
+                    this.ctx = c.getContext("webgpu");
+                    this.ctx.configure({ device: this.device, format: this.format, alphaMode: "premultiplied",
+                        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST });
+                } catch (e) { this.canvasOk = false; console.warn("[webgpu] canvas configure failed (offscreen-only):", e.message); }
+            }
+        }
+        const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 3));
+        const bw = Math.max(1, Math.round(width * dpr)), bh = Math.max(1, Math.round(height * dpr));
+        if (this.canvas.width !== bw || this.canvas.height !== bh) { this.canvas.width = bw; this.canvas.height = bh; }
+        this.canvas.style.width = `${width}px`; this.canvas.style.height = `${height}px`;
+        if (bw !== this.offW || bh !== this.offH) {
+            this.offTex?.destroy();
+            this.offTex = this.device.createTexture({ size: [bw, bh], format: this.format,
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+            this.offW = bw; this.offH = bh;
+        }
+        // NDC mapping uses CSS px (dpr only sets texture resolution).
+        this.device.queue.writeBuffer(this.uViewport, 0, new Float32Array([width, height, 0, 0]));
+        this.layers = { width, height, dpr };
+        return this.layers;
+    }
+
+    // Flatten point objects + the opts callbacks into the named instance buffer (24-byte
+    // records) and upload. radiusForName picks radius vs radiusFor; ringFor yields the
+    // white-ring width. Returns nothing; present() reads this.count.
+    _uploadPoints(name, points, opts) {
+        const { margin, xScale, yScale } = opts;
+        const radius = opts.radius, radiusFor = opts.radiusFor;
+        const fillFor = opts.fillFor, alphaFor = opts.alphaFor, alpha = opts.alpha ?? 1;
+        const strokeFor = opts.strokeFor, strokeWidth = opts.strokeWidth || 0;
+        const n = points ? points.length : 0;
+        const need = Math.max(1, n) * 24;
+        if (this._scratch.byteLength < need) this._scratch = new ArrayBuffer(need);
+        const dv = new DataView(this._scratch);
+        let w = 0;
+        for (let k = 0; k < n; k++) {
+            const d = points[k];
+            const px = margin.left + xScale(d.x), py = margin.top + yScale(d.y);
+            if (!isFinite(px) || !isFinite(py)) continue;
+            const r = radiusFor ? radiusFor(d) : (typeof radius === "function" ? radius(d) : radius);
+            const stroke = strokeFor ? strokeFor(d) : null;
+            const ring = stroke ? strokeWidth : 0;
+            const a = alphaFor ? alphaFor(d) : alpha;
+            dv.setFloat32(w, px, true); dv.setFloat32(w + 4, py, true);
+            dv.setFloat32(w + 8, r, true); dv.setFloat32(w + 12, ring, true);
+            dv.setUint32(w + 16, packColorRGBA(fillFor(d), a), true);
+            dv.setUint32(w + 20, packColorRGBA(stroke || "#ffffff", 1), true);
+            w += 24;
+        }
+        this.count[name] = w / 24;
+        this.buf[name] = this._ensureBuffer(this.buf[name], w);
+        if (w > 0) this.device.queue.writeBuffer(this.buf[name], 0, this._scratch, 0, w);
+    }
+
+    _ensureBuffer(buf, bytes) {
+        const size = Math.max(256, (bytes + 255) & ~255);
+        if (buf && buf.size >= size) return buf;
+        buf?.destroy();
+        return this.device.createBuffer({ size, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    }
+
+    drawBackground(points, opts) { this._uploadPoints("bg", points, opts); }
+    drawForeground(points, opts) { this._uploadPoints("fg", points, opts); }
+    drawFrontierDots(points, opts) {
+        // strokeFor/strokeWidth come through as strokeColor/strokeWidth here; normalise.
+        this._uploadPoints("frontier", points, { ...opts, strokeFor: () => opts.strokeColor || "#ffffff", strokeWidth: opts.strokeWidth ?? 1.5 });
+    }
+
+    drawTrails(trails, opts) {
+        const { margin, xScale, yScale, width = 2 } = opts;
+        // count segments
+        let segs = 0;
+        for (const t of trails) { const p = t.points; if (p && p.length >= 2) segs += p.length - 1; }
+        const need = Math.max(1, segs) * 24;
+        if (this._scratch.byteLength < need) this._scratch = new ArrayBuffer(need);
+        const dv = new DataView(this._scratch);
+        let w = 0;
+        for (const { color, points } of trails) {
+            if (!points || points.length < 2) continue;
+            const m = points.length;
+            for (let i = 1; i < m; i++) {
+                const a = points[i - 1], b = points[i];
+                const ax = margin.left + xScale(a.x), ay = margin.top + yScale(a.y);
+                const bx = margin.left + xScale(b.x), by = margin.top + yScale(b.y);
+                if (![ax, ay, bx, by].every(isFinite)) continue;
+                dv.setFloat32(w, ax, true); dv.setFloat32(w + 4, ay, true);
+                dv.setFloat32(w + 8, bx, true); dv.setFloat32(w + 12, by, true);
+                dv.setFloat32(w + 16, width, true);
+                dv.setUint32(w + 20, packColorRGBA(color, (i / (m - 1)) * 0.85), true);
+                w += 24;
+            }
+        }
+        this.count.trail = w / 24;
+        this.buf.trail = this._ensureBuffer(this.buf.trail, w);
+        if (w > 0) this.device.queue.writeBuffer(this.buf.trail, 0, this._scratch, 0, w);
+    }
+
+    clear() {
+        this.count.bg = this.count.fg = this.count.frontier = this.count.trail = 0;
+        this.bgCacheKey = null;
+        this._clearGraphScene?.();   // G-track: an empty-filter frame must drop the scene too
+        this.present();
+    }
+
+    _bindGroup(buffer) {
+        return this.device.createBindGroup({ layout: this.bgl, entries: [
+            { binding: 0, resource: { buffer: this.uViewport } },
+            { binding: 1, resource: { buffer: buffer || this.uViewport } },
+        ] });
+    }
+
+    // ── GPU compute-accumulate (the .evt-career cloud) ──────────────────────────
+    // Upload the flat, date-sorted event stream + the per-player era colours ONCE per
+    // model, and allocate the per-player running-total buffers. Idempotent: re-uploads
+    // only when the model identity (axes / player count / stream length) changes, so the
+    // first eligible frame pays the cost and every later frame is just a uniform write +
+    // a compute dispatch. Returns false (→ caller falls back to the CPU cloud) if the
+    // stream isn't the single-counter-per-axis shape this GPU path requires.
+    uploadEvtStream(model, colorBy = "era") {
+        const dev = this.device;
+        const stream = model.evStream || buildEvtEventStream(model);
+        const players = model.players.length;
+        // Discover the per-component axis coefficients (handles single-component HR/SB and
+        // monotone composites like TB). false ⇒ not GPU-accumulable (rate stat / negative
+        // coefficient) → caller falls back to the CPU cloud.
+        const mono = evtGpuMonotone(model);
+        if (!mono.ok) return false;
+        const cx = mono.cx, cy = mono.cy;
+        const token = `${model.xDim}|${model.yDim}|${players}|${stream.n}`;
+        if (this.evt && this.evt.token === token) { this._refreshEvtColors(model, colorBy); return true; }
+        try {
+            this._destroyEvt();
+            const BU = GPUBufferUsage;
+            // events: {player, xAdd, yAdd} ×3 u32 per stream row. The CPU bakes the axis
+            // coefficient in here (xAdd = cx[dep]·delta), so each event already carries its
+            // X- and Y-axis deltas — usually one is 0 (the component belongs to one axis).
+            // Deltas are ≥ 0 for counting components, so the u32 cast is lossless.
+            const ev = new Uint32Array(stream.n * 3);
+            const { player, dep, delta } = stream;
+            for (let i = 0; i < stream.n; i++) {
+                const d = dep[i], dl = delta[i];
+                ev[i * 3] = player[i];
+                ev[i * 3 + 1] = (cx[d] * dl) >>> 0;
+                ev[i * 3 + 2] = (cy[d] * dl) >>> 0;
+            }
+            const bEvents = dev.createBuffer({ size: Math.max(16, ev.byteLength), usage: BU.STORAGE | BU.COPY_DST });
+            dev.queue.writeBuffer(bEvents, 0, ev);
+            // per-player running totals. COPY_SRC so __bl2d_gpuCounters can read them back
+            // for the counterMis invariant check.
+            const pbytes = Math.max(16, players * 4);
+            const mkCounter = () => dev.createBuffer({ size: pbytes, usage: BU.STORAGE | BU.COPY_DST | BU.COPY_SRC });
+            const bX = mkCounter(), bY = mkCounter();
+            // SA3: the colour buffer carries the live open-season players AND a tail of up to
+            // WEBGPU_MAX_COMPLETED completed-frontier "phantom" colours (uploadCompletedFrontier
+            // writes the tail; _refreshEvtColors only rewrites the open [0, players) prefix). The
+            // career/cloud bind groups read it unchanged (a larger buffer is harmless).
+            const bColor = dev.createBuffer({ size: (players + WEBGPU_MAX_COMPLETED) * 4, usage: BU.STORAGE | BU.COPY_DST });
+            // small per-frame uniforms: the event window, and the axis scale + viewport.
+            const uWin = dev.createBuffer({ size: 16, usage: BU.UNIFORM | BU.COPY_DST });
+            const uScale = dev.createBuffer({ size: 32, usage: BU.UNIFORM | BU.COPY_DST });
+            const bgAccum = dev.createBindGroup({ layout: this.accumBgl, entries: [
+                { binding: 0, resource: { buffer: uWin } }, { binding: 1, resource: { buffer: bEvents } },
+                { binding: 2, resource: { buffer: bX } }, { binding: 3, resource: { buffer: bY } } ] });
+            const bgCloud = dev.createBindGroup({ layout: this.cloudBgl, entries: [
+                { binding: 0, resource: { buffer: uScale } }, { binding: 1, resource: { buffer: bX } },
+                { binding: 2, resource: { buffer: bY } }, { binding: 3, resource: { buffer: bColor } } ] });
+            // debut year per player → packed era colour (rebuilt on a theme change).
+            const debut = new Uint32Array(players);
+            for (let i = 0; i < players; i++) debut[i] = model.players[i].debutYear | 0;
+            // S-track: prefix of stream events by global date. eventsByDate[g] = # events with
+            // date < g (the stream is date-sorted), so appliedAt(d) = eventsByDate[d+1] and the
+            // season baseline target = eventsByDate[seasonStart]. Built once per stream upload.
+            const eventsByDate = new Uint32Array(model.numDates + 1);
+            for (let i = 0; i < stream.n; i++) eventsByDate[stream.date[i] + 1]++;
+            for (let i = 0; i < model.numDates; i++) eventsByDate[i + 1] += eventsByDate[i];
+            this.evt = { token, players, streamN: stream.n, numDates: model.numDates, eventsByDate,
+                bEvents, bX, bY, bColor, uWin, uScale, bgAccum, bgCloud,
+                debut, colorKey: null, zeros: new Uint32Array(players),
+                gpuApplied: null,   // how many stream events the counters reflect (null = none yet)
+                pending: null, failed: false, spring: null };
+            if (this.springMode) this._initSpringBuffers(model, players);
+            this._refreshEvtColors(model, colorBy);
+            return true;
+        } catch (e) {
+            console.warn("[webgpu] evt stream upload failed → CPU cloud:", e.message);
+            this._destroyEvt();
+            return false;
+        }
+    }
+
+    // Allocate the Phase-5 full-GPU buffers + bind groups (only under ?gpustream=1). The
+    // spring TARGET is the Phase-4 counters bX/bY (bound here read-only); pos/vel are the
+    // smoothed motion state; onFront + the staircase scratch hold the GPU frontier. All are
+    // GPU-resident — nothing here re-uploads per frame; the live loop only writes the tiny
+    // uSpring/uSpringScale uniforms (see springStep/present).
+    _initSpringBuffers(model, players) {
+        const dev = this.device, BU = GPUBufferUsage;
+        const e = this.evt;
+        const pos2 = Math.max(16, players * 8);                 // vec2<f32> per OPEN player (spring state)
+        const stor = BU.STORAGE | BU.COPY_DST;
+        // SA3: pos[] and onFront[] span the OPEN players plus a tail of up to WEBGPU_MAX_COMPLETED
+        // completed-frontier phantom slots, so the GPU skyline can run over (open ∪ completed) and
+        // mark the union frontier. The spring (bVel, dispatched over `players` only) never touches
+        // the tail; the union skyline/staircase use the separate uSpringUnion count (= players+nC).
+        const slotsU = players + WEBGPU_MAX_COMPLETED;
+        const posU = Math.max(16, slotsU * 8);
+        const bPos = dev.createBuffer({ size: posU, usage: stor | BU.COPY_SRC });   // COPY_SRC: verify readback
+        const bVel = dev.createBuffer({ size: pos2, usage: stor });
+        // S-track season baselines: per-player career counter snapshot at the open season's
+        // start−1 (copyBufferToBuffer from bX/bY on a boundary cross). COPY_DST = copy target,
+        // COPY_SRC = verify readback. Allocated even in career mode (the spring BGL requires
+        // bindings 5/6 bound); the shader ignores them unless uSpring.mode==1.
+        const pbytes = Math.max(16, players * 4);
+        const bBaseX = dev.createBuffer({ size: pbytes, usage: stor | BU.COPY_SRC });
+        const bBaseY = dev.createBuffer({ size: pbytes, usage: stor | BU.COPY_SRC });
+        const bOnFront = dev.createBuffer({ size: Math.max(16, slotsU * 4), usage: stor | BU.COPY_SRC });
+        // GPU-staircase scratch (frontier size bounded by WEBGPU_MAX_FRONT).
+        const MF = WEBGPU_MAX_FRONT;
+        const bFrontIdx = dev.createBuffer({ size: MF * 4, usage: stor });
+        const bFrontSorted = dev.createBuffer({ size: MF * 8, usage: stor });
+        const bCount = dev.createBuffer({ size: 16, usage: stor | BU.COPY_SRC });    // atomic K (reset each frame; COPY_SRC for verify)
+        const bStaircase = dev.createBuffer({ size: (1 + 2 * MF) * 8, usage: stor | BU.COPY_SRC });
+        const bIndirect = dev.createBuffer({ size: 16, usage: BU.INDIRECT | BU.STORAGE | BU.COPY_DST | BU.COPY_SRC });
+        // small per-frame uniforms (the only things that cross the bus each frame).
+        const uSpring = dev.createBuffer({ size: 16, usage: BU.UNIFORM | BU.COPY_DST });
+        // SA3: a SECOND copy of the Spring uniform whose `n` field is the UNION count
+        // (open players + completed phantoms). The skyline/staircase read `n` as their loop bound,
+        // but the SPRING shader also reads `n` as its write guard — so the spring must keep
+        // `n = players` (else its rounded-up dispatch would overwrite the phantom tail). Splitting
+        // the uniform lets the spring run over `players` while the union skyline runs over n+nC,
+        // both off the same pos[]/onFront[] buffers. Only the `n` field matters here (dt/omega/mode
+        // are unused by the skyline/staircase passes).
+        const uSpringUnion = dev.createBuffer({ size: 16, usage: BU.UNIFORM | BU.COPY_DST });
+        const uSpringScale0 = dev.createBuffer({ size: 48, usage: BU.UNIFORM | BU.COPY_DST });
+        const uSpringScale1 = dev.createBuffer({ size: 48, usage: BU.UNIFORM | BU.COPY_DST });
+        const bg = (layout, buffers) => dev.createBindGroup({ layout,
+            entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })) });
+        // Guard the spring bind-group build against a layout-arity regression. These bind groups
+        // are created against this.stairBgl / this.stairLineBgl etc.; if another init path
+        // (e.g. the G-track's _initGraphPipelines) ever re-used those property names with a
+        // different arity, the bind groups would silently become INVALID and poison every
+        // submit they share an encoder with — surfacing as frozen/garbage season values rather
+        // than an obvious crash. The error scope turns that back into a loud, catchable signal.
+        dev.pushErrorScope("validation");
+        e.spring = {
+            bPos, bVel, bOnFront, bFrontIdx, bFrontSorted, bCount, bStaircase, bIndirect,
+            uSpring, uSpringUnion, uSpringScale0, uSpringScale1, baseX: bBaseX, baseY: bBaseY,
+            zerosVec2: new Float32Array(players * 2),
+            bgSpring:       bg(this.springBgl,      [uSpring, e.bX, e.bY, bPos, bVel, bBaseX, bBaseY]),
+            bgSkyline:      bg(this.skylineBgl,     [uSpring, bOnFront, bPos]),
+            bgStair:        bg(this.stairBgl,       [uSpring, bOnFront, bPos, bFrontIdx, bFrontSorted, bCount, bStaircase, bIndirect]),
+            // SA3 union variants (uSpringUnion in slot 0; same pos/onFront/scratch buffers).
+            bgSkylineU:     bg(this.skylineBgl,     [uSpringUnion, bOnFront, bPos]),
+            bgStairU:       bg(this.stairBgl,       [uSpringUnion, bOnFront, bPos, bFrontIdx, bFrontSorted, bCount, bStaircase, bIndirect]),
+            bgSpringCloud0: bg(this.springCloudBgl, [uSpringScale0, bPos, e.bColor, bOnFront]),
+            bgSpringCloud1: bg(this.springCloudBgl, [uSpringScale1, bPos, e.bColor, bOnFront]),
+            bgStairLine:    bg(this.stairLineBgl,   [uSpringScale0, bStaircase]),
+        };
+        dev.popErrorScope().then((err) => {
+            window.__bl2d_springBglError = err ? err.message : null;
+            if (err) console.error("[bl2d] spring bind-group layout error:", err.message);
+        }).catch(() => {});
+    }
+
+    // Pack each player's cloud colour into the col[] buffer for the active Color-by encoding.
+    // All three encodings are STATIC per player across the animation: era = debut-year band,
+    // bats = handedness (from metaFor), league = uniformly "unknown" (the evt-career/open rows
+    // carry no single lgID — matches the CPU `colorOf` for these rows). Colours are per-theme
+    // (eraFor / the palettes read the live ramp), so the cache key folds in both colorBy and
+    // the theme; re-pack only when either changes — far simpler/more exact than re-deriving the
+    // ramp in WGSL. Lets the GPU spring drive league/bats colourings smoothly, not just era.
+    _refreshEvtColors(model, colorBy = "era") {
+        const e = this.evt; if (!e) return;
+        const theme = document.documentElement.dataset.theme || "";
+        const key = colorBy + "|" + theme;
+        if (e.colorKey === key) return;
+        const col = new Uint32Array(e.players);
+        for (let i = 0; i < e.players; i++) {
+            let css;
+            if (colorBy === "bats") {
+                const m = metaFor(model.players[i].name);
+                css = (COLOR_PALETTES.bats[m && m.bats] || COLOR_PALETTES.bats.unknown).color;
+            } else if (colorBy === "league") {
+                css = COLOR_PALETTES.league.unknown.color;   // evt rows carry no single lgID
+            } else {
+                css = (eraFor(e.debut[i]) || { color: "#4a6fa5" }).color;
+            }
+            col[i] = packColorRGBA(css, 1);
+        }
+        this.device.queue.writeBuffer(e.bColor, 0, col);
+        e.colorKey = key;
+    }
+
+    // Queue this frame's GPU cloud: figure out the catch-up window, write the uniforms,
+    // and stash the dispatch params for present() to run inside the single per-frame
+    // command encoder.
+    //
+    // Why the GPU tracks its OWN cursor (gpuApplied) rather than using the engine's
+    // per-frame {lo,count}: the JS incremental frontier consumes event windows on EVERY
+    // refresh (lite or not), but the GPU only accumulates on the lite playback frames the
+    // gate allows. So the GPU can fall "behind" the engine's `applied` count. Each GPU
+    // frame therefore replays exactly the events the engine has consumed but the GPU
+    // hasn't: [gpuApplied, applied). `win` = { applied, zero } from the engine — `applied`
+    // is its total consumed-event count, `zero` means it restarted from 0 this frame (new
+    // model / backward seek), in which case the GPU zeroes its counters and replays
+    // [0, applied) too. This keeps GPU counters == the JS shadow regardless of how many
+    // non-lite frames slipped between GPU frames.
+    accumulateCloud({ win, instanceCount, scales }) {
+        const e = this.evt;
+        if (!e || e.failed) return;
+        e.seasonActive = false;   // a career frame: clear the S-track season flag so present/glide use mode 0
+        const dev = this.device;
+        const target = win.applied >>> 0;
+        let lo, count;
+        const didZero = win.zero || e.gpuApplied == null || e.gpuApplied > target;
+        if (didZero) {
+            dev.queue.writeBuffer(e.bX, 0, e.zeros);   // restart the running sums at 0
+            dev.queue.writeBuffer(e.bY, 0, e.zeros);
+            lo = 0; count = target;
+        } else {
+            lo = e.gpuApplied; count = target - e.gpuApplied;
+        }
+        e.gpuApplied = target;
+        dev.queue.writeBuffer(e.uWin, 0, new Uint32Array([lo, count, 0, 0]));
+        dev.queue.writeBuffer(e.uScale, 0, new Float32Array([
+            scales.slopeX, scales.interceptX, scales.slopeY, scales.interceptY,
+            scales.vpX, scales.vpY, scales.radius, scales.alpha ]));
+        e.pending = { count, instanceCount, spring: false };
+        e.lastInstanceCount = instanceCount;   // cached so presentGlide can re-present without a refreshChart
+        // ── Phase-5: queue the spring/skyline/staircase uniforms for this frame ──────
+        // Only the tiny uniforms cross the bus here (dt/omega + the axis scale). On a
+        // wrap/backward-seek we ALSO zero pos/vel so the cloud snaps back to the origin
+        // for a clean replay. The staircase scratch (count, indirect) is reset every
+        // frame so a frame with K==0 draws nothing.
+        if (this.springMode && e.spring) {
+            const s = e.spring;
+            const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
+            let dt = this.lastSpringT ? (now - this.lastSpringT) / 1000 : 1 / 60;
+            this.lastSpringT = now;
+            if (!isFinite(dt) || dt <= 0) dt = 1 / 60;
+            dt = Math.min(dt, 0.05);                    // clamp a stall/tab-switch spike
+            if (didZero) {
+                dev.queue.writeBuffer(s.bPos, 0, s.zerosVec2);
+                dev.queue.writeBuffer(s.bVel, 0, s.zerosVec2);
+            }
+            dev.queue.writeBuffer(s.bCount, 0, new Uint32Array([0]));
+            dev.queue.writeBuffer(s.bIndirect, 0, new Uint32Array([0, 1, 0, 0]));
+            const uSpring = new ArrayBuffer(16);
+            new Float32Array(uSpring, 0, 2).set([dt, WEBGPU_SPRING_OMEGA]);
+            new Uint32Array(uSpring, 8, 2).set([e.players, 0]);
+            dev.queue.writeBuffer(s.uSpring, 0, uSpring);
+            // The frontier dots inherit the cloud's era colour but are drawn bigger + ringed.
+            const fr = Math.max((scales.radius || 2.5) + 3, 6), ring = 1.5;
+            const base = [scales.slopeX, scales.interceptX, scales.slopeY, scales.interceptY,
+                scales.vpX, scales.vpY, scales.radius, scales.alpha, fr, ring];
+            dev.queue.writeBuffer(s.uSpringScale0, 0, new Float32Array([...base, 0, 0]));  // cloud pass
+            dev.queue.writeBuffer(s.uSpringScale1, 0, new Float32Array([...base, 1, 0]));  // frontier pass
+            e.pending.spring = true;
+        }
+    }
+
+    // ── S-track: the season counter/baseline state machine (shared by the live cloud +
+    //    the verify oracles) ───────────────────────────────────────────────────────────────
+    // appliedAt(d) = # stream events with date ≤ d (the eventsByDate prefix; O(1)).
+    _appliedAt(d) { const e = this.evt; return e.eventsByDate[Math.max(0, Math.min(e.numDates - 1, d)) + 1]; }
+
+    // Drive the resident career counters bX/bY + the season baseline baseX/baseY from `state`
+    // (`{gpuApplied, baseTarget}`) to the cursor's `{desiredBase, target}` event counts, doing
+    // the minimal work for the three motion classes and snapshotting the baseline at the season
+    // boundary. Each accumulate range is its own submit (the pAccum pass reads uWin at exec time;
+    // collapsing many writes before one submit would lose all but the last window). Returns
+    // whether the baseline changed this step (⇒ a season boundary cross / replay → the caller
+    // snaps pos/vel so the new season grows from 0 instead of gliding down from the old one).
+    _seasonAccumulateTo(state, desiredBase, target) {
+        const dev = this.device, e = this.evt, s = e.spring, bytes = e.players * 4;
+        const accum = (lo, count) => {
+            if (count <= 0) return;
+            dev.queue.writeBuffer(e.uWin, 0, new Uint32Array([lo >>> 0, count >>> 0, 0, 0]));
+            const enc = dev.createCommandEncoder();
+            const cp = enc.beginComputePass(); cp.setPipeline(this.pAccum); cp.setBindGroup(0, e.bgAccum);
+            cp.dispatchWorkgroups(Math.ceil(count / 64)); cp.end();
+            dev.queue.submit([enc.finish()]);
+        };
+        const snapshot = () => {                       // bX/bY (at season start−1) → baseX/baseY
+            const enc = dev.createCommandEncoder();
+            enc.copyBufferToBuffer(e.bX, 0, s.baseX, 0, bytes);
+            enc.copyBufferToBuffer(e.bY, 0, s.baseY, 0, bytes);
+            dev.queue.submit([enc.finish()]);
+        };
+        const baseChanged = desiredBase !== state.baseTarget;
+        if (state.baseTarget < 0 || target < state.gpuApplied || desiredBase < state.baseTarget) {
+            dev.queue.writeBuffer(e.bX, 0, e.zeros);     // fresh / backward seek → replay from 0
+            dev.queue.writeBuffer(e.bY, 0, e.zeros);
+            accum(0, desiredBase); snapshot(); accum(desiredBase, target - desiredBase);
+        } else if (desiredBase > state.baseTarget) {     // forward across a season boundary
+            accum(state.gpuApplied, desiredBase - state.gpuApplied); snapshot(); accum(desiredBase, target - desiredBase);
+        } else {                                         // forward within the same open season
+            accum(state.gpuApplied, target - state.gpuApplied);
+        }
+        state.gpuApplied = target; state.baseTarget = desiredBase;
+        return baseChanged;
+    }
+
+    // SA3: upload the CPU-computed completed-season Pareto frontier as static "phantom" slots in
+    // the pos[]/col[] tail (indices [players, players+nC)), so the GPU union skyline runs over
+    // (open ∪ completed). The completed frontier is static between open-year changes, so this is
+    // keyed + skipped when unchanged. positions: Float32Array [x0,y0,…] (data units, same space as
+    // the spring's career−baseline targets); colors: packed RGBA8 per point (the active Color-by).
+    // nC is clamped to WEBGPU_MAX_COMPLETED; the union skyline/draw are bounded by e.nCompleted, so
+    // a shrink leaves stale higher slots unread (never dispatched). No-op if the spring isn't up.
+    uploadCompletedFrontier(positions, colors, key) {
+        const e = this.evt, s = e && e.spring;
+        if (!e || !s) return;
+        if (e.completedKey === key) return;                 // identical completed frontier already resident
+        const nC = Math.min(colors.length, WEBGPU_MAX_COMPLETED);
+        const dev = this.device;
+        if (nC > 0) {
+            dev.queue.writeBuffer(s.bPos, e.players * 8, positions.buffer, positions.byteOffset, nC * 2 * 4);
+            dev.queue.writeBuffer(e.bColor, e.players * 4, colors.buffer, colors.byteOffset, nC * 4);
+        }
+        e.nCompleted = nC;
+        e.completedKey = key;
+    }
+
+    // SA0/SA2/SA3 live season frame: maintain the resident counters + baseline for the open season
+    // at `cursor` (global date index; `start` = its season's first date index), then set up the
+    // spring uniforms so present() glides the open-season cloud toward `max(career − baseline, 0)`
+    // (mode=1). SA3: the GPU now owns the UNION frontier too — the union skyline/staircase run over
+    // open players ∪ the completed phantoms (count = players + e.nCompleted via uSpringUnion), and
+    // the frontier-dot pass draws over that union. count=0: the accumulate is done here (it can span
+    // multiple ranges + a snapshot), so present runs only the spring + skyline/staircase + draw.
+    accumulateSeasonCloud({ cursor, start, scales }) {
+        const e = this.evt;
+        if (!e || e.failed || !e.spring) return;
+        const dev = this.device, s = e.spring;
+        if (!e.season) e.season = { gpuApplied: 0, baseTarget: -1 };
+        const first = !e.seasonActive;
+        const desiredBase = this._appliedAt(start - 1), target = this._appliedAt(cursor);
+        const baseChanged = this._seasonAccumulateTo(e.season, desiredBase, target);
+        e.seasonActive = true;
+        const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
+        let dt = this.lastSpringT ? (now - this.lastSpringT) / 1000 : 1 / 60;
+        this.lastSpringT = now;
+        if (!isFinite(dt) || dt <= 0) dt = 1 / 60;
+        dt = Math.min(dt, 0.05);
+        // Snap the open cloud to rest on the first season frame or a boundary cross (the new
+        // season's values jump to ~0) so it grows from the origin instead of swooping from the old
+        // values. Only the OPEN prefix [0, players) is zeroed; the completed phantom tail persists.
+        if (first || baseChanged) { dev.queue.writeBuffer(s.bPos, 0, s.zerosVec2); dev.queue.writeBuffer(s.bVel, 0, s.zerosVec2); }
+        // Reset the staircase scratch (the GPU now emits the union staircase, like the career path).
+        dev.queue.writeBuffer(s.bCount, 0, new Uint32Array([0]));
+        dev.queue.writeBuffer(s.bIndirect, 0, new Uint32Array([0, 1, 0, 0]));
+        const nU = e.players + (e.nCompleted || 0);
+        const uSpring = new ArrayBuffer(16);
+        new Float32Array(uSpring, 0, 2).set([dt, WEBGPU_SPRING_OMEGA]);
+        new Uint32Array(uSpring, 8, 2).set([e.players, 1]);     // n = players (spring write guard), mode=1 (season)
+        dev.queue.writeBuffer(s.uSpring, 0, uSpring);
+        dev.queue.writeBuffer(s.uSpringUnion, 0, new Uint32Array([0, 0, nU, 0]));   // n = union count for the skyline/staircase
+        const fr = Math.max((scales.radius || 2.5) + 3, 6), ring = 1.5;
+        const base = [scales.slopeX, scales.interceptX, scales.slopeY, scales.interceptY,
+            scales.vpX, scales.vpY, scales.radius, scales.alpha, fr, ring];
+        dev.queue.writeBuffer(s.uSpringScale0, 0, new Float32Array([...base, 0, 0]));   // cloud pass (open)
+        dev.queue.writeBuffer(s.uSpringScale1, 0, new Float32Array([...base, 1, 0]));   // frontier pass (union)
+        e.pending = { count: 0, instanceCount: e.players, frontInstanceCount: nU, spring: true, season: true };
+        e.lastInstanceCount = e.players;
+    }
+
+    // Read the per-player counters back to the CPU (buffer→buffer copy → MAP_READ). Used
+    // by the __bl2d_gpuCounters invariant probe. NOTE: buffer-to-buffer copies have NO
+    // row-alignment rule — unlike the texture readback in exportDataURLs(), which must
+    // round bytesPerRow up to 256. Returns { x, y } as Uint32Arrays of length players.
+    async readbackCounters() {
+        const e = this.evt; if (!e) return null;
+        const bytes = e.players * 4;
+        const stage = (n) => this.device.createBuffer({ size: Math.max(16, n), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        const sx = stage(bytes), sy = stage(bytes);
+        const enc = this.device.createCommandEncoder();
+        enc.copyBufferToBuffer(e.bX, 0, sx, 0, bytes);
+        enc.copyBufferToBuffer(e.bY, 0, sy, 0, bytes);
+        this.device.queue.submit([enc.finish()]);
+        await Promise.all([sx.mapAsync(GPUMapMode.READ), sy.mapAsync(GPUMapMode.READ)]);
+        const x = new Uint32Array(sx.getMappedRange().slice(0, bytes));
+        const y = new Uint32Array(sy.getMappedRange().slice(0, bytes));
+        sx.unmap(); sy.unmap(); sx.destroy(); sy.destroy();
+        return { x, y, players: e.players };
+    }
+
+    // Generic one-shot buffer→CPU readbacks (verify hooks ONLY — never the render loop).
+    async _readback(buf, byteLen, Ctor) {
+        const st = this.device.createBuffer({ size: Math.max(16, byteLen), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        const enc = this.device.createCommandEncoder();
+        enc.copyBufferToBuffer(buf, 0, st, 0, byteLen);
+        this.device.queue.submit([enc.finish()]);
+        await st.mapAsync(GPUMapMode.READ);
+        const out = new Ctor(st.getMappedRange().slice(0, byteLen));
+        st.unmap(); st.destroy();
+        return out;
+    }
+
+    // ── Phase-5 verification (the gpuStreaming oracle; one-shot, never in renderAt) ──────
+    // Mirrors poc-webgpu-spring's verify_career. Drives the GPU to END-OF-HISTORY and settles
+    // the springs in ONE huge-Δt step (e≈0 ⇒ pos snaps to the integer target — the gliding is a
+    // live-only effect, the END state is what's verified), runs the GPU skyline + staircase, then
+    // reads pos/onFront/counters back ONCE and compares to a CPU brute-force Pareto over the
+    // integer counters (same strict tie-break as the shader). Returns the two invariants:
+    //   springMis  — settled pos != integer counter (±0.5) ⇒ the spring integrator diverged.
+    //   skylineMis — GPU onFront != CPU brute-force ⇒ the GPU frontier kernel is wrong.
+    async verifySpring() {
+        const e = this.evt, s = e && e.spring;
+        if (!e || !s) return null;
+        const dev = this.device, n = e.players;
+        // 1. one dedicated encoder: zero state, accumulate ALL events, settle, skyline, staircase.
+        dev.queue.writeBuffer(e.bX, 0, e.zeros);
+        dev.queue.writeBuffer(e.bY, 0, e.zeros);
+        dev.queue.writeBuffer(s.bPos, 0, s.zerosVec2);
+        dev.queue.writeBuffer(s.bVel, 0, s.zerosVec2);
+        dev.queue.writeBuffer(s.bCount, 0, new Uint32Array([0]));
+        dev.queue.writeBuffer(s.bIndirect, 0, new Uint32Array([0, 1, 0, 0]));
+        dev.queue.writeBuffer(e.uWin, 0, new Uint32Array([0, e.streamN, 0, 0]));
+        const us = new ArrayBuffer(16);
+        new Float32Array(us, 0, 2).set([1000, WEBGPU_SPRING_OMEGA]);   // huge dt ⇒ pos snaps to target
+        new Uint32Array(us, 8, 2).set([n, 0]);
+        dev.queue.writeBuffer(s.uSpring, 0, us);
+        const enc = dev.createCommandEncoder();
+        const pass = (pipe, bg, wg) => { const cp = enc.beginComputePass(); cp.setPipeline(pipe); cp.setBindGroup(0, bg); cp.dispatchWorkgroups(wg); cp.end(); };
+        pass(this.pAccum, e.bgAccum, Math.ceil(e.streamN / 64));
+        const wgN = Math.ceil(n / 64), wgK = Math.ceil(WEBGPU_MAX_FRONT / 64);
+        pass(this.pSpring, s.bgSpring, wgN);
+        pass(this.pSkyline, s.bgSkyline, wgN);
+        pass(this.pStairCompact, s.bgStair, wgN);
+        pass(this.pStairRanksort, s.bgStair, wgK);
+        pass(this.pStairEmit, s.bgStair, wgK);
+        dev.queue.submit([enc.finish()]);
+        e.gpuApplied = e.streamN;   // keep live bookkeeping consistent after the forced accumulate
+        // 2. read back once.
+        const x = await this._readback(e.bX, n * 4, Uint32Array);
+        const y = await this._readback(e.bY, n * 4, Uint32Array);
+        const pos = await this._readback(s.bPos, n * 8, Float32Array);
+        const onFront = await this._readback(s.bOnFront, n * 4, Uint32Array);
+        // 3. spring convergence + 4. skyline vs CPU brute force.
+        let springMis = 0, skylineMis = 0, frontierSize = 0, maxX = 0, maxY = 0;
+        for (let i = 0; i < n; i++) { if (x[i] > maxX) maxX = x[i]; if (y[i] > maxY) maxY = y[i]; }
+        for (let i = 0; i < n; i++) {
+            if (Math.abs(pos[i * 2] - x[i]) > 0.5 || Math.abs(pos[i * 2 + 1] - y[i]) > 0.5) springMis++;
+            const xi = x[i], yi = y[i];
+            let dom = (xi === 0 && yi === 0) ? 1 : 0;     // origin players are off-front (match the shader)
+            if (!dom) for (let j = 0; j < n; j++) { if (x[j] >= xi && y[j] >= yi && (x[j] > xi || y[j] > yi)) { dom = 1; break; } }
+            const cpuFront = dom ? 0 : 1;
+            if ((onFront[i] ? 1 : 0) !== cpuFront) skylineMis++;
+            if (cpuFront) frontierSize++;
+        }
+        return { springMis, skylineMis, frontierSize, maxX, maxY, x, y, pos, onFront, players: n };
+    }
+
+    // ── S-track SA1: GPU season-targeting oracle (one-shot, never in renderAt) ────────────
+    // Proves the season-mode spring target — seasonValue = career − baseline — is computed
+    // correctly on the GPU across the three motion classes the live loop will hit: a fresh
+    // jump (full replay), a forward boundary cross (accumulate-to-boundary → snapshot →
+    // accumulate-rest), and a backward scrub (replay from 0). For each probe {d, O, start} it
+    // drives the resident counters/baseline the same way the live loop would, settles the
+    // season spring (mode=1, huge dt ⇒ pos snaps to the integer target), reads pos[] back, and
+    // compares to the CPU oracle evtOpenSeasonPoints(model, d, O). Returns per-probe seasonMis
+    // (mismatched players) + spotlight player season values. Headless-safe (compute + buffer
+    // readback only, no canvas).
+    async verifySeason(model, probes, spotlight = []) {
+        const e = this.evt, s = e && e.spring;
+        if (!e || !s || !e.eventsByDate) return null;
+        const dev = this.device, n = e.players;
+        // Drive the shared season state machine through each probe (no reset between probes — the
+        // sequence exercises the same incremental branches the live cloud hits).
+        const state = { gpuApplied: 0, baseTarget: -1 };
+        dev.queue.writeBuffer(e.bX, 0, e.zeros);
+        dev.queue.writeBuffer(e.bY, 0, e.zeros);
+        const out = [];
+        for (const probe of probes) {
+            this._seasonAccumulateTo(state, this._appliedAt(probe.start - 1), this._appliedAt(probe.d));
+            // Settle the season spring from rest: mode=1, huge dt ⇒ pos = max(career − base, 0).
+            dev.queue.writeBuffer(s.bPos, 0, s.zerosVec2);
+            dev.queue.writeBuffer(s.bVel, 0, s.zerosVec2);
+            const us = new ArrayBuffer(16);
+            new Float32Array(us, 0, 2).set([1000, WEBGPU_SPRING_OMEGA]);
+            new Uint32Array(us, 8, 2).set([n, 1]);     // n, mode=1 (season)
+            dev.queue.writeBuffer(s.uSpring, 0, us);
+            const enc = dev.createCommandEncoder();
+            const cp = enc.beginComputePass(); cp.setPipeline(this.pSpring); cp.setBindGroup(0, s.bgSpring);
+            cp.dispatchWorkgroups(Math.ceil(n / 64)); cp.end();
+            dev.queue.submit([enc.finish()]);
+            const pos = await this._readback(s.bPos, n * 8, Float32Array);
+            // CPU oracle, computed PER INDEX (not by name): seasonValue = evtAsOf(d) −
+            // evtAsOf(start−1) per component, mapped through the axis fn. evtAsOf is an
+            // independent binary-search path over each player's own series, so this is a true
+            // cross-check of the GPU event-stream accumulation. Index-keyed because the display
+            // name is NOT unique — two distinct Lahman players can share a `(b.YYYY)` tag (e.g.
+            // two "Luis Garcia (b.1975)"), which a name-keyed map would conflate.
+            const c = {}, before = probe.start - 1;
+            let seasonMis = 0, active = 0; const misDetail = [];
+            for (let i = 0; i < n; i++) {
+                const comp = model.players[i].comp;
+                for (const dep of model.depList) { const sr = comp[dep]; c[dep] = sr ? evtAsOf(sr, probe.d) - evtAsOf(sr, before) : 0; }
+                let ex = model.xs.fn(c), ey = model.ys.fn(c);
+                if (!isFinite(ex) || ex < 0) ex = 0;
+                if (!isFinite(ey) || ey < 0) ey = 0;
+                if (ex || ey) active++;
+                if (Math.abs(pos[i * 2] - ex) > 0.5 || Math.abs(pos[i * 2 + 1] - ey) > 0.5) {
+                    seasonMis++;
+                    if (misDetail.length < 5) misDetail.push({ i, name: model.players[i].name, gpu: [pos[i * 2], pos[i * 2 + 1]], cpu: [ex, ey] });
+                }
+            }
+            const records = {};
+            for (const nm of spotlight) { const i = model.players.findIndex(p => p.name === nm); if (i >= 0) records[nm] = { x: pos[i * 2], y: pos[i * 2 + 1] }; }
+            out.push({ year: probe.O, seasonMis, active, records, misDetail });
+        }
+        e.gpuApplied = state.gpuApplied;   // leave live bookkeeping consistent (counters reflect this)
+        return out;
+    }
+
+    // ── S-track SA3: GPU union-frontier oracle (one-shot, never in renderAt) ───────────────
+    // Assumes the live season draw has already set the resident open counters/baseline at the
+    // current cursor and uploaded the completed-frontier phantoms (e.nCompleted slots). Settles
+    // the open spring (mode=1, huge dt ⇒ pos snaps to the integer season value), runs the UNION
+    // skyline over (open ∪ completed) = e.players + e.nCompleted slots, reads pos[]/onFront[]
+    // back once, and returns the GPU union-frontier (x,y) list + kernelMis (GPU onFront vs a CPU
+    // brute-force Pareto over the SAME settled positions — the strict tie-break the shader uses).
+    // The caller cross-checks `front` against the CPU `frontier` the app actually drew.
+    async verifySeasonFrontier() {
+        const e = this.evt, s = e && e.spring;
+        if (!e || !s) return null;
+        const dev = this.device, n = e.players, nC = e.nCompleted || 0, nU = n + nC;
+        const us = new ArrayBuffer(16);
+        new Float32Array(us, 0, 2).set([1000, WEBGPU_SPRING_OMEGA]);   // huge dt ⇒ pos snaps to target
+        new Uint32Array(us, 8, 2).set([n, 1]);                         // n = players (spring guard), mode=1
+        dev.queue.writeBuffer(s.uSpring, 0, us);
+        dev.queue.writeBuffer(s.uSpringUnion, 0, new Uint32Array([0, 0, nU, 0]));
+        const enc = dev.createCommandEncoder();
+        const pass = (pipe, bg, wg) => { const cp = enc.beginComputePass(); cp.setPipeline(pipe); cp.setBindGroup(0, bg); cp.dispatchWorkgroups(wg); cp.end(); };
+        pass(this.pSpring, s.bgSpring, Math.ceil(n / 64));             // settle open pos = season values
+        pass(this.pSkyline, s.bgSkylineU, Math.ceil(nU / 64));         // union onFront
+        dev.queue.submit([enc.finish()]);
+        const pos = await this._readback(s.bPos, nU * 8, Float32Array);
+        const onF = await this._readback(s.bOnFront, nU * 4, Uint32Array);
+        let kernelMis = 0; const front = [];
+        for (let i = 0; i < nU; i++) {
+            const xi = pos[i * 2], yi = pos[i * 2 + 1];
+            let dom = (xi === 0 && yi === 0) ? 1 : 0;     // origin slots are off-front (match the shader)
+            if (!dom) for (let j = 0; j < nU; j++) { const xj = pos[j * 2], yj = pos[j * 2 + 1]; if (xj >= xi && yj >= yi && (xj > xi || yj > yi)) { dom = 1; break; } }
+            const cpuFront = dom ? 0 : 1;
+            if ((onF[i] ? 1 : 0) !== cpuFront) kernelMis++;
+            if (onF[i]) front.push([xi, yi]);
+        }
+        return { nU, players: n, nCompleted: nC, kernelMis, front };
+    }
+
+    _destroyEvt() {
+        const e = this.evt; if (!e) return;
+        for (const k of ["bEvents", "bX", "bY", "bColor", "uWin", "uScale"]) e[k]?.destroy();
+        if (e.spring) {
+            for (const k of ["bPos", "bVel", "bOnFront", "bFrontIdx", "bFrontSorted", "bCount",
+                "bStaircase", "bIndirect", "uSpring", "uSpringUnion", "uSpringScale0", "uSpringScale1", "baseX", "baseY"]) e.spring[k]?.destroy();
+        }
+        this.evt = null;
+    }
+
+    // One render pass: clear → completed cloud → [GPU-accumulated cloud] → trails →
+    // open cloud + heads → frontier dots (the Canvas-2D layer order), into the offscreen
+    // texture, then blit to canvas. When a GPU cloud is pending, its compute pass runs
+    // first (in the SAME encoder) so the counters are current before the cloud draw.
+    // G5f — thin dispatcher (see LEGACY_PRESENT). Every caller (the main render,
+    // presentGlide, presentInteraction) goes through here, so flipping the flag swaps the
+    // whole frame path in one place. present_unified() is the G5g convergence target.
+    present() {
+        return LEGACY_PRESENT ? this.present_legacy() : this.present_unified();
+    }
+    // G5g — the CONVERGED frame. present_legacy() already interleaves the static G-track
+    // hooks and the spring-stream branches in one body, but selects between them with
+    // implicit conditionals scattered through the method. _buildSceneDescriptor() lifts that
+    // choice into ONE explicit object — `source` ∈ {spring, upload, hybrid} plus the compute
+    // flags — and present_unified() drives the identical pass sequence from it. Same passes,
+    // same order, same output (verified byte-identical to legacy on both __bl2d_verify suites);
+    // the win is a single named seam the loop owner (G5h) and spring-FLIP (G5i) hang off,
+    // instead of re-reading this.evt/this.graph in three places. Shares NO code with
+    // present_legacy(), so the flag is a clean rollback.
+    //
+    //   source "spring" : cloud + frontier come from the GPU spring buffers (gpustream).
+    //   source "upload" : the retained G-track scene (G0–G4) owns cloud/frontier/overlays.
+    //   source "hybrid" : the Phase-4 counter-pull cloud (eligible .evt, no spring).
+    _buildSceneDescriptor() {
+        const evt = this.evt;
+        const gpuCloud = !!(evt && evt.pending && !evt.failed);
+        // S-track SA3 season: a spring source that ALSO runs the union skyline/staircase + draws
+        // the union frontier dots (open ∪ completed phantoms).
+        const seasonOn = !!(gpuCloud && evt.pending.season && evt.spring);
+        const springOn = !!(gpuCloud && evt.pending.spring && evt.spring && !evt.pending.season);
+        return {
+            evt, gpuCloud, springOn, seasonOn,
+            source: springOn ? "spring" : seasonOn ? "season" : (this.graph && this.graphMode ? "upload" : "hybrid"),
+            runAccumulate: !!(gpuCloud && evt.pending.count > 0),
+            instanceCount: gpuCloud ? (evt.pending.instanceCount || 0) : 0,
+            frontInstanceCount: gpuCloud ? (evt.pending.frontInstanceCount || evt.pending.instanceCount || 0) : 0,
+        };
+    }
+    present_unified() {
+        if (!this.offTex) return;
+        window.__bl2d_presentCount = (window.__bl2d_presentCount || 0) + 1;
+        const d = this._buildSceneDescriptor();
+        const evt = d.evt;
+        const enc = this.device.createCommandEncoder();
+        // ── compute: accumulate new events, then (spring source) the gpuStreaming graph ──
+        if (d.runAccumulate) {
+            try {
+                const cp = enc.beginComputePass();
+                cp.setPipeline(this.pAccum); cp.setBindGroup(0, evt.bgAccum);
+                cp.dispatchWorkgroups(Math.ceil(evt.pending.count / 64)); cp.end();
+            } catch (e2) { evt.failed = true; console.warn("[webgpu] accumulate pass failed → CPU cloud:", e2.message); }
+        }
+        if (d.source === "spring") {
+            try {
+                const s = evt.spring;
+                const wgN = Math.ceil(evt.players / 64), wgK = Math.ceil(WEBGPU_MAX_FRONT / 64);
+                const pass = (pipe, bg, wg) => { const cp = enc.beginComputePass(); cp.setPipeline(pipe); cp.setBindGroup(0, bg); cp.dispatchWorkgroups(wg); cp.end(); };
+                pass(this.pSpring, s.bgSpring, wgN);
+                pass(this.pSkyline, s.bgSkyline, wgN);
+                pass(this.pStairCompact, s.bgStair, wgN);
+                pass(this.pStairRanksort, s.bgStair, wgK);
+                pass(this.pStairEmit, s.bgStair, wgK);
+            } catch (e3) { evt.failed = true; console.warn("[webgpu] spring passes failed → CPU cloud:", e3.message); }
+        } else if (d.source === "season") {
+            try {
+                const s = evt.spring;
+                const wgK = Math.ceil(WEBGPU_MAX_FRONT / 64);
+                const nU = evt.players + (evt.nCompleted || 0), wgU = Math.ceil(nU / 64);
+                const pass = (pipe, bg, wg) => { const cp = enc.beginComputePass(); cp.setPipeline(pipe); cp.setBindGroup(0, bg); cp.dispatchWorkgroups(wg); cp.end(); };
+                pass(this.pSpring, s.bgSpring, Math.ceil(evt.players / 64));   // open-cloud glide (mode=1, n=players)
+                pass(this.pSkyline, s.bgSkylineU, wgU);                       // union skyline (open ∪ completed)
+                pass(this.pStairCompact, s.bgStairU, wgU);
+                pass(this.pStairRanksort, s.bgStairU, wgK);
+                pass(this.pStairEmit, s.bgStairU, wgK);
+            } catch (e3) { evt.failed = true; console.warn("[webgpu] season spring pass failed → CPU cloud:", e3.message); }
+        }
+        // ── render: identical z-order to present_legacy ──
+        const rp = enc.beginRenderPass({ colorAttachments: [{
+            view: this.offTex.createView(), clearValue: this.clearValue, loadOp: "clear", storeOp: "store" }] });
+        const drawPts = (name) => { if (this.count[name] > 0) { rp.setBindGroup(0, this._bindGroup(this.buf[name])); rp.draw(6, this.count[name]); } };
+        rp.setPipeline(this.pPoints); drawPts("bg");
+        this._drawGraphShade?.(rp);
+        this._drawGraphScene?.(rp);
+        this._drawGraphDepth?.(rp);
+        this._drawGraphAux?.(rp);
+        // SA3: a season cloud pass draws the UNION count (open ∪ completed phantoms) so a
+        // completed-frontier dot that a gliding open point dominates (onFront→0) demotes to a
+        // background cloud dot instead of vanishing (it's beyond the open `instanceCount`, and
+        // the front-only frontier pass drops it). On-front phantoms stay degenerate here →
+        // drawn red by pass 1; off-front open points are unaffected (index < players). The
+        // career `spring` source has no phantoms → keeps `instanceCount`.
+        const cloudCount = d.source === "season" ? d.frontInstanceCount : d.instanceCount;
+        if ((d.source === "spring" || d.source === "season") && cloudCount > 0) {
+            rp.setPipeline(this.pSpringCloud); rp.setBindGroup(0, evt.spring.bgSpringCloud0);
+            rp.draw(6, cloudCount); rp.setPipeline(this.pPoints);
+        } else if (d.gpuCloud && d.instanceCount > 0) {
+            rp.setPipeline(this.pCloud); rp.setBindGroup(0, evt.bgCloud);
+            rp.draw(6, d.instanceCount); rp.setPipeline(this.pPoints);
+        }
+        if (this.count.trail > 0) { rp.setPipeline(this.pLine); rp.setBindGroup(0, this._bindGroup(this.buf.trail)); rp.draw(6, this.count.trail); rp.setPipeline(this.pPoints); }
+        drawPts("fg");
+        drawPts("frontier");
+        this._drawGraphOverlays?.(rp);
+        if ((d.source === "spring" || d.source === "season") && d.frontInstanceCount > 0) {
+            const s = evt.spring;   // season draws the UNION frontier (frontInstanceCount = players + nCompleted)
+            rp.setPipeline(this.pSpringCloud); rp.setBindGroup(0, s.bgSpringCloud1); rp.draw(6, d.frontInstanceCount);
+            rp.setPipeline(this.pStairLine); rp.setBindGroup(0, s.bgStairLine); rp.drawIndirect(s.bIndirect, 0);
+        }
+        this._drawGraphText?.(rp);
+        this._drawGraphInteraction?.(rp);
+        rp.end();
+        this.device.queue.submit([enc.finish()]);
+        if (evt) evt.pending = null;
+        if (this.canvasOk && this.ctx) {
+            try {
+                const e2 = this.device.createCommandEncoder();
+                e2.copyTextureToTexture({ texture: this.offTex }, { texture: this.ctx.getCurrentTexture() }, [this.offW, this.offH]);
+                this.device.queue.submit([e2.finish()]);
+            } catch (e) { this.canvasOk = false; console.warn("[webgpu] present blit failed (offscreen-only):", e.message); }
+        }
+    }
+    present_legacy() {
+        if (!this.offTex) return;
+        // G5a — a monotone counter the headless gate reads to prove the coalescer collapses
+        // many presentInteraction() calls into one present() per animation frame.
+        window.__bl2d_presentCount = (window.__bl2d_presentCount || 0) + 1;
+        const enc = this.device.createCommandEncoder();
+        const evt = this.evt;
+        const gpuCloud = evt && evt.pending && !evt.failed;
+        // Compute pass FIRST (a separate pass before the render pass): accumulate this
+        // frame's new events into the per-player counters. ceil(count/64) workgroups,
+        // 64 threads each (one per event). Skipped when count is 0 (a paused/idle frame
+        // that still re-presents the existing counters).
+        if (gpuCloud && evt.pending.count > 0) {
+            try {
+                const cp = enc.beginComputePass();
+                cp.setPipeline(this.pAccum);
+                cp.setBindGroup(0, evt.bgAccum);
+                cp.dispatchWorkgroups(Math.ceil(evt.pending.count / 64));
+                cp.end();
+            } catch (e2) { evt.failed = true; console.warn("[webgpu] accumulate pass failed → CPU cloud:", e2.message); }
+        }
+        // ── Phase-5 compute passes (the gpuStreaming frame graph) ───────────────────
+        // Run EVERY gpu frame (even count==0) so points keep gliding and the frontier
+        // updates. Separate compute passes in one encoder serialize, so spring sees the
+        // accumulate writes, skyline sees spring's pos, and the staircase passes chain
+        // compact→ranksort→emit. ranksort/emit over-dispatch to MAX_FRONT and self-guard
+        // against the GPU-side K (the host can't know K without a readback).
+        // S-track SA3 season frame (`pending.season`): the GPU owns the open cloud AND the UNION
+        // frontier. The spring glides only the open players (mode=1, baseline-subtracted, n=players),
+        // then the skyline/staircase run over the UNION (open ∪ completed phantoms) via uSpringUnion
+        // (n = players + nCompleted). The career path (springOn) runs the same five passes over the
+        // career skyline (uSpring, n=players).
+        const seasonOn = gpuCloud && !evt.failed && evt.pending.season && evt.spring;
+        const springOn = gpuCloud && !evt.failed && evt.pending.spring && evt.spring && !evt.pending.season;
+        if (springOn || seasonOn) {
+            try {
+                const s = evt.spring;
+                const wgN = Math.ceil(evt.players / 64), wgK = Math.ceil(WEBGPU_MAX_FRONT / 64);
+                const pass = (pipe, bg, wg) => { const cp = enc.beginComputePass(); cp.setPipeline(pipe); cp.setBindGroup(0, bg); cp.dispatchWorkgroups(wg); cp.end(); };
+                pass(this.pSpring, s.bgSpring, wgN);          // glide pos toward the counters (career or open-season)
+                if (seasonOn) {
+                    // Union skyline/staircase over open ∪ completed phantoms (n = players + nCompleted).
+                    const nU = evt.players + (evt.nCompleted || 0), wgU = Math.ceil(nU / 64);
+                    pass(this.pSkyline, s.bgSkylineU, wgU);
+                    pass(this.pStairCompact, s.bgStairU, wgU);
+                    pass(this.pStairRanksort, s.bgStairU, wgK);
+                    pass(this.pStairEmit, s.bgStairU, wgK);
+                } else {
+                    pass(this.pSkyline, s.bgSkyline, wgN);        // onFront = GPU Pareto frontier
+                    pass(this.pStairCompact, s.bgStair, wgN);     // gather on-front ids
+                    pass(this.pStairRanksort, s.bgStair, wgK);    // rank-sort by x
+                    pass(this.pStairEmit, s.bgStair, wgK);        // emit step verts + indirect count
+                }
+            } catch (e3) { evt.failed = true; console.warn("[webgpu] spring passes failed → CPU cloud:", e3.message); }
+        }
+        const rp = enc.beginRenderPass({ colorAttachments: [{
+            view: this.offTex.createView(), clearValue: this.clearValue, loadOp: "clear", storeOp: "store" }] });
+        const drawPts = (name) => { if (this.count[name] > 0) { rp.setBindGroup(0, this._bindGroup(this.buf[name])); rp.draw(6, this.count[name]); } };
+        rp.setPipeline(this.pPoints); drawPts("bg");
+        // G-track hooks (webgpu-graph.js): the HV shade fills UNDER the cloud (G2), then
+        // the retained-scene cloud draws at the background layer (G0/G1). Both are
+        // optional-chained no-ops when the file isn't loaded or the scene is empty.
+        this._drawGraphShade?.(rp);
+        this._drawGraphScene?.(rp);
+        // G-track G4: depth (onion-peel) layers — faded staircases + dots, ABOVE the
+        // cloud and UNDER the live frontier (matches the SVG depth-layers z-order).
+        this._drawGraphDepth?.(rp);
+        // G-track G4d: era-B + ghost overlays (also under the live frontier).
+        this._drawGraphAux?.(rp);
+        // The cloud sits at the background layer (behind trails, heads, frontier dots).
+        // Phase-5 spring path: vertex-pull the SMOOTHED pos[] (pass 0 = non-front cloud);
+        // the frontier dots (pass 1) + the GPU staircase are drawn LAST, on top. Phase-4
+        // hybrid path: the original counter-pull cloud.
+        // SA3: a season cloud pass draws the UNION count (open ∪ completed phantoms) so a
+        // dominated completed-frontier dot (onFront→0) demotes to a cloud dot instead of
+        // vanishing — matches the frontier pass's `frontInstanceCount` below. Career (`springOn`)
+        // has no phantoms → keeps `instanceCount`.
+        const cloudCount = seasonOn ? (evt.pending.frontInstanceCount || evt.pending.instanceCount) : evt.pending.instanceCount;
+        if ((springOn || seasonOn) && cloudCount > 0) {
+            rp.setPipeline(this.pSpringCloud);
+            rp.setBindGroup(0, evt.spring.bgSpringCloud0);   // pass 0 = cloud over the OPEN players + dominated completed phantoms (front dots degenerate → drawn by pass 1)
+            rp.draw(6, cloudCount);
+            rp.setPipeline(this.pPoints);
+        } else if (gpuCloud && !evt.failed && evt.pending.instanceCount > 0) {
+            rp.setPipeline(this.pCloud);
+            rp.setBindGroup(0, evt.bgCloud);
+            rp.draw(6, evt.pending.instanceCount);
+            rp.setPipeline(this.pPoints);
+        }
+        if (this.count.trail > 0) { rp.setPipeline(this.pLine); rp.setBindGroup(0, this._bindGroup(this.buf.trail)); rp.draw(6, this.count.trail); rp.setPipeline(this.pPoints); }
+        drawPts("fg");
+        drawPts("frontier");   // Phase-4 hybrid frontier dots (no-op in spring mode — GPU owns them)
+        // G-track G2 overlays: the GPU staircase line + HV-sized frontier dots, on top
+        // of the cloud/heads (mirrors drawFrontierDots' layer). No-op without the scene.
+        this._drawGraphOverlays?.(rp);
+        // Phase-5: frontier dots (pass 1, front-only) + the red staircase via drawIndirect,
+        // both on top of the cloud/heads. The staircase's vertex count was written by the
+        // GPU emit pass into bIndirect — it never round-tripped through JS. SA3: a season frame
+        // draws the UNION frontier (open ∪ completed phantoms) → frontInstanceCount instances.
+        if (springOn || seasonOn) {
+            const s = evt.spring;
+            const frontCount = evt.pending.frontInstanceCount || evt.pending.instanceCount;
+            if (frontCount > 0) {
+                rp.setPipeline(this.pSpringCloud);
+                rp.setBindGroup(0, s.bgSpringCloud1);
+                rp.draw(6, frontCount);
+                rp.setPipeline(this.pStairLine);
+                rp.setBindGroup(0, s.bgStairLine);
+                rp.drawIndirect(s.bIndirect, 0);
+            }
+        }
+        // G-track G3: glyph-atlas text (tick labels + frontier names) on top of all else.
+        this._drawGraphText?.(rp);
+        // G-track G5: interaction overlays (hover/pin regret line+ring, isolation ring,
+        // HV-contribution polygon) — drawn LAST so they sit above the whole chart.
+        this._drawGraphInteraction?.(rp);
+        rp.end();
+        this.device.queue.submit([enc.finish()]);
+        if (evt) evt.pending = null;   // consume the request; the next GPU frame re-stashes it
+        if (this.canvasOk && this.ctx) {
+            try {
+                const e2 = this.device.createCommandEncoder();
+                e2.copyTextureToTexture({ texture: this.offTex }, { texture: this.ctx.getCurrentTexture() }, [this.offW, this.offH]);
+                this.device.queue.submit([e2.finish()]);
+            } catch (e) { this.canvasOk = false; console.warn("[webgpu] present blit failed (offscreen-only):", e.message); }
+        }
+    }
+
+    // Phase-5 GLIDE frame: re-present at display refresh between the throttled refreshChart
+    // calls so the spring animates smoothly. Self-contained — it rebuilds a count==0 pending
+    // (no new events: the GPU counters/targets stay put; the spring just keeps gliding toward
+    // them) with a FRESH dt and the staircase scratch reset, then reuses present()'s existing
+    // compute+draw chain. Never zeroes pos/vel (that would snap the cloud). No-op unless the
+    // last real frame was a successful GPU spring frame.
+    presentGlide() {
+        const e = this.evt;
+        if (!this.springMode || !e || e.failed || !e.spring || !(e.lastInstanceCount > 0)) return;
+        const s = e.spring;
+        const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
+        let dt = this.lastSpringT ? (now - this.lastSpringT) / 1000 : 1 / 60;
+        this.lastSpringT = now;
+        if (!isFinite(dt) || dt <= 0) dt = 1 / 60;
+        dt = Math.min(dt, 0.05);                       // clamp a stall/tab-switch spike
+        // Reset the staircase scratch every frame (a frame with K==0 must draw nothing); the
+        // axis-scale uniforms (uScale, uSpringScale0/1) persist on-GPU from the last real frame.
+        this.device.queue.writeBuffer(s.bCount, 0, new Uint32Array([0]));
+        this.device.queue.writeBuffer(s.bIndirect, 0, new Uint32Array([0, 1, 0, 0]));
+        const uSpring = new ArrayBuffer(16);
+        new Float32Array(uSpring, 0, 2).set([dt, WEBGPU_SPRING_OMEGA]);
+        // S-track SA3: a season glide frame keeps mode=1 (baseline-subtracted). The counters/baseline
+        // stay put — only the spring keeps gliding pos. onFront is NOT zeroed: present() re-runs the
+        // union skyline over the gliding open positions + the static completed phantoms, so the
+        // union frontier (dots + staircase) tracks the glide. uSpringUnion (the skyline/staircase
+        // count) persists on-GPU from the last real frame, but re-write it defensively.
+        const seasonMode = e.seasonActive ? 1 : 0;
+        new Uint32Array(uSpring, 8, 2).set([e.players, seasonMode]);
+        this.device.queue.writeBuffer(s.uSpring, 0, uSpring);
+        const nU = e.players + (seasonMode ? (e.nCompleted || 0) : 0);
+        if (seasonMode) this.device.queue.writeBuffer(s.uSpringUnion, 0, new Uint32Array([0, 0, nU, 0]));
+        e.pending = { count: 0, instanceCount: e.lastInstanceCount, frontInstanceCount: nU, spring: true, season: !!seasonMode };
+        this.present();
+    }
+
+    // G5a — coalesced interaction re-present. Called from the mousemove/pin handlers (G5b–e)
+    // whenever an on-canvas overlay (hover ring, regret line, HV polygon) changes. It does
+    // NOT present synchronously: it sets a one-shot rAF so multiple mousemoves within a
+    // single display frame collapse into ONE present() (the display can't show more than one
+    // frame per vsync anyway, and a synchronous submit per mousemove just floods the queue).
+    // Only meaningful on the G-track (the static GPU scene re-draws from retained buffers);
+    // a no-op otherwise so the Canvas2D / non-graph paths are untouched. Self-coalescing via
+    // _interactRaf: a pending frame swallows further calls until it fires.
+    presentInteraction() {
+        if (!this.graphMode || !this.offTex) return;
+        // G5h (converged path): hand the overlay re-present to the single graphLoop owner.
+        if (!LEGACY_PRESENT && requestGraphPresent) { requestGraphPresent("overlay"); return; }
+        // Legacy path: a self-contained one-shot rAF coalescer (G5a).
+        if (this._interactRaf) return;                 // a frame is already pending — coalesce
+        this._interactRaf = requestAnimationFrame(() => {
+            this._interactRaf = 0;
+            this.present();
+        });
+    }
+
+    // Export: read the offscreen texture back, un-premultiply to straight alpha, return a
+    // single composited PNG (the design accepts visual — not byte — equivalence here).
+    async exportDataURLs() {
+        if (!this.offTex) return [];
+        // bytesPerRow MUST be a multiple of 256 for copyTextureToBuffer (a hard WebGPU
+        // alignment rule for TEXTURE→buffer copies — note the buffer→buffer counter
+        // readback in readbackCounters() has no such rule). So each row is padded up to
+        // the next 256 and we skip the padding when un-premultiplying below.
+        const bpr = Math.ceil(this.offW * 4 / 256) * 256;
+        const staging = this.device.createBuffer({ size: bpr * this.offH, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        const enc = this.device.createCommandEncoder();
+        enc.copyTextureToBuffer({ texture: this.offTex }, { buffer: staging, bytesPerRow: bpr }, [this.offW, this.offH]);
+        this.device.queue.submit([enc.finish()]);
+        await staging.mapAsync(GPUMapMode.READ);
+        const src = new Uint8Array(staging.getMappedRange());
+        const cv = document.createElement("canvas"); cv.width = this.offW; cv.height = this.offH;
+        const c2d = cv.getContext("2d"); const img = c2d.createImageData(this.offW, this.offH);
+        const bgra = this.format.startsWith("bgra");
+        for (let y = 0; y < this.offH; y++) for (let x = 0; x < this.offW; x++) {
+            const s = y * bpr + x * 4, d = (y * this.offW + x) * 4;
+            const a = src[s + 3];
+            const r = bgra ? src[s + 2] : src[s], g = src[s + 1], b = bgra ? src[s] : src[s + 2];
+            const inv = a > 0 ? 255 / a : 0;     // un-premultiply
+            img.data[d] = Math.min(255, r * inv); img.data[d + 1] = Math.min(255, g * inv);
+            img.data[d + 2] = Math.min(255, b * inv); img.data[d + 3] = a;
+        }
+        staging.unmap(); staging.destroy();
+        c2d.putImageData(img, 0, 0);
+        return [cv.toDataURL("image/png")];
+    }
+
+    destroy() {
+        this.canvas?.remove(); this.canvas = null; this.ctx = null;
+        this.offTex?.destroy(); this.offTex = null; this.offW = this.offH = 0;
+        for (const k of Object.keys(this.buf)) { this.buf[k]?.destroy(); this.buf[k] = null; this.count[k] = 0; }
+        this._destroyEvt();
+        this._destroyGraph?.();   // G-track scene buffers (webgpu-graph.js)
+        this.layers = null; this.bgCacheKey = null;
+    }
+}
+
+// The active point-cloud renderer. Starts as Canvas 2D (the default + fallback); the
+// selection ladder below may swap in WebGPU under ?renderer=webgpu.
+let pointRenderer = new Canvas2DRenderer();
+window.__bl2d_renderer = "canvas2d";
+
+// Renderer selection ladder (docs/rendering.md §"Phase 3 …
+// selection ladder"). The app always renders Canvas 2D first; this only swaps to WebGPU
+// when ?renderer=webgpu AND every capability rung passes. Never blocks first paint;
+// falls back to Canvas 2D on any failure or device loss.
+function swapRenderer(next) {
+    const prev = pointRenderer;
+    pointRenderer = next;
+    next.bgCacheKey = null;
+    if (prev && prev !== next) prev.destroy();
+    window.__bl2d_renderer = next instanceof WebGPURenderer ? "webgpu" : "canvas2d";
+    syncRendererStatus();   // reflect the live backend on the read-only GPU/CPU indicator
+    // Redraw on the new backend. refreshChart() is scoped to the DOMContentLoaded setup and is
+    // NOT visible at module scope here — `bl2d:refresh` is the cross-scope bridge (its listener
+    // is registered in setup; dispatching with no listener is a safe no-op). Before G6d this was
+    // `if (typeof refreshChart === "function") refreshChart()`, which was dead at module scope:
+    // a device-loss fallback swapped the renderer + indicator but never repainted, leaving an
+    // empty plot once the GPU canvas was destroyed (and the startup GPU paint relied on a rAF
+    // race with the initial render instead of this redraw).
+    document.dispatchEvent(new Event("bl2d:refresh"));
+}
+// Rendering is NON-OPTIONAL: WebGPU is the renderer, with Canvas 2D as the automatic,
+// SILENT fallback only when WebGPU is genuinely unavailable (no navigator.gpu / no adapter /
+// init throws / device lost). Real visitors always get a working chart; the header's
+// read-only indicator shows which backend is live (GPU vs CPU). The strict "no chart, loud
+// banner instead of a fallback" stance is now a DEV opt-in (?gpuonly=1) for verifying you're
+// actually exercising the GPU path — not the default a user could ever hit.
+const GPU_ONLY = new URLSearchParams(location.search).has("gpuonly");
+// G5f — present() convergence switch. The PROVEN per-frame path is present_legacy() (the
+// shipped body, untouched). present_unified() (G5g) merges the static-upload G-track path
+// and the spring-stream path into one scene-descriptor body. Default = LEGACY (true) until
+// G5g/h are green on BOTH verify suites (__bl2d_verifyGraph + __bl2d_verifySpring); then the
+// default flips in its own commit. ?legacyPresent=0 opts into the converged path early.
+const LEGACY_PRESENT = new URLSearchParams(location.search).get("legacyPresent") !== "0";
+// S-track: GPU-animate season smooth mode (the sprung open-season cloud SA2 + the hybrid GPU
+// union frontier SA3). GRADUATED to default-ON (SA4) now that the union frontier is verified
+// (kernelMis/frontierMis 0 across HR×SB / TB×R / H×BB; real-GPU staircase+dots) — it mirrors the
+// career GPU spring (`?gpustream`/`springMode`), which is already default-on. The gate still falls
+// back to the CPU season cloud for every ineligible case (rate axes, sign-flipped/worst frontier,
+// a bats/country filter, non-WebGPU renderer, a paused/non-lite frame). `?gpuseason=0` forces the
+// CPU path (the dev opt-out, like `?gpustream=0`/`?gpugraph=0`).
+const GPU_SEASON = new URLSearchParams(location.search).get("gpuseason") !== "0";
+function gpuOnlyBanner(msg) {
+    window.__bl2d_gpuOnlyFailed = msg;
+    let el = document.getElementById("gpuonly-banner");
+    if (!el) {
+        el = document.createElement("div");
+        el.id = "gpuonly-banner";
+        el.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:100000;background:#b91c1c;" +
+            "color:#fff;font:600 13px/1.4 system-ui,sans-serif;padding:8px 14px;text-align:center";
+        document.body.appendChild(el);
+    }
+    el.textContent = "⚠ GPU rendering unavailable / lost (?gpuonly is on — remove it to fall back to Canvas 2D). " + msg;
+    console.error("[renderer] ?gpuonly: refusing Canvas 2D fallback:", msg);
+}
+function swapToCanvas2D(reason) {
+    if (GPU_ONLY) { gpuOnlyBanner(reason); return; }   // dev opt-in: refuse the fallback, banner instead
+    if (pointRenderer instanceof Canvas2DRenderer) return;
+    console.warn("[renderer] → Canvas 2D fallback:", reason);
+    swapRenderer(new Canvas2DRenderer());              // graceful, silent — the indicator shows CPU
+}
+// Build + swap in the WebGPU backend (called once at startup). Resolves true on success,
+// false on any failed rung — leaving the working Canvas-2D render in place (the indicator
+// then shows CPU). The canvas-configure headless guard lives in WebGPURenderer.resize().
+async function enableWebGPU() {
+    if (pointRenderer instanceof WebGPURenderer) return true;
+    if (!navigator.gpu) { console.warn("[renderer] navigator.gpu missing → Canvas 2D"); if (GPU_ONLY) gpuOnlyBanner("navigator.gpu missing (browser lacks WebGPU)"); return false; }
+    try {
+        let adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+        if (!adapter) adapter = await navigator.gpu.requestAdapter({ forceFallbackAdapter: true });
+        if (!adapter) { console.warn("[renderer] no WebGPU adapter → Canvas 2D"); if (GPU_ONLY) gpuOnlyBanner("no WebGPU adapter"); return false; }
+        const device = await adapter.requestDevice();
+        const webgpu = new WebGPURenderer(device, adapter);
+        await webgpu.init();
+        device.lost.then((info) => { window.__bl2d_deviceLost = info.message; swapToCanvas2D("device lost: " + info.message); });
+        device.addEventListener?.("uncapturederror", (e) => { window.__bl2d_gpuError = e.error?.message; });
+        swapRenderer(webgpu);
+        console.log("[renderer] WebGPU active");
+        return true;
+    } catch (e) {
+        const msg = e?.message || String(e);
+        console.warn("[renderer] WebGPU init failed → Canvas 2D:", msg);
+        if (GPU_ONLY) gpuOnlyBanner("init failed: " + msg);
+        return false;
+    }
+}
+// Startup ladder: only auto-enables WebGPU under ?renderer=webgpu, and never under
+// headless (so the default app's snap.js checks stay on Canvas 2D).
+async function chooseRenderer() {
+    const params = new URLSearchParams(location.search);
+    // Rendering is non-optional: auto-enable WebGPU. ?renderer=canvas is a hidden dev hatch
+    // (unsupported-browser smoke test) — no user-facing toggle.
+    if (params.get("renderer") === "canvas") { syncRendererStatus(); return; }
+    // Headless stays Canvas 2D (preserves the default-app snap.js checks) unless asked.
+    const headless = /HeadlessChrome/i.test(navigator.userAgent) || navigator.webdriver;
+    if (headless && !params.has("webgpuHeadless")) { console.log("[renderer] headless → staying Canvas 2D"); syncRendererStatus(); return; }
+    await enableWebGPU();
+    syncRendererStatus();
+}
+
+// Reflect the live backend on the header's READ-ONLY indicator (rendering isn't user-
+// selectable, so this is a status light, not a toggle). "GPU" = WebGPU active; "CPU" =
+// the automatic Canvas 2D fallback (WebGPU unavailable / lost). Also re-run after a
+// device-loss fallback so the indicator can't lie about what's live.
+function syncRendererStatus() {
+    const el = document.getElementById("renderer-status");
+    if (!el) return;
+    const onGpu = pointRenderer instanceof WebGPURenderer;
+    el.textContent = onGpu ? "GPU" : "CPU";
+    el.classList.toggle("active", onGpu);
+    el.title = onGpu
+        ? "Rendering on the GPU (WebGPU)"
+        : (navigator.gpu ? "WebGPU lost — rendering on the CPU (Canvas 2D)"
+                         : "WebGPU unavailable — rendering on the CPU (Canvas 2D)");
+    el.setAttribute("aria-label", "Renderer: " + (onGpu ? "GPU" : "CPU"));
+}
+window.__bl2d_chooseRenderer = chooseRenderer;
+window.__bl2d_exportDataURLs = () => pointRenderer.exportDataURLs();   // headless WebGPU readback probe
+
+// G6d — device-loss recovery TEST hook. Flag-gated (?deviceLossTest=1) so it can NEVER fire
+// in production: a real visitor's window has no caller for it, and without the flag the hook
+// isn't even attached. Destroying the GPUDevice resolves its `device.lost` promise (reason
+// "destroyed"), which runs the SAME graceful path a real driver loss takes — the
+// `device.lost.then(...)` handler registered in enableWebGPU() calls swapToCanvas2D(), so the
+// chart falls back to Canvas 2D silently (no banner unless ?gpuonly) and the indicator flips to
+// CPU. Returns true if a live GPU device was destroyed, false if already on Canvas 2D.
+if (new URLSearchParams(location.search).has("deviceLossTest")) {
+    window.__bl2d_forceDeviceLoss = () => {
+        if (!(pointRenderer instanceof WebGPURenderer) || !pointRenderer.device) return false;
+        pointRenderer.device.destroy();   // → resolves device.lost → swapToCanvas2D (async)
+        return true;
+    };
+}
+
+// GPU compute-accumulate invariant probe: read the per-player counters back and compare
+// to the JS incremental-frontier shadow (comp[]) — they MUST match exactly when the GPU
+// cloud is active (counterMis 0), mirroring the POC's `counterMis` check. Returns null
+// when WebGPU/the evt path isn't active.
+window.__bl2d_gpuCounters = async (names = []) => {
+    if (!(pointRenderer instanceof WebGPURenderer)) return null;
+    const c = await pointRenderer.readbackCounters();
+    if (!c || !evtIncFrontier || !pbpEvt) return null;
+    // GPU counters hold the AXIS VALUE per player; recompute the same value from the JS
+    // shadow's per-component totals via the model's coefficients (cx/cy) and compare.
+    const mono = evtGpuMonotone(pbpEvt);
+    const comp = evtIncFrontier.comp, dl = pbpEvt.depList;
+    const expect = (coef, p) => { let v = 0; for (let d = 0; d < dl.length; d++) v += coef[d] * comp[d][p]; return v; };
+    let counterMis = 0;
+    for (let i = 0; i < c.players; i++) { if (c.x[i] !== expect(mono.cx, i)) counterMis++; if (c.y[i] !== expect(mono.cy, i)) counterMis++; }
+    // A few named players' GPU axis values straight from the readback (record check).
+    const records = {};
+    for (const nm of names) { const i = pbpEvt.players.findIndex((p) => p.name === nm); if (i >= 0) records[nm] = { x: c.x[i], y: c.y[i] }; }
+    return { counterMis, players: c.players, applied: evtIncFrontier.applied, lastCursor: evtIncFrontier.lastCursor, records };
+};
+// Player-name → resident-model index (so a headless probe can read a specific player's
+// GPU counter, e.g. Bonds / Henderson record spot-checks).
+window.__bl2d_evtPlayerIndex = (name) => pbpEvt ? pbpEvt.players.findIndex((p) => p.name === name) : -1;
+
+// Phase-5 gpuStreaming invariant probe (the spring + GPU skyline oracle). Requires
+// ?renderer=webgpu&gpustream=1 and an active .evt-career model. One-shot: drives the GPU to
+// end-of-history, settles, reads back once, and compares to a CPU brute-force frontier.
+// Returns {springMis, skylineMis, frontierSize, maxX, maxY, records{name:{x,y,onFront}}}.
+window.__bl2d_verifySpring = async (names = ["Barry Bonds", "Rickey Henderson"]) => {
+    if (!(pointRenderer instanceof WebGPURenderer) || !pointRenderer.springMode || !pbpEvt) return null;
+    pointRenderer.uploadEvtStream(pbpEvt);
+    const r = await pointRenderer.verifySpring();
+    if (!r) return null;
+    const records = {};
+    for (const nm of names) { const i = pbpEvt.players.findIndex((p) => p.name === nm); if (i >= 0) records[nm] = { x: r.x[i], y: r.y[i], onFront: !!r.onFront[i] }; }
+    return { springMis: r.springMis, skylineMis: r.skylineMis, frontierSize: r.frontierSize, maxX: r.maxX, maxY: r.maxY, players: r.players, records };
+};
+window.__bl2d_springMode = () => pointRenderer instanceof WebGPURenderer && !!pointRenderer.springMode;
+
+// S-track SA1 invariant probe (the GPU season-targeting oracle). Requires the spring engine
+// (?gpustream≠0) and a resident .evt model. Drives a cursor sequence that exercises every
+// motion class — a fresh jump, a forward season-boundary cross, a backward scrub, a
+// within-season step — and asserts the GPU season value (career − baseline) equals the CPU
+// oracle evtOpenSeasonPoints per player. seasonMis must be 0 at every probe. The default
+// spotlight spot-checks Barry Bonds 2001 (73 HR, the single-season record) when the axes are
+// HR/SB. One-shot, headless-safe (compute + buffer readback only).
+window.__bl2d_verifySeason = async (years = [1998, 2001, 2002], spotlight = ["Barry Bonds"]) => {
+    if (!(pointRenderer instanceof WebGPURenderer) || !pointRenderer.springMode || !pbpEvt) return null;
+    const m = pbpEvt;
+    if (m.xs.rate || m.ys.rate || !evtGpuMonotone(m).ok) return { skipped: "axes not GPU-season-eligible (rate / non-monotone)" };
+    pointRenderer.uploadEvtStream(m);
+    const yr = years.filter(y => m.seasonStartByYear.has(y));
+    if (yr.length < 2) return { skipped: "need ≥2 covered years" };
+    const endOf = (y) => Math.min(m.winEnd ?? (m.numDates - 1), m.seasonEndByYear.get(y));
+    const probe = (y, d) => ({ O: y, start: m.seasonStartByYear.get(y), d: d ?? endOf(y) });
+    // Sequence: replay(yr0) → cross(yr1) → cross(yr2) → backward(yr1) → backward-within(mid yr1)
+    // → forward-within(end yr1). Covers full-replay, forward-cross, backward-replay, and the
+    // same-season extend branch.
+    const midY1 = Math.floor((m.seasonStartByYear.get(yr[1]) + endOf(yr[1])) / 2);
+    const seq = [probe(yr[0]), probe(yr[1]), probe(yr[2] ?? yr[1]),
+                 probe(yr[1]), probe(yr[1], midY1), probe(yr[1])];
+    const res = await pointRenderer.verifySeason(m, seq, spotlight);
+    if (!res) return null;
+    const totalMis = res.reduce((a, r) => a + r.seasonMis, 0);
+    return { axes: `${m.xDim}×${m.yDim}`, totalMis, allGreen: totalMis === 0, probes: res };
+};
+
+// S-track SA0 invariant probe (the LIVE season state-machine oracle). Where __bl2d_verifySeason
+// drives a one-shot local state, this drives the PRODUCTION accumulateSeasonCloud with its
+// persistent e.season state across a cursor sequence (fresh jump → forward boundary cross →
+// forward cross → backward replay) — the exact per-frame path the live render loop uses — and
+// checks the resident counter minus baseline (bX−baseX, the season value BEFORE the spring
+// glides) against the per-index evtAsOf oracle. seasonMis must be 0 at every step. One-shot,
+// headless-safe (compute + buffer readback only).
+window.__bl2d_verifySeasonLive = async (years = [1998, 2001, 2002, 2001], spotlight = ["Barry Bonds"]) => {
+    if (!(pointRenderer instanceof WebGPURenderer) || !pointRenderer.springMode || !pbpEvt) return null;
+    const m = pbpEvt;
+    if (m.xs.rate || m.ys.rate || !evtGpuMonotone(m).ok) return { skipped: "axes not GPU-season-eligible" };
+    pointRenderer.uploadEvtStream(m);
+    const r = pointRenderer.evt; if (!r || !r.spring) return null;
+    r.season = null; r.seasonActive = false;   // fresh live state for the run
+    const endOf = (y) => Math.min(m.winEnd ?? (m.numDates - 1), m.seasonEndByYear.get(y));
+    const scales = { slopeX: 1, interceptX: 0, slopeY: 1, interceptY: 0, vpX: 1, vpY: 1, radius: 2.5, alpha: 0.5 };
+    const out = [];
+    for (const y of years) {
+        const start = m.seasonStartByYear.get(y); if (start == null) continue;
+        const cursor = endOf(y);
+        pointRenderer.accumulateSeasonCloud({ cursor, start, scales });   // advances persistent e.season
+        const X = await pointRenderer._readback(r.bX, r.players * 4, Uint32Array);
+        const Y = await pointRenderer._readback(r.bY, r.players * 4, Uint32Array);
+        const BX = await pointRenderer._readback(r.spring.baseX, r.players * 4, Uint32Array);
+        const BY = await pointRenderer._readback(r.spring.baseY, r.players * 4, Uint32Array);
+        const c = {}, before = start - 1; let seasonMis = 0, active = 0; const misDetail = [];
+        for (let i = 0; i < r.players; i++) {
+            const comp = m.players[i].comp;
+            for (const dep of m.depList) { const sr = comp[dep]; c[dep] = sr ? evtAsOf(sr, cursor) - evtAsOf(sr, before) : 0; }
+            let ex = m.xs.fn(c), ey = m.ys.fn(c);
+            if (!isFinite(ex) || ex < 0) ex = 0;
+            if (!isFinite(ey) || ey < 0) ey = 0;
+            const gx = X[i] - BX[i], gy = Y[i] - BY[i];   // career counter − baseline = the season value
+            if (ex || ey) active++;
+            if (Math.abs(gx - ex) > 0.5 || Math.abs(gy - ey) > 0.5) { seasonMis++; if (misDetail.length < 5) misDetail.push({ i, name: m.players[i].name, gpu: [gx, gy], cpu: [ex, ey] }); }
+        }
+        const records = {};
+        for (const nm of spotlight) { const i = m.players.findIndex(p => p.name === nm); if (i >= 0) records[nm] = { x: X[i] - BX[i], y: Y[i] - BY[i] }; }
+        out.push({ year: y, seasonMis, active, records, misDetail });
+    }
+    r.season = null; r.seasonActive = false;   // don't leak test state into the live loop
+    const totalMis = out.reduce((a, p) => a + p.seasonMis, 0);
+    return { axes: `${m.xDim}×${m.yDim}`, totalMis, allGreen: totalMis === 0, probes: out };
+};
+
+// S-track SA3 invariant probe (the GPU UNION-frontier oracle). Drives the LIVE gpuSeason path
+// at end-of-season for each probe year (forces a lite frame so the gate engages → the app
+// computes the CPU union frontier, uploads the completed-frontier phantoms, and accumulates the
+// open counters), then settles the spring and re-runs the union skyline, comparing:
+//   kernelMis   — GPU onFront vs a CPU brute-force Pareto over the SAME settled union positions
+//                 (the skyline-kernel invariant, like verifySpring's skylineMis).
+//   frontierMis — the GPU union-frontier (x,y) set vs the CPU `frontier` the app actually drew
+//                 (the end-to-end check: completed-phantom feed + open counters + skyline).
+// Both must be 0. Spot-checks the max-x frontier point (e.g. HR×SB 2001 → 73 HR, Bonds' record).
+// Requires ?gpuseason=1, a season-smooth page, and GPU-season-eligible axes. Restores the cursor.
+window.__bl2d_verifySeasonFrontier = async (years = [1998, 2001, 2002]) => {
+    if (!(pointRenderer instanceof WebGPURenderer) || !pointRenderer.springMode || !pbpEvt) return null;
+    if (!GPU_SEASON) return { skipped: "needs ?gpuseason=1" };
+    const m = pbpEvt;
+    if (m.xs.rate || m.ys.rate || !evtGpuMonotone(m).ok) return { skipped: "axes not GPU-season-eligible" };
+    const yr = years.filter(y => m.seasonEndByYear.has(y));
+    if (!yr.length) return { skipped: "no covered years" };
+    if (pbpRaf) { cancelAnimationFrame(pbpRaf); pbpRaf = null; }   // stop live playback so it can't race the oracle's cursor
+    const savedLite = smoothLite, savedCursor = pbpCursorIdx;
+    const twoFrames = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const key = a => a[0] + "|" + a[1];
+    const out = [];
+    for (const y of yr) {
+        pbpCursorIdx = Math.min(m.winEnd ?? (m.numDates - 1), m.seasonEndByYear.get(y));
+        smoothLite = true;                 // force a lite playback frame so the gpuSeason gate engages
+        document.dispatchEvent(new Event("bl2d:refresh"));   // refreshChart is a nested closure; this is the bridge
+        await twoFrames();
+        if (!window.__bl2d_evtGpuSeason) { out.push({ year: y, skipped: "gpuSeason gate off" }); continue; }
+        const cpu = window.__bl2d_lastSeasonUnionFrontier || [];
+        const r = await pointRenderer.verifySeasonFrontier();
+        if (!r) { out.push({ year: y, skipped: "no spring" }); continue; }
+        const cpuSet = new Set(cpu.map(key)), gpuSet = new Set(r.front.map(key));
+        let frontierMis = 0;
+        for (const k of cpuSet) if (!gpuSet.has(k)) frontierMis++;
+        for (const k of gpuSet) if (!cpuSet.has(k)) frontierMis++;
+        const maxXonFront = r.front.reduce((mx, p) => Math.max(mx, p[0]), 0);
+        out.push({ year: y, kernelMis: r.kernelMis, frontierMis, nCompleted: r.nCompleted, gpuFrontSize: r.front.length, cpuFrontSize: cpu.length, maxXonFront });
+    }
+    smoothLite = savedLite; pbpCursorIdx = savedCursor; document.dispatchEvent(new Event("bl2d:refresh"));
+    const totalKernel = out.reduce((a, p) => a + (p.kernelMis || 0), 0);
+    const totalFront = out.reduce((a, p) => a + (p.frontierMis || 0), 0);
+    return { axes: `${m.xDim}×${m.yDim}`, allGreen: totalKernel === 0 && totalFront === 0, totalKernel, totalFront, probes: out };
+};
+
+function recordPbpFrameTiming(totalMs, modelMs, renderMs, enabled) {
+    if (!enabled) return;
+    const samples = (window.__bl2d_pbpFrameMs?.samples || []).slice(-179);
+    samples.push(totalMs);
+    const sorted = [...samples].sort((a, b) => a - b);
+    const pct = (p) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))] : 0;
+    window.__bl2d_pbpFrameMs = {
+        samples,
+        p50: pct(0.50),
+        p95: pct(0.95),
+        last: totalMs,
+        lastModel: modelMs,
+        lastRender: renderMs,
+    };
+}
+
+async function exportChartSVG() {
+    const svgStr = buildExportSvgString(await pointRenderer.exportDataURLs());
     if (!svgStr) return;
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([svgStr], { type: "image/svg+xml" }));
@@ -1560,7 +4913,7 @@ async function openShareModal() {
 
     // Generate PNG preview in the background
     try {
-        const svgStr = buildExportSvgString();
+        const svgStr = buildExportSvgString(await pointRenderer.exportDataURLs());
         if (svgStr) {
             const svgEl = document.getElementById("scatter-plot");
             const { width, height } = svgEl.getBoundingClientRect();
@@ -1580,18 +4933,6 @@ async function openShareModal() {
 function closeShareModal() {
     const backdrop = document.getElementById("share-backdrop");
     if (backdrop) backdrop.hidden = true;
-}
-
-function _flashActionBtn(btn, label, doneLabel = "Done!") {
-    const orig = btn.textContent.trim();
-    btn.classList.add("share-action-btn--done");
-    btn.textContent = doneLabel;
-    setTimeout(() => {
-        btn.classList.remove("share-action-btn--done");
-        btn.textContent = orig;
-        // Restore the icon that was stripped by textContent assignment
-        btn.dispatchEvent(new Event("_restoreicon"));
-    }, 1800);
 }
 
 function setupShareButton() {
@@ -1920,8 +5261,6 @@ function buildFranchisePicker() {
     updateFranchiseDimming("all");
 }
 
-function populatePlayerDatalist() { /* replaced by setupPlayerSearch — no-op */ }
-
 function setupPlayerSearch() {
     const input = document.getElementById("player-search");
     const box   = document.getElementById("player-suggestions");
@@ -2033,6 +5372,18 @@ function syncPlayerHint() {
         search.placeholder = full ? "Max 6 players" : "Search…";
         search.value = "";
     }
+    syncGroupCareerToggle();
+}
+
+// Show the "Group careers" toggle only once the user has selected ≥1 player (the
+// group to animate); reflect the on/off state. Top-level so syncPlayerHint (called
+// on every group change) keeps it in sync.
+function syncGroupCareerToggle() {
+    const btn = document.getElementById("group-career-toggle");
+    if (!btn) return;
+    btn.hidden = careerHighlights.size < 1;
+    btn.classList.toggle("active", groupCareerMode);
+    btn.setAttribute("aria-pressed", String(groupCareerMode));
 }
 
 function setupPaPresets() {
@@ -2042,12 +5393,6 @@ function setupPaPresets() {
             slider.value = btn.dataset.pa;
             slider.dispatchEvent(new Event("input", { bubbles: true }));
         });
-    });
-}
-
-function syncPresetActive(value) {
-    document.querySelectorAll(".preset[data-pa]").forEach((btn) => {
-        btn.classList.toggle("active", parseInt(btn.dataset.pa) === value);
     });
 }
 
@@ -2064,7 +5409,24 @@ function setupYearPresets() {
 }
 
 
+// The single render entry point — called by refreshChart on every state change and on
+// every animation frame. It is one big function (not split) on purpose: it runs per
+// frame, so it avoids re-deriving shared locals across helper-call boundaries, and the
+// FLIP morph needs the before/after DOM state in one scope. Rough phases, in order:
+//   1. FLIP snapshot     — record current dot screen positions to tween FROM.
+//   2. filter + extent   — apply year/league/bats/country/threshold; lock or fit axes.
+//   3. frontier          — buildSmoothActiveFrontier | buildEvtIncrementalFrontier |
+//                          buildFrontier (the static O(n) sweep); plus onion-peel layers.
+//   4. hypervolume       — per-point contributions (skipped on "lite" playback frames).
+//   5. render cloud      — through pointRenderer (Canvas2D paints / WebGPU submits).
+//   6. render chrome     — axes, the dashed staircase, frontier dots, labels, isolation
+//                          rings, legend, leaderboard cards (the interaction-only bits are
+//                          skipped on lite frames and done on the settle/full frame).
+//   7. FLIP play         — tween dots from the snapshot positions to the new layout.
+// `filters` is the per-mode bag refreshChart assembles; `mode` is "season"/"career"
+// (note: evt-career passes "season" with filters.evt — see refreshChart).
 function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mode = "season", filters = {}) {
+    const frameStart = performance.now();
     // Any open axis-stat menu is anchored to the (about to be replaced) titles.
     closeAxisStatMenu();
     const svg = d3.select("#scatter-plot");
@@ -2133,6 +5495,37 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     let xSign = datasetDef.lowerIsBetter?.has(xDim) ? -1 : 1;
     let ySign = datasetDef.lowerIsBetter?.has(yDim) ? -1 : 1;
     if (showWorstFrontier) { xSign *= -1; ySign *= -1; }
+    // Park the date watermark in the frontier's "ideal" (empty) corner — where both
+    // axes are best, beyond the staircase. Flips with the stats' direction (lower-is-
+    // better) and best/worst. ySign>0 → higher is better → top; xSign>0 → right.
+    const pbpDateEl = document.getElementById("pbp-date");
+    if (pbpDateEl) pbpDateEl.dataset.corner = (ySign > 0 ? "t" : "b") + (xSign > 0 ? "r" : "l");
+
+    const sortFrontierRows = (a, b) => {
+        const ax = a.x * xSign, bx = b.x * xSign;
+        const ay = a.y * ySign, by = b.y * ySign;
+        if (ax !== bx) return ax - bx;
+        if (ay !== by) return ay - by;
+        return b.year - a.year; // prefer more recent on ties
+    };
+
+    const toFrontierRow = (p) => {
+        const x = p[xDim];
+        const y = p[yDim];
+        if (isNaN(x) || isNaN(y)) return null;
+        if (p[thresholdField] < minPa) return null;
+        return {
+            x, y,
+            year: p.yearID,
+            yearLast: p.yearLast || p.yearID,
+            seasonsCount: p.seasonsCount || 1,
+            PA: p[thresholdField],
+            playerID: p.playerID,
+            teamID: p.teamID,
+            lgID: p.lgID,
+            orig: p,  // for size-by lookups (PA / G / AB)
+        };
+    };
 
     // Full pipeline — filter → (career aggregate) → threshold → sort → dedup →
     // Pareto sweep — parameterised by a season-match predicate, so we can build
@@ -2159,30 +5552,11 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
 
         const flt = [];
         for (const p of workingPoints) {
-            const x = p[xDim];
-            const y = p[yDim];
-            if (isNaN(x) || isNaN(y)) continue;
-            if (p[thresholdField] < minPa) continue;
-            flt.push({
-                x, y,
-                year: p.yearID,
-                yearLast: p.yearLast || p.yearID,
-                seasonsCount: p.seasonsCount || 1,
-                PA: p[thresholdField],
-                playerID: p.playerID,
-                teamID: p.teamID,
-                lgID: p.lgID,
-                orig: p,  // for size-by lookups (PA / G / AB)
-            });
+            const row = toFrontierRow(p);
+            if (row) flt.push(row);
         }
 
-        flt.sort((a, b) => {
-            const ax = a.x * xSign, bx = b.x * xSign;
-            const ay = a.y * ySign, by = b.y * ySign;
-            if (ax !== bx) return ax - bx;
-            if (ay !== by) return ay - by;
-            return b.year - a.year; // prefer more recent on ties
-        });
+        flt.sort(sortFrontierRows);
 
         // Deduplicate exact (x, y) collisions for the rendering pass.
         const uniq = [];
@@ -2196,6 +5570,146 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         const fr = sweepFrontier(uniq);
 
         return { filtered: flt, unique: uniq, frontier: fr };
+    }
+
+    function mergeSortedFrontierRows(a, b) {
+        const out = [];
+        let i = 0, j = 0;
+        while (i < a.length || j < b.length) {
+            if (j >= b.length || (i < a.length && sortFrontierRows(a[i], b[j]) <= 0)) out.push(a[i++]);
+            else out.push(b[j++]);
+        }
+        return out;
+    }
+
+    function frontierFromSortedRows(flt) {
+        const uniq = [];
+        for (let i = 0; i < flt.length; i++) {
+            const p = flt[i];
+            if (i === 0 || p.x !== flt[i - 1].x || p.y !== flt[i - 1].y) uniq.push(p);
+        }
+        return { filtered: flt, unique: uniq, frontier: sweepFrontier(uniq) };
+    }
+
+    // Incremental frontier for the season-accumulating sweep (.evt-season):
+    // completed seasons (year < open) are static, so cache their sorted rows per open
+    // year and only sort+merge the open season each frame — avoids re-sorting ~100k
+    // completed player-seasons every frame. Not for career / group-career / evt-career
+    // (their points aren't a completed-vs-open-season split).
+    function buildSmoothActiveFrontier() {
+        if (mode !== "season" || !filters.smooth || filters.groupCareer || filters.evt) return null;
+        const openYear = eYear;
+        const prepKey = [
+            datasetKey, sYear, openYear, xDim, yDim, minPa,
+            league, bats, country, franchise, handField, xSign, ySign,
+        ].join("|");
+        let completedRows;
+        if (pbpFrontierPrepCache?.key === prepKey) {
+            completedRows = pbpFrontierPrepCache.filtered;
+        } else {
+            completedRows = [];
+            for (const p of points) {
+                if (p.yearID < sYear || p.yearID >= openYear) continue;
+                if (!attrMatches(p)) continue;
+                const row = toFrontierRow(p);
+                if (row) completedRows.push(row);
+            }
+            completedRows.sort(sortFrontierRows);
+            pbpFrontierPrepCache = { key: prepKey, filtered: completedRows };
+        }
+        const openRows = [];
+        for (const p of points) {
+            if (p.yearID !== openYear) continue;
+            if (!attrMatches(p)) continue;
+            const row = toFrontierRow(p);
+            if (row) openRows.push(row);
+        }
+        openRows.sort(sortFrontierRows);
+        return frontierFromSortedRows(mergeSortedFrontierRows(completedRows, openRows));
+    }
+
+    // .evt CAREER frontier maintained incrementally instead of swept full each frame
+    // (docs/rendering.md §C; JS port of poc-webgpu/core.c
+    // step_career). The cursor advances a small event window per frame, so only the
+    // touched players move the frontier — O(window + frontier) vs the O(N log N) sweep.
+    // Returns null (→ fall through to the full sweep) unless the gate holds:
+    //   • evt career mode, model matches the active axes,
+    //   • both axes are counting (non-rate, monotone) stats.
+    // Attribute filters (bats/country — league/franchise are forced "all" for evt) are
+    // honored via a static per-player eligibility mask that gates which players' events
+    // feed the engine; the cloud (filtered/unique) already filters via seasonMatches. The
+    // threshold isn't a factor here (counting axes ⇒ minPa is always 0). The full point
+    // cloud is still built exactly as buildFrontier's else-branch; only the frontier
+    // *subset* comes from the engine, selected back out of `unique` by coordinate so
+    // downstream identity holds.
+    function buildEvtIncrementalFrontier() {
+        if (!filters.evt) return null;
+        const model = pbpEvt;
+        if (!model || model.xDim !== xDim || model.yDim !== yDim) return null;
+        if (model.xs.rate || model.ys.rate) return null;
+
+        // Cloud: same map → sort → dedup as buildFrontier (mode is "season" for evt career).
+        const flt = [];
+        for (const p of points) { if (!seasonMatches(p)) continue; const row = toFrontierRow(p); if (row) flt.push(row); }
+        flt.sort(sortFrontierRows);
+        const uniq = [];
+        for (let i = 0; i < flt.length; i++) { const p = flt[i]; if (i === 0 || p.x !== flt[i - 1].x || p.y !== flt[i - 1].y) uniq.push(p); }
+        const pointByXY = new Map();
+        for (const u of uniq) pointByXY.set(u.x + "|" + u.y, u);
+
+        // Replay the date-sorted event stream up to the cursor, advancing the resident
+        // engine (reset + replay-forward on backward seek / new model / sign flip).
+        const stream = buildEvtEventStream(model);
+        const cur = Math.max(model.winStart, Math.min(model.winEnd, pbpCursorIdx)); // matches refreshChart's evt-career clamp
+        let st = evtIncFrontier;
+        // Did this call restart the replay from 0 (fresh engine OR backward seek)? The
+        // GPU counters must be zeroed in lockstep with the JS shadow when it does, so the
+        // GPU stash below reports it as `zero`.
+        let didReset = false;
+        // A new model / sign flip / filter change invalidates the replay → fresh engine
+        // (the eligibility mask changes which players are admitted, so the state can't be
+        // patched incrementally — reset and replay forward from 0).
+        if (!st || st.stream !== stream || st.xSign !== xSign || st.ySign !== ySign ||
+            st.bats !== bats || st.country !== country) {
+            didReset = true;
+            const players = model.players, elig = new Uint8Array(players.length);
+            const all = bats === "all" && country === "all";
+            for (let i = 0; i < players.length; i++) {
+                if (all) { elig[i] = 1; continue; }
+                const m = getMeta(players[i].name);
+                elig[i] = (m && (bats === "all" || m[handField] === bats) && (country === "all" || m.country === country)) ? 1 : 0;
+            }
+            st = evtIncFrontier = { stream, xSign, ySign, bats, country, elig,
+                engine: createIncrementalFrontier(players.length, xSign, ySign),
+                comp: model.depList.map(() => new Float64Array(players.length)),
+                applied: 0, lastCursor: -1 };
+        }
+        if (cur < st.lastCursor) { st.engine.reset(); for (const c of st.comp) c.fill(0); st.applied = 0; didReset = true; }
+        const { date, player, dep, delta, n } = stream;
+        const depList = model.depList, comp = st.comp, elig = st.elig, cobj = {};
+        let a = st.applied;
+        while (a < n && date[a] <= cur) {
+            const p = player[a];
+            if (elig[p]) {                         // skip events of players excluded by the bats/country filter
+                comp[dep[a]][p] += delta[a];
+                for (let di = 0; di < depList.length; di++) cobj[depList[di]] = comp[di][p];
+                st.engine.applyEvent(p, model.xs.fn(cobj), model.ys.fn(cobj));
+            }
+            a++;
+        }
+        st.applied = a; st.lastCursor = cur;
+
+        // Select the frontier objects back out of `unique` by coordinate (every engine
+        // frontier point's (x,y) is a deduped cloud point), preserving canonical-X order.
+        const frontier = [];
+        for (const [x, y] of st.engine.frontierXY()) { const pt = pointByXY.get(x + "|" + y); if (pt) frontier.push(pt); }
+        // GPU compute-accumulate stash. We expose the engine's TOTAL consumed-event count
+        // (`applied` = a) and whether it restarted this frame (`zero`), NOT a per-frame
+        // window — the GPU computes its own catch-up window from these (see
+        // accumulateCloud), so it stays correct even across non-lite frames it skipped. No
+        // frontier logic moves to the GPU; we only hand off bookkeeping it already did.
+        const gpu = { applied: a, zero: didReset };
+        return { filtered: flt, unique: uniq, frontier, gpu };
     }
 
     // Left-to-right best-in-class envelope over an already-sorted, deduped array.
@@ -2228,8 +5742,27 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         return layers;
     }
 
-    const { filtered, unique, frontier } = buildFrontier(seasonMatches);
+    const frontierResult =
+        buildSmoothActiveFrontier() || buildEvtIncrementalFrontier() || buildFrontier(seasonMatches);
+    const { filtered, unique, frontier } = frontierResult;
     const frontierSet = new Set(frontier);
+    // Headless-verification hook: the current frontier's player keys + (x,y).
+    window.__bl2d_frontierPids = frontier.map(d => d.playerID);
+    window.__bl2d_frontierXY = frontier.map(d => [d.x, d.y]);
+    // Dev assert (?verifyFrontier=1): the incremental frontier must equal a full sweep
+    // of the same cloud, compared as an (x,y) coordinate multiset (tie-breaks may pick a
+    // different equal-(x,y) object) — mirrors core.c verify_career/verify_season. A no-op
+    // on the non-incremental path (frontier already == sweep there).
+    if (VERIFY_FRONTIER) {
+        const ref = sweepFrontier(unique);
+        const tally = (arr) => { const m = new Map(); for (const d of arr) { const k = d.x + "|" + d.y; m.set(k, (m.get(k) || 0) + 1); } return m; };
+        const refM = tally(ref), gotM = tally(frontier);
+        let mis = 0;
+        for (const [k, v] of refM) mis += Math.abs(v - (gotM.get(k) || 0));
+        for (const [k, v] of gotM) if (!refM.has(k)) mis += v;
+        window.__bl2d_verifyFrontier = { mis, size: frontier.length, refSize: ref.length, cursor: pbpCursorIdx };
+        if (mis > 0) console.warn(`[verifyFrontier] incremental≠sweep: ${mis} coord mismatch(es) at cursor ${pbpCursorIdx} (incremental ${frontier.length} vs sweep ${ref.length})`);
+    }
 
     // Onion-peeling layers (layer 0 == frontier). depth=1 is the default and is
     // a no-op visually. Exposed for the headless invariant checks.
@@ -2257,24 +5790,66 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const legendGlobalEl = document.getElementById("legend-global");
     if (legendGlobalEl) legendGlobalEl.hidden = true;
 
-    const hvInfo = computeHvContributions(frontier, xSign, ySign, unique);
-    const hvByPoint = new Map(hvInfo.items.map(it => [it.point, it]));
-    window.__bl2d_hv = {
-        contributions: hvInfo.items.map(it => ({
-            playerID: it.point.playerID, year: it.point.year,
-            x: it.point.x, y: it.point.y,
-            contribution: it.contribution, fraction: it.fraction,
-        })),
-        total: hvInfo.totalHv,
-        reference: hvInfo.refPoint,
-        xSign, ySign, xDim, yDim,
-    };
-    window.__bl2d_computeHv = computeHvContributions;
+    // ── G-track gate (computed early — the depth/ghost/era-B SVG draws below read it). ──
+    const gpuGraph = !!(
+        pointRenderer instanceof WebGPURenderer &&
+        pointRenderer.graphMode &&
+        typeof pointRenderer.uploadScene === "function" &&
+        !filters.evt && !filters.smooth && !filters.groupCareer
+    );
+    window.__bl2d_gpuGraph = gpuGraph;
+    // The retained G-track scene (this.graph) outlives a mode change — its buffers stay
+    // resident when we switch from a static view into the career animation (smooth), where
+    // gpuGraph goes false and uploadScene stops running. Without a per-frame signal the
+    // present() hooks would keep drawing that stale static cloud/frontier/staircase ON TOP
+    // of the animation. graphActive is that signal: the _drawGraph* hooks no-op unless the
+    // G-track owns THIS frame. (Set on the renderer, harmless on Canvas2D.)
+    if (pointRenderer) pointRenderer.graphActive = gpuGraph;
+    // G3: hide the SVG axis tick TEXT when the GPU draws it (keep the <text> nodes for
+    // a11y; tick MARKS + domain path keep their stroke). Class-gated in styles.css.
+    document.body.classList.toggle("gpugraph", gpuGraph);
 
-    renderFrontierCards(frontier, xDim, yDim, formatStat, filtered.length, mode, hvByPoint);
-    renderPlayerSpotlight(frontier, hvByPoint, xDim, yDim, formatStat, mode);
+    // Lite frame (playing/scrubbing): skip the interaction-only work — hypervolume
+    // contributions, frontier cards, spotlight, isolation rings, regret/HV overlays,
+    // and the hover quadtree — so the moving frame is as cheap as the standalone demo.
+    // A full (interactive) render fires when the cursor goes idle (see refreshChart).
+    const lite = !!filters.lite;
+    const hvInfo = lite
+        ? { items: [], totalHv: 0, refPoint: { x: 0, y: 0 }, playerContribs: new Map() }
+        : computeHvContributions(frontier, xSign, ySign, unique);
+    const hvByPoint = new Map(hvInfo.items.map(it => [it.point, it]));
+    if (!lite) {
+        window.__bl2d_hv = {
+            contributions: hvInfo.items.map(it => ({
+                playerID: it.point.playerID, year: it.point.year,
+                x: it.point.x, y: it.point.y,
+                contribution: it.contribution, fraction: it.fraction,
+            })),
+            total: hvInfo.totalHv,
+            reference: hvInfo.refPoint,
+            xSign, ySign, xDim, yDim,
+        };
+        window.__bl2d_computeHv = computeHvContributions;
+    }
+
+    if (!lite) renderFrontierCards(frontier, xDim, yDim, formatStat, filtered.length, mode, hvByPoint);
+    // Group-career: hide the auto-spotlight cards — with every group member "on the
+    // frontier" they stack and overlap; the on-chart trails + labels are the story.
+    if (filters.groupCareer || lite) {
+        const psLayer = document.getElementById("player-spotlight");
+        if (psLayer && filters.groupCareer) { psLayer.innerHTML = ""; psLayer.hidden = true; }
+    } else {
+        renderPlayerSpotlight(frontier, hvByPoint, xDim, yDim, formatStat, mode);
+    }
+
+    const svgEl = document.getElementById("scatter-plot");
+    const rect = svgEl.getBoundingClientRect();
+    const width = rect.width;
+    const height = rect.height;
+    pointRenderer.resize(width, height);
 
     if (unique.length === 0) {
+        pointRenderer.clear();
         svg.append("text")
             .attr("x", "50%").attr("y", "50%")
             .attr("text-anchor", "middle").attr("dominant-baseline", "middle")
@@ -2285,12 +5860,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         return;
     }
 
-    const svgEl = document.getElementById("scatter-plot");
-    const rect = svgEl.getBoundingClientRect();
-    const width = rect.width;
-    const height = rect.height;
-
-    const margin = { top: 24, right: 24, bottom: 44, left: 56 };
+    // Reserve a strip at the bottom for the play-by-play progress bar when the overlay
+    // is on, so the bar sits below the x-axis title instead of over it.
+    const margin = { top: 24, right: 24, bottom: filters.smooth ? 66 : 44, left: 56 };
     const plotW = Math.max(40, width - margin.left - margin.right);
     const plotH = Math.max(40, height - margin.top - margin.bottom);
 
@@ -2348,6 +5920,13 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         xExtent = d3.extent(extentSource, d => d.x);
         yExtent = d3.extent(extentSource, d => d.y);
     }
+    // Smooth (game-by-game) sweep: lock the axes to the window's year-end envelope
+    // (computed once per covered-year set) so the frontier grows into a fixed frame
+    // instead of the axes jittering as cumulative totals climb.
+    if (filters.pbpExtent) {
+        if (filters.pbpExtent.x) xExtent = filters.pbpExtent.x;
+        if (filters.pbpExtent.y) yExtent = filters.pbpExtent.y;
+    }
     // Widen the domain so the comparison era's frontier isn't clipped.
     if (eraB && eraB.frontier.length && xExtent[0] != null) {
         xExtent = [Math.min(xExtent[0], d3.min(eraB.frontier, d => d.x)),
@@ -2360,6 +5939,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const xScale = d3.scaleLinear().domain(xDomain).nice().range([0, plotW]);
     const yScale = d3.scaleLinear().domain(yDomain).nice().range([plotH, 0]);
     updateZoomResetEnabled();
+    const modelReady = performance.now();
 
     const g = svg.append("g")
         .attr("transform", `translate(${margin.left}, ${margin.top})`);
@@ -2435,6 +6015,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // and the cloud): a faint dashed staircase + muted dots marking the all-MLB
     // limit for the current universe, ignoring the attribute filters.
     if (globalResult && globalResult.frontier.length) {
+        if (!gpuGraph) {   // G4d: the GPU draws the ghost under gpuGraph
         const gLine = staircaseScreen(globalResult.frontier);
         g.append("path")
             .attr("class", "global-frontier-ghost")
@@ -2453,13 +6034,14 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             .attr("r", 2.5)
             .style("fill", "#8a93a6")
             .style("opacity", 0.65);
+        }
         if (legendGlobalEl) legendGlobalEl.hidden = false;
     }
 
     // Onion-peeling: draw the deeper Pareto layers (1…n) behind the live
     // frontier, fading outward. Non-interactive so the real frontier keeps its
     // clicks, tooltips, and cards. Deepest first so layer 0 ends up on top.
-    if (depthLayers.length > 1) {
+    if (depthLayers.length > 1 && !gpuGraph) {   // G4: the GPU draws depth layers under gpuGraph
         const dg = g.append("g").attr("class", "depth-layers");
         for (let i = depthLayers.length - 1; i >= 1; i--) {
             const layer = depthLayers[i];
@@ -2487,7 +6069,91 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         }
     }
 
-    if (frontier.length > 0) {
+    // ── Optional GPU compute-accumulate cloud gate ──────────────────────────────
+    // When ALL of these hold, the high-cardinality .evt-career cloud is accumulated +
+    // drawn on the GPU (see the WEBGPU_ACCUM_WGSL block) instead of rebuilt on the CPU
+    // each frame. Any miss falls back to the existing CPU instanced cloud with NO visual
+    // change — the gate is a strict subset of the conditions under which the JS
+    // incremental frontier ran, so frontierResult.gpu is guaranteed present when true:
+    //   1. the active backend is WebGPU;
+    //   2. this is the .evt play-by-play CAREER cloud (filters.evt is set only for the
+    //      evt-career path — evt-season omits it; note drawMode is "season" for both,
+    //      so we key off filters.evt, NOT the mode argument);
+    //   3. the resident model matches the active axes;
+    //   4. both axes are counting (non-rate) …
+    //   5. … AND a monotone-nondecreasing linear combination of streamed components, so a
+    //      per-player running sum is exact — single (HR, SB) OR composite (TB, PA), but
+    //      never a stat that can decrease (evtGpuMonotone);
+    //   6. the era colour encoding (the GPU cloud only paints era — others fall back);
+    //   7. no sign inversion (worst-frontier flips the [0,max] mapping);
+    //   8. no bats/country filter (an eligibility mask would desync GPU counters from
+    //      the JS shadow, breaking the counterMis invariant — fall back instead);
+    //   9. a "lite" (playback/scrub) frame only — paused/idle frames keep the CPU cloud
+    //      so hover hit-testing + the quadtree still work on real point objects;
+    //  10. the event stream uploaded OK for this model (idempotent; first frame pays it).
+    // Computed HERE (before the staircase/frontier-dot rendering) because gpuSpring gates
+    // whether those CPU draws are suppressed in favour of the GPU's own frontier output.
+    const gpuCloud = !!(
+        pointRenderer instanceof WebGPURenderer &&
+        filters.evt &&
+        pbpEvt && pbpEvt.xDim === xDim && pbpEvt.yDim === yDim &&
+        !pbpEvt.xs.rate && !pbpEvt.ys.rate &&
+        evtGpuMonotone(pbpEvt).ok &&
+        (colorBy === "era" || colorBy === "bats" || colorBy === "league") &&
+        xSign === 1 && ySign === 1 && !showWorstFrontier &&
+        bats === "all" && country === "all" &&
+        filters.lite &&
+        frontierResult.gpu &&
+        pointRenderer.uploadEvtStream(pbpEvt, colorBy)
+    );
+    window.__bl2d_evtGpuCloud = gpuCloud;
+    // Phase-5 gpuStreaming engine active this frame (?gpustream=1 + a GPU cloud frame):
+    // the GPU owns the WHOLE picture — spring-smoothed cloud, the GPU skyline frontier
+    // dots, and the GPU staircase — so we suppress the CPU frontier dots AND the SVG
+    // staircase below (the cheap JS incremental frontier still runs, but only to feed
+    // DOM/interaction: cards, the quadtree hit-test, labels). See §"Phase 5".
+    const gpuSpring = gpuCloud && pointRenderer.springMode;
+    window.__bl2d_gpuSpring = gpuSpring;
+
+    // ── S-track gate (default-on; ?gpuseason=0 opts out): GPU-animate SEASON smooth ───────
+    // Mirrors gpuCloud's eligibility but for SEASON smooth (filters.evt is career-only). The GPU
+    // owns the open-season moving cloud (mode=1, baseline-subtracted, SA2) AND the hybrid union
+    // frontier (open ∪ the CPU completed-season frontier phantoms, SA3); the CPU keeps only the
+    // completed-season bg cloud. Every ineligible case below falls back to the proven CPU season
+    // cloud + CPU frontier: rate axes, a sign-flipped/worst frontier, a bats/country filter, a
+    // non-WebGPU renderer or ?gpustream=0, or a paused/non-lite frame.
+    const gpuSeason = !!(
+        GPU_SEASON &&
+        pointRenderer instanceof WebGPURenderer && pointRenderer.springMode &&
+        filters.smooth && filters.lite && !filters.evt && !filters.groupCareer && mode === "season" &&
+        pbpEvt && pbpEvt.xDim === xDim && pbpEvt.yDim === yDim &&
+        !pbpEvt.xs.rate && !pbpEvt.ys.rate &&
+        evtGpuMonotone(pbpEvt).ok &&
+        (colorBy === "era" || colorBy === "bats" || colorBy === "league") &&
+        xSign === 1 && ySign === 1 && !showWorstFrontier &&
+        bats === "all" && country === "all" &&
+        pointRenderer.uploadEvtStream(pbpEvt, colorBy)
+    );
+    window.__bl2d_evtGpuSeason = gpuSeason;
+    lastGpuSpringFrame = gpuSpring || gpuSeason;   // gate the glide loop: a CPU-fallback frame parks it
+
+    // ── G-track gate (?renderer=webgpu&gpugraph=1; webgpu-graph.js) ─────────────
+    // Phase G0: the STATIC background cloud renders from a retained data-space GPU
+    // scene (docs/rendering.md). Static views only — the playback
+    // paths (.evt smooth / group-career) keep their existing engines, so
+    // this gate and gpuCloud are mutually exclusive (gpuCloud requires filters.evt).
+    // The uploadScene typeof check makes the gate falsy if webgpu-graph.js didn't
+    // load (e.g. an old bundle) — the Phase-3 instanced path then runs unchanged.
+    // Group-career suppresses the staircase + HV shade: with only a handful of
+    // career dots tracing trajectories, the Pareto envelope clutters more than it
+    // clarifies — the focus is the trails + heads.
+    // Under gpuSpring the GPU owns BOTH the red staircase line (drawIndirect) AND the cloud,
+    // drawn from the spring-animated pos[] that lag the true values during a glide. The HV
+    // shade + SVG line here are built from the CPU frontier's *settled* values, so drawing
+    // them would put the shaded area (and a duplicate line) AHEAD of the gliding red line.
+    // Skip both while the GPU spring animates; a paused/idle frame is a CPU frame where the
+    // line and fill agree, so the shade returns the instant playback stops.
+    if (frontier.length > 0 && !filters.groupCareer && !gpuSpring && !gpuGraph && !gpuSeason) {
         const line = staircaseScreen(frontier);
 
         // Hypervolume shading: gradient fill of the dominated region beneath the
@@ -2518,8 +6184,9 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // plus a coverage headline = how much of B's objective space the primary era
     // also dominates (grid-sampled, sign-aware so "lower is better" axes work).
     if (eraB && eraB.frontier.length) {
-        const bPts = staircaseScreen(eraB.frontier);
         const eg = g.append("g").attr("class", "era-b-layer");
+        if (!gpuGraph) {   // G4d: the GPU draws the era-B shade/staircase/dots under gpuGraph
+        const bPts = staircaseScreen(eraB.frontier);
         eg.append("path")
             .attr("class", "era-b-shade")
             .attr("d", "M " + xAnti + "," + yAnti + " L " + bPts.map(p => p.join(",")).join(" L ") + " Z");
@@ -2530,6 +6197,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             .data(eraB.frontier).enter().append("circle")
             .attr("class", "era-b-dot")
             .attr("cx", d => xScale(d.x)).attr("cy", d => yScale(d.y)).attr("r", 3.5);
+        }
 
         const domBy = (fr, cx, cy) => fr.some(a => a.x * xSign >= cx * xSign && a.y * ySign >= cy * ySign);
         let covNum = 0, covDen = 0;
@@ -2626,57 +6294,285 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const special = unique.filter(d => frontierSet.has(d));
 
     const cloudOpacity = careerHighlights.size > 0 ? 0.1 : themeCloudOpacity;
-    g.append("g").selectAll("circle.regular-point")
-        .data(regular).enter()
-        .append("circle")
-        .attr("class", "regular-point")
-        .attr("cx", d => xScale(d.x))
-        .attr("cy", d => yScale(d.y))
-        .attr("r", pointRadius)
-        .attr("fill", d => colorOf(d, colorBy, getMeta))
-        .style("fill-opacity", cloudOpacity);
+    const smoothOpenYear = filters.smooth ? eYear : null;
+
+    // .evt: every point's (x,y) moves each frame (cumulative grows), so the whole cloud
+    // goes on the redrawn-every-frame foreground; the cached background would freeze it.
+    // .evt-season accumulating: completed seasons are static → cache them on the background.
+    const backgroundPoints = (filters.groupCareer || filters.evt)
+        ? []
+        : filters.smooth
+        ? unique.filter(d => d.year < smoothOpenYear)
+        : regular;
+    // When the GPU cloud is active it draws the regular .evt cloud itself, so keep the
+    // CPU foreground cloud empty (highlight heads still flow through it below). gpuSeason
+    // (S-track) does the same for the OPEN-season cloud — the GPU spring draws it.
+    const foregroundCloudPoints = (gpuCloud || gpuSeason)
+        ? []
+        : filters.evt
+        ? regular
+        : filters.smooth
+        ? regular.filter(d => d.year >= smoothOpenYear)
+        : [];
+    const bgKey = [
+        filters.smooth ? "smooth" : "static",
+        smoothOpenYear ?? "all",
+        document.documentElement.dataset.theme || "",
+        sYear, eYear, mode, datasetKey, minPa, league, bats, country, franchise,
+        xDim, yDim, colorBy, cloudOpacity, pointRadius,
+        xScale.domain().join(","), yScale.domain().join(","),
+        width, height, pointRenderer.dpr,
+        backgroundPoints.length,
+    ].join("|");
+    if (gpuGraph) {
+        // G0 retained scene: the background cloud lives on the GPU in DATA space.
+        // sceneKey is bgKey MINUS everything scale-shaped (domains, width/height,
+        // dpr) — identical key ⇒ uploadScene skips the upload entirely and this
+        // refresh only writes the 64-byte uScene mapping. Zoom/resize for free.
+        // G1: the scene holds the FULL deduped cloud (`unique`, frontier
+        // included) so the GPU skyline can judge every point; the cloud shader
+        // degenerates on-front instances, so what RENDERS is still exactly the
+        // non-front background. xSign/ySign are scene identity (they change
+        // which points survive the skyline), so they join the key.
+        const sceneKey = [
+            "g1", filters.smooth ? "smooth" : "static",
+            document.documentElement.dataset.theme || "",
+            sYear, eYear, mode, datasetKey, minPa, league, bats, country, franchise,
+            xDim, yDim, colorBy, cloudOpacity, pointRadius,
+            xSign, ySign, unique.length, peelDepth,
+        ].join("|");
+        // G2 render colours, resolved to [r,g,b] in 0..1 (d3.color handles hex + CSS
+        // vars). Stair line = --frontier-color (worst → purple), 0.55 opacity to match
+        // .frontier-staircase; HV shade = navy (worst → purple); worst mode also
+        // overrides the frontier-dot fill (best mode keeps each dot's era colour).
+        const rgb01 = (css) => { const c = d3.color(css); return c ? [c.r / 255, c.g / 255, c.b / 255] : [0, 0, 0]; };
+        const frontierCss = getComputedStyle(document.documentElement).getPropertyValue("--frontier-color").trim() || "#0f172a";
+        const stairRgb = showWorstFrontier ? rgb01("#8b5cf6") : rgb01(frontierCss);
+        const hvRgb = showWorstFrontier ? rgb01("#8b5cf6") : rgb01("#002D72");
+        const frontOverride = showWorstFrontier ? [...rgb01("#8b5cf6"), 1] : [0, 0, 0, 0];
+        pointRenderer.uploadScene(unique, {
+            key: sceneKey,
+            fillFor: d => colorOf(d, colorBy, getMeta),
+            alpha: cloudOpacity,
+            radius: pointRadius,
+            xSign, ySign,
+            xDomain: xScale.domain(), yDomain: yScale.domain(),
+            stairColor: [...stairRgb, 0.55], hvColor: hvRgb, frontOverride,
+            depth: peelDepth,   // G4: GPU onion-peel layer count (1 = frontier only)
+            // Depth overlay always uses --frontier-color (not the worst-mode purple) + a
+            // --panel dot ring, matching the SVG .depth-* CSS.
+            depthColor: rgb01(frontierCss),
+            panelColor: rgb01(getComputedStyle(document.documentElement).getPropertyValue("--panel").trim() || "#ffffff"),
+        });
+        pointRenderer.writeSceneScale(xScale, yScale, margin, width, height, xSign, ySign);
+        // G4d era-B + ghost overlays: lay each CPU oracle frontier into a data-space
+        // staircase (via xScale.invert of the screen staircase, so it rides the uScene
+        // affine) + a SCREEN-space cumulative arc length (zoom-stable dashing) + dot
+        // positions, then upload for the GPU to draw. The SVG era-B/ghost are suppressed.
+        const overlayGeom = (frontier) => {
+            const screen = staircaseScreen(frontier);
+            const stair = new Float32Array(screen.length * 2);
+            const arc = new Float32Array(screen.length);
+            let acc = 0;
+            for (let i = 0; i < screen.length; i++) {
+                const sx = screen[i][0], sy = screen[i][1];
+                if (i > 0) acc += Math.hypot(sx - screen[i - 1][0], sy - screen[i - 1][1]);
+                arc[i] = acc;
+                stair[i * 2] = xScale.invert(sx); stair[i * 2 + 1] = yScale.invert(sy);
+            }
+            const dots = new Float32Array(frontier.length * 2);
+            for (let i = 0; i < frontier.length; i++) { dots[i * 2] = frontier[i].x; dots[i * 2 + 1] = frontier[i].y; }
+            return { stair, arc, dots };
+        };
+        const panelRgb = rgb01(getComputedStyle(document.documentElement).getPropertyValue("--panel").trim() || "#ffffff");
+        const eraGeom = (eraB && eraB.frontier.length) ? overlayGeom(eraB.frontier) : null;
+        const ghostGeom = (globalResult && globalResult.frontier.length) ? overlayGeom(globalResult.frontier) : null;
+        pointRenderer.uploadOverlays?.({
+            era: eraGeom ? { ...eraGeom, period: 10, dashFrac: 0.6,
+                line: [...rgb01("#0ea5a4"), 0.9], shade: [...rgb01("#0ea5a4"), 0.12],
+                dotFill: [...rgb01("#0ea5a4"), 1], dotRing: [...panelRgb, 1] } : null,
+            ghost: ghostGeom ? { ...ghostGeom, period: 9, dashFrac: 5 / 9,
+                line: [...rgb01("#8a93a6"), 0.7], dotFill: [...rgb01("#8a93a6"), 0.65] } : null,
+        });
+        window.__bl2d_overlayExpect = {
+            eraFront: eraGeom ? eraB.frontier.length : 0,
+            ghostFront: ghostGeom ? globalResult.frontier.length : 0,
+        };
+        // The pixel-space bg instances must not double-draw under the scene, and
+        // a later non-graph frame must rebuild them (sentinel ≠ any real bgKey).
+        pointRenderer.count.bg = 0;
+        pointRenderer.bgCacheKey = "gpugraph";
+        window.__bl2d_gpuGraphN = unique.length;
+    } else {
+        // Leaving the scene path (mode/filter flip): drop the scene so present()
+        // stops drawing it. No-op on Canvas 2D and on every ordinary frame.
+        pointRenderer._clearGraphScene?.();
+        if (pointRenderer.bgCacheKey !== bgKey) {
+            pointRenderer.drawBackground(backgroundPoints, {
+                margin, xScale, yScale,
+                radius: pointRadius,
+                fillFor: d => colorOf(d, colorBy, getMeta),
+                alpha: cloudOpacity,
+            });
+            pointRenderer.bgCacheKey = bgKey;
+        }
+    }
 
     // Career-highlight layer: dots only (no connecting line — the
     // year-order trail tended to add zigzag noise more than it clarified
     // the trajectory). Rendered BEFORE the red frontier dots so the
     // clicked-on frontier point keeps its red marker on top.
-    if (careerHighlights.size > 0 && playerIndex) {
+    // During the smooth sweep we highlight each selected player's CURRENT points
+    // (their as-of-date seasons in the active window, so the open season's dot
+    // grows with the cursor) and pin a name label to the live (latest) one — so a
+    // selected player like Ohtani is highlighted and named the moment their season
+    // opens, even before they reach the frontier. (On-frontier seasons already get
+    // their highlight colour + a frontier label, so we skip the extra label there.)
+    // Outside smooth mode we fall back to the player's full-career season dots.
+    const highlightLabels = [];
+    const highlightDrawPoints = [];
+    if (careerHighlights.size > 0) {
         for (const [pid, hcolor] of careerHighlights) {
-            if (!playerIndex.has(pid)) continue;
-            const allSeasons = playerIndex.get(pid)
-                .map(p => ({ x: p[xDim], y: p[yDim], year: p.yearID }))
-                .filter(s => !isNaN(s.x) && !isNaN(s.y));
-            if (!allSeasons.length) continue;
-            g.append("g").attr("class", "career-trail")
-                .selectAll("circle")
-                .data(allSeasons).enter()
-                .append("circle")
-                .attr("class", "career-point")
-                .attr("cx", d => xScale(d.x))
-                .attr("cy", d => yScale(d.y))
-                .attr("r", Math.max(pointRadius + 3, 6))
-                .style("fill", hcolor)
-                .style("stroke", "#ffffff");
+            let pts;
+            if (filters.smooth) {
+                // buildFrontier points carry `.year` (not `.yearID`), `.x`, `.y`.
+                pts = filtered.filter(d => d.playerID === pid && !isNaN(d.x) && !isNaN(d.y));
+                if (pts.length) {
+                    const live = pts.reduce((a, b) => (b.year >= a.year ? b : a));
+                    // Group-career: every member always carries a name label (there's
+                    // no red frontier to label them) and records a trail position.
+                    const onFrontier = frontier.some(fp => fp.playerID === pid && fp.year === live.year);
+                    if (filters.groupCareer || !onFrontier) highlightLabels.push({ x: xScale(live.x), y: yScale(live.y), text: lastNameOf(pid), color: hcolor });
+                    if (filters.groupCareer) {
+                        // Append the player's current career position to its trail, but
+                        // only when the cursor has strictly advanced — the play loop and
+                        // FLIP both re-draw the same cursor, which would dup points.
+                        const hist = groupTrailHistory.get(pid) || [];
+                        const last = hist[hist.length - 1];
+                        if (!last || pbpCursorIdx > last.cursor) {
+                            hist.push({ x: live.x, y: live.y, cursor: pbpCursorIdx });
+                            if (hist.length > GROUP_TRAIL_LEN) hist.shift();
+                            groupTrailHistory.set(pid, hist);
+                        }
+                    }
+                }
+            } else if (playerIndex && playerIndex.has(pid)) {
+                pts = playerIndex.get(pid)
+                    .map(p => ({ x: p[xDim], y: p[yDim], year: p.yearID }))
+                    .filter(s => !isNaN(s.x) && !isNaN(s.y));
+            } else {
+                pts = [];
+            }
+            if (!pts.length) continue;
+            for (const p of pts) highlightDrawPoints.push({ ...p, _highlightColor: hcolor });
         }
     }
 
     const frontierColor = showWorstFrontier ? "#8b5cf6" : null;  // purple for worst, red (CSS) for best
-    g.append("g").selectAll("circle.special-point")
-        .data(special).enter()
-        .append("circle")
-        .attr("class", "special-point")
-        .attr("cx", d => xScale(d.x))
-        .attr("cy", d => yScale(d.y))
-        .attr("r", radiusFor)
-        .style("fill", d => {
-            const careerColor = careerHighlights.get(d.playerID);
-            if (careerColor) return careerColor;
-            if (frontierColor) return frontierColor;          // worst-mode purple
-            // Follow the active Color-by encoding (era / league / bats), same as
-            // the cloud — frontier dots stay distinct via size + the white ring,
-            // not a fixed color, so the encoding isn't misrepresented.
-            return colorOf(d, colorBy, getMeta);
+    // Group-career: paint the fading trails on the fg canvas FIRST (drawTrails clears
+    // it), then composite the head-dots on top (clear:false) so heads always sit over
+    // their tails.
+    if (filters.groupCareer && pointRenderer.fgCanvas) {
+        const trails = [...careerHighlights].map(([pid, color]) => ({ color, points: groupTrailHistory.get(pid) || [] }));
+        pointRenderer.drawTrails(trails, { margin, xScale, yScale, width: 2.5 });
+    }
+    const foregroundDrawPoints = foregroundCloudPoints.map(d => ({ ...d, _regularCloud: true }))
+        .concat(highlightDrawPoints);
+    const headRadius = filters.groupCareer ? 7 : Math.max(pointRadius + 3, 6);
+    pointRenderer.drawForeground(foregroundDrawPoints, {
+        margin, xScale, yScale,
+        radius: d => d._regularCloud ? pointRadius : headRadius,
+        fillFor: d => d._regularCloud ? colorOf(d, colorBy, getMeta) : d._highlightColor,
+        alpha: 1,
+        alphaFor: d => d._regularCloud ? cloudOpacity : 1,
+        strokeFor: d => d._regularCloud ? null : "#ffffff",
+        strokeWidth: 1.5,
+        clear: !filters.groupCareer,               // keep the trails drawn just above
+    });
+    if (!filters.groupCareer && pointRenderer.fgCanvas && !gpuSpring && !gpuGraph && !gpuSeason) {
+        // Frontier dots composite over the fg cloud (no clear). They follow the active
+        // Color-by encoding (era / league / bats), same as the cloud — staying distinct
+        // via size + the white ring, not a fixed colour, so the encoding isn't
+        // misrepresented; career/worst colours win when set. Skipped under gpuSpring/gpuSeason —
+        // the GPU skyline draws the frontier dots itself (from onFront[]).
+        pointRenderer.drawFrontierDots(special, {
+            margin, xScale, yScale, radiusFor,
+            fillFor: d => careerHighlights.get(d.playerID) || frontierColor || colorOf(d, colorBy, getMeta),
+            strokeColor: "#ffffff", strokeWidth: 1.5,
         });
+    } else if ((gpuSpring || gpuGraph || gpuSeason) && pointRenderer && pointRenderer.count) {
+        // The GPU spring / G-track / SA3 season draws the frontier dots itself (spring/season:
+        // the skyline pass over onFront[]; G-track: sceneFront). drawFrontierDots is skipped above,
+        // so the retained legacy `frontier` buffer is NOT refreshed — and present()'s
+        // drawPts("frontier") would otherwise keep re-drawing whatever frontier was last
+        // uploaded by a static/paused (non-spring) frame ON TOP of the animation (the
+        // "previous frontier never clears" bug). Zero it so that draw is a true no-op.
+        pointRenderer.count.frontier = 0;
+    }
+    // GPU compute-accumulate cloud: hand the renderer this frame's event window (from the
+    // JS incremental frontier) + the D3-linear axis mapping, so present() runs the compute
+    // dispatch and draws the cloud vertex-pulled from the per-player counters.
+    if (gpuCloud) {
+        pointRenderer.accumulateCloud({
+            win: frontierResult.gpu,
+            instanceCount: pbpEvt.players.length,
+            scales: gpuScaleUniform(xScale, yScale, margin, width, height, pointRadius, cloudOpacity),
+        });
+    } else if (gpuSeason) {
+        // S-track SA3: hand the GPU the completed-season Pareto frontier (static between open-year
+        // changes) as phantom skyline input, then maintain the open counters/baseline + queue the
+        // mode=1 spring. present() runs the UNION skyline over (open ∪ completed) and draws the
+        // union frontier dots + staircase; the CPU draws are suppressed above.
+        if (pbpFrontierPrepCache) {
+            const theme = document.documentElement.dataset.theme || "";
+            const gpuKey = pbpFrontierPrepCache.key + "|" + colorBy + "|" + theme;
+            if (pbpGpuCompletedCache?.key !== gpuKey) {
+                // Completed-frontier = Pareto sweep of the (deduped) completed season rows. Feeding
+                // only the frontier (not every completed row) is exact: a completed point off the
+                // completed frontier is dominated by one on it, so it can't be on the union frontier.
+                const rows = pbpFrontierPrepCache.filtered;
+                const uniq = [];
+                for (let i = 0; i < rows.length; i++) { const p = rows[i]; if (i === 0 || p.x !== rows[i - 1].x || p.y !== rows[i - 1].y) uniq.push(p); }
+                const cf = sweepFrontier(uniq);
+                const nC = Math.min(cf.length, WEBGPU_MAX_COMPLETED);
+                const positions = new Float32Array(nC * 2), colors = new Uint32Array(nC);
+                for (let i = 0; i < nC; i++) {
+                    positions[i * 2] = cf[i].x; positions[i * 2 + 1] = cf[i].y;
+                    colors[i] = packColorRGBA(colorOf(cf[i], colorBy, getMeta), 1);
+                }
+                pbpGpuCompletedCache = { key: gpuKey, positions, colors };
+            }
+            pointRenderer.uploadCompletedFrontier(pbpGpuCompletedCache.positions, pbpGpuCompletedCache.colors, gpuKey);
+        }
+        // Expose the CPU union frontier (the app's reference) for the SA3 verify oracle.
+        window.__bl2d_lastSeasonUnionFrontier = frontier.map(p => [p.x, p.y]);
+        const cur = Math.max(pbpEvt.winStart, Math.min(pbpEvt.winEnd, pbpCursorIdx));
+        const start = pbpEvt.seasonStartByYear.get(pbpEvt.yearOf[cur]);
+        if (start != null) pointRenderer.accumulateSeasonCloud({
+            cursor: cur, start,
+            scales: gpuScaleUniform(xScale, yScale, margin, width, height, pointRadius, cloudOpacity),
+        });
+    }
+    // On-chart frontier labels: greedy collision avoidance, mobile shows only the two
+    // extreme endpoints. Computed HERE (before present) because under gpuGraph the GPU
+    // glyph text must be uploaded before the render pass; the SVG leader/label appends
+    // below reuse the same `labels`. HV radius applies only to .special-point.
+    const labelRadius = hvEncodingEnabled ? FRONTIER_R_MAX : frontierRadius;
+    const labels = filters.groupCareer ? [] : layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, labelRadius, width < 480);
+    // G3: under gpuGraph the axis tick labels + frontier names render from the GPU glyph
+    // atlas (the leader LINES + axis TITLES + tick MARKS stay SVG). Build + upload the
+    // glyph instances before present(); the SVG text is suppressed (class + !gpuGraph gate).
+    if (gpuGraph && typeof pointRenderer.uploadText === "function") {
+        const t = buildTextInstances(pointRenderer, {
+            xScale, yScale, margin, plotW, plotH, labels, isSmall: width < 480,
+            xDim, yDim, xSign, ySign });
+        pointRenderer.uploadText(t.instances, { count: t.count, strings: t.strings, charset: t.charset });
+        window.__bl2d_gpuGraphText = { count: t.count, expected: t.expected, strings: t.strings };
+        window.__bl2d_gpuGraphTicks = t.tickStrings;
+    }
+    // Composite the accumulated layers (no-op for Canvas 2D, which painted as it went;
+    // the WebGPU backend submits its single render pass here).
+    pointRenderer.present();
 
     // FLIP: animate dots from their previous screen positions to the new ones.
     // Hit circles (tooltip targets) are updated instantly — they must match the
@@ -2702,8 +6598,10 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     }
 
     // Fade in staircase and shade on interactive changes only — during animation
-    // playback the boundary updates every 400ms so fading from 0 each tick strobes.
-    if (FLIP_DURATION > 0 && !animTimer) {
+    // playback the boundary updates every tick, so fading from 0 each time strobes.
+    // This applies to BOTH the old ▶ animation (animTimer) and the smooth/group-career
+    // cursor (filters.smooth, driven by pbpRaf) — suppress the fade in either.
+    if (FLIP_DURATION > 0 && !animTimer && !filters.smooth) {
         const newStair = svg.select("path.frontier-staircase");
         const newStairD = newStair.node() ? newStair.node().getAttribute("d") : null;
         newStair
@@ -2734,14 +6632,8 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         }
     }
 
-    // On-chart frontier labels: greedy collision avoidance, mobile shows
-    // only the two extreme endpoints so small viewports stay readable.
-    // HV radius applies only to .special-point; career-trail dots stay at the
-    // constant size set by pointRadius+3 so the gold layer remains a clean
-    // per-season encoding.
-    const labelRadius = hvEncodingEnabled ? FRONTIER_R_MAX : frontierRadius;
-    const labels = layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, labelRadius, width < 480);
-    // Leader lines for dodged labels (drawn under the text).
+    // Leader lines for dodged labels (drawn under the text). `labels` was computed
+    // before present() (the GPU glyph text needs it uploaded before the render pass).
     g.append("g")
         .attr("class", "frontier-leaders")
         .selectAll("line")
@@ -2752,7 +6644,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         .attr("y1", d => d.leader.y1)
         .attr("x2", d => d.leader.x2)
         .attr("y2", d => d.leader.y2);
-    g.append("g")
+    if (!gpuGraph) g.append("g")
         .attr("class", "frontier-labels")
         .selectAll("text")
         .data(labels).enter()
@@ -2763,12 +6655,31 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         .attr("text-anchor", d => d.anchor)
         .text(d => d.text);
 
+    // Persistent name labels for selected players during the smooth sweep (their
+    // live, off-frontier point). White halo via paint-order so they read over the
+    // dimmed cloud; coloured to match the player's highlight.
+    if (highlightLabels.length) {
+        g.append("g").attr("class", "highlight-labels")
+            .selectAll("text")
+            .data(highlightLabels).enter()
+            .append("text")
+            .attr("class", "frontier-label")
+            .attr("x", d => d.x + 9)
+            .attr("y", d => d.y + 4)
+            .attr("text-anchor", "start")
+            .style("fill", d => d.color)
+            .style("paint-order", "stroke")
+            .style("stroke", "#ffffff")
+            .style("stroke-width", "3px")
+            .text(d => d.text);
+    }
+
     // Isolation ring: precompute nearest-neighbour distance (pixel space) for each
     // frontier point. Drawn on hover; locked in place by click.
     const isoRingColor = d => showWorstFrontier ? "#8b5cf6"
         : (COLOR_PALETTES.league[d.lgID] || COLOR_PALETTES.league.unknown).dark;
     const isolationMap = new Map();
-    for (const fp of frontier) {
+    if (!lite) for (const fp of frontier) {
         const fpx = xScale(fp.x), fpy = yScale(fp.y);
         let minDist = Infinity, nearestPoint = null;
         for (const q of unique) {
@@ -2785,9 +6696,32 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     const ringGroup = g.append("g").attr("class", "isolation-ring-group");
     const regretGroup = g.append("g").attr("class", "regret-line-group");
 
+    // G5b/c — under the G-track, the on-canvas hover overlays (regret leader line, regret
+    // distance ring, isolation ring) are drawn by the GPU (webgpu-graph.js) instead of SVG.
+    // pushGpuInteraction writes the line/rings into the GPU interaction buffers and schedules
+    // a single coalesced re-present; the SVG branches below are suppressed when gpuGraph is
+    // on, so nothing is double-drawn. No-op (SVG path runs) when the GPU graph is inactive.
+    const gpuInteract = gpuGraph && typeof pointRenderer.uploadInteraction === "function";
+    const RGB5a = (hex, a) => { const c = d3.color(hex); return c ? [c.r / 255, c.g / 255, c.b / 255, a] : [0.353, 0.392, 0.471, a]; };
+    const pushGpuInteraction = (state) => {
+        if (!gpuInteract) return;
+        pointRenderer.uploadInteraction(state);
+        pointRenderer.presentInteraction();
+    };
+    const clearGpuInteraction = () => pushGpuInteraction({ line: null, rings: [] });
+    // G5e — the GPU interaction buffers are RETAINED scene state (they outlive a refresh,
+    // unlike the SVG overlay groups which are rebuilt empty each render). So on every render
+    // we reset the transient hover overlays to empty; the main present() at the end of this
+    // function reflects the cleared state, so a hover ring/leader can't linger after a filter
+    // change or zoom. (No presentInteraction here — the trailing present() does the draw.)
+    // PINNED state persists through a different channel: the career-HV polygon redraws from
+    // `careerHighlights` (SVG, below) and rides the `hl=` hash, so deep-links restore it.
+    if (gpuInteract) pointRenderer.uploadInteraction({ line: null, rings: [] });
+
     // When players are career-highlighted, show the combined polygon for what
-    // the frontier loses if all their seasons were removed.
-    if (careerHighlights.size > 0) {
+    // the frontier loses if all their seasons were removed. Skipped in group-career
+    // mode — there's no background frontier to measure "loss" against there.
+    if (careerHighlights.size > 0 && !filters.groupCareer && !lite) {
         const highlightedPids = new Set(careerHighlights.keys());
         const frSeasons = frontier.filter(p => highlightedPids.has(p.playerID));
         if (frSeasons.length > 0) {
@@ -2843,13 +6777,22 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         ringGroup.select(".isolation-ring--hover").remove();
         hvRectGroup.selectAll(".hv-contrib-overlay--hover").remove();
         regretGroup.selectAll(".regret-line--hover").remove();
+        clearGpuInteraction();               // G5b/c — clear prior GPU overlays before re-deciding
         if (!tooltipPinned && frontierSet.has(d)) {
             const iso = isolationMap.get(d);
             if (iso && iso.r > 0) {
-                ringGroup.append("circle")
-                    .attr("class", "isolation-ring isolation-ring--hover")
-                    .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
-                    .style("stroke", isoRingColor(d));
+                if (gpuInteract) {
+                    // G5c — isolation ring on the GPU: DATA-space centre (d), pixel radius
+                    // (iso.r), per-point colour (isoRingColor), dasharray 5 4 (period 9, 5/9).
+                    pushGpuInteraction({ line: null, rings: [{
+                        cx: d.x, cy: d.y, radiusPx: iso.r, widthPx: 1.5,
+                        color: RGB5a(isoRingColor(d), 0.35), period: 9, dashFrac: 5 / 9 }] });
+                } else {
+                    ringGroup.append("circle")
+                        .attr("class", "isolation-ring isolation-ring--hover")
+                        .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
+                        .style("stroke", isoRingColor(d));
+                }
             }
             // Re-sweep without d, shade the polygon of area d exclusively controls.
             if (hvByPoint.has(d)) {
@@ -2858,12 +6801,7 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             }
         }
         if (!tooltipPinned && !frontierSet.has(d)) {
-            if (regretInfo && regretInfo.dist > 0) {
-                regretGroup.append("line")
-                    .attr("class", "regret-line regret-line--hover")
-                    .attr("x1", xScale(d.x)).attr("y1", yScale(d.y))
-                    .attr("x2", xScale(regretInfo.targetX)).attr("y2", yScale(regretInfo.targetY));
-            }
+            const hasLine = !!(regretInfo && regretInfo.dist > 0);
             // Ring to nearest frontier corner in screen space.
             let minPx = Infinity;
             for (const fp of frontier) {
@@ -2871,11 +6809,27 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
                 const px = Math.sqrt(dx * dx + dy * dy);
                 if (px < minPx) minPx = px;
             }
-            if (isFinite(minPx) && minPx > 0) {
-                regretGroup.append("circle")
-                    .attr("class", "regret-ring regret-line--hover")
-                    .attr("cx", xScale(d.x)).attr("cy", yScale(d.y))
-                    .attr("r", minPx);
+            const hasRing = isFinite(minPx) && minPx > 0;
+            if (gpuInteract) {
+                // G5b — regret leader (data-space endpoints) + distance ring (data-space
+                // centre, pixel radius) on the GPU. Dasharray 4 3 (period 7, 4/7); #5a6478.
+                pushGpuInteraction({
+                    line: hasLine ? { srcX: d.x, srcY: d.y, tgtX: regretInfo.targetX, tgtY: regretInfo.targetY, hasLine: true } : null,
+                    rings: hasRing ? [{ cx: d.x, cy: d.y, radiusPx: minPx, widthPx: 1.5, color: RGB5a("#5a6478", 0.35), period: 7, dashFrac: 4 / 7 }] : [],
+                });
+            } else {
+                if (hasLine) {
+                    regretGroup.append("line")
+                        .attr("class", "regret-line regret-line--hover")
+                        .attr("x1", xScale(d.x)).attr("y1", yScale(d.y))
+                        .attr("x2", xScale(regretInfo.targetX)).attr("y2", yScale(regretInfo.targetY));
+                }
+                if (hasRing) {
+                    regretGroup.append("circle")
+                        .attr("class", "regret-ring regret-line--hover")
+                        .attr("cx", xScale(d.x)).attr("cy", yScale(d.y))
+                        .attr("r", minPx);
+                }
             }
         }
     };
@@ -2885,7 +6839,34 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         ringGroup.select(".isolation-ring--hover").remove();
         hvRectGroup.selectAll(".hv-contrib-overlay--hover").remove();
         regretGroup.selectAll(".regret-line--hover").remove();
+        clearGpuInteraction();               // G5b/c — clear the GPU hover overlays
     };
+    // G5 verification seam: drive a hover headlessly (the live cursor can't be scripted
+    // through CDP reliably). `which` = "front" | "non" picks a sample frontier / non-frontier
+    // point from the current scene; sets the matching __bl2d_*Expect for the verify hook and
+    // returns its data coords. A no-op shim in non-interactive frames (showTooltip undefined).
+    window.__bl2d_simHover = (which) => {
+        let sample;
+        if (which === "front") {
+            sample = frontier[Math.floor(frontier.length / 2)];
+        } else {
+            // A representative interior (non-frontier) point near the cloud's upper-right —
+            // far enough from the origin to show a clear regret leader to the frontier.
+            const nonFront = unique.filter(p => !frontierSet.has(p) && (p.x > 0 || p.y > 0));
+            nonFront.sort((a, b) => (a.x + a.y) - (b.x + b.y));
+            sample = nonFront[Math.floor(nonFront.length * 0.92)] || nonFront[nonFront.length - 1];
+        }
+        if (!sample) return null;
+        if (frontierSet.has(sample)) {
+            const iso = isolationMap.get(sample);
+            window.__bl2d_ringExpect = iso ? { cx: sample.x, cy: sample.y, radiusPx: iso.r } : null;
+        } else {
+            window.__bl2d_regretExpect = { srcX: sample.x, srcY: sample.y, hasLine: false };
+        }
+        showTooltip({ clientX: 300, clientY: 300 }, sample);
+        return { x: sample.x, y: sample.y, isFront: frontierSet.has(sample) };
+    };
+    window.__bl2d_simHoverOut = () => hideTooltip(true);
 
     // Brush layer: drag a rectangle on empty chart area to zoom in. Mounted
     // BEFORE the hit circles so dot clicks still go to their handlers
@@ -2950,27 +6931,56 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             .on("mouseup.cursor",   function() { this.style.cursor = "grab"; });
     }
 
-    g.append("g").selectAll("circle.hit")
-        .data(unique).enter()
-        .append("circle")
-        .attr("class", "hit")
-        .attr("cx", d => xScale(d.x))
-        .attr("cy", d => yScale(d.y))
-        .attr("r", hoverRadius)
+    // Hover/click hit-testing — skipped on lite (animation) frames; rebuilt on the
+    // idle full render so tooltips and click-to-pin work once the cursor settles.
+    if (!lite) {
+    const hitPoints = unique.map(d => ({ ...d, sx: xScale(d.x), sy: yScale(d.y), ref: d }));
+    const hitTree = d3.quadtree()
+        .x(d => d.sx)
+        .y(d => d.sy)
+        .addAll(hitPoints);
+    let hoverTarget = null;
+    const nearestHit = (event, node) => {
+        const [mx, my] = d3.pointer(event, node);
+        const hit = hitTree.find(mx, my, hoverRadius);
+        return hit ? hit.ref : null;
+    };
+    const hitSurface = g.append("rect")
+        .attr("class", "hit-surface")
+        .attr("width", plotW)
+        .attr("height", plotH)
         .attr("fill", "transparent")
-        .style("cursor", "pointer")
-        .on("mouseover", showTooltip)
-        .on("mousemove", (event) => positionTooltip(event, tooltip))
-        .on("mouseout", hideTooltip)
-        .on("touchstart", showTooltip, { passive: true })
-        .on("click", (event, d) => {
+        .style("cursor", "default")
+        .on("mousemove", function(event) {
+            const d = nearestHit(event, this);
+            hoverTarget = d;
+            this.style.cursor = d ? "pointer" : "default";
+            if (d) showTooltip(event, d);
+            else hideTooltip();
+        })
+        .on("mouseleave", () => {
+            hoverTarget = null;
+            hideTooltip();
+        })
+        .on("touchstart", function(event) {
+            const d = nearestHit(event, this);
+            if (d) showTooltip(event, d);
+            else hideTooltip();
+        }, { passive: true })
+        .on("click", function(event) {
+            const d = nearestHit(event, this) || hoverTarget;
+            if (!d) {
+                hideTooltip(true);
+                return;
+            }
             tooltipPinned = true;
             event.stopPropagation();
             if (frontierSet.has(d)) {
                 // Clear any hover ring when clicking
                 ringGroup.selectAll(".isolation-ring--hover").remove();
-                // Season mode: also add career highlight
-                if (mode === "season") {
+                // Season mode: also add career highlight (not in group-career —
+                // the clicked head is already a member; tooltip is enough there).
+                if (mode === "season" && !filters.groupCareer) {
                     const seasons = filtered
                         .filter(p => p.x === d.x && p.y === d.y)
                         .sort((a, b) => b.year - a.year);
@@ -2982,11 +6992,14 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
             }
             showTooltip(event, d);
         });
+    }
 
     // Hide tooltip on any tap outside a point (mobile).
-    document.addEventListener("touchstart", (event) => {
+    if (!lite) document.addEventListener("touchstart", (event) => {
         if (!event.target.closest("#scatter-plot")) hideTooltip();
     }, { passive: true });
+    const frameEnd = performance.now();
+    recordPbpFrameTiming(frameEnd - frameStart, modelReady - frameStart, frameEnd - modelReady, !!filters.smooth);
 }
 
 
@@ -3003,34 +7016,6 @@ function positionTooltip(event, tooltip) {
     if (y + ttRect.height + pad > vh) y = vh - ttRect.height - pad;
     tooltip.style.left = x + "px";
     tooltip.style.top = y + "px";
-}
-
-function drawIsolationRingPinned(ringGroup, iso, color, plotW, plotH) {
-    // Thin line from frontier centre to nearest neighbour
-    ringGroup.append("line")
-        .attr("class", "isolation-ring-spoke")
-        .attr("x1", iso.cx).attr("y1", iso.cy)
-        .attr("x2", iso.nx).attr("y2", iso.ny)
-        .style("stroke", color);
-    // The ring itself
-    ringGroup.append("circle")
-        .attr("class", "isolation-ring isolation-ring--pinned")
-        .attr("cx", iso.cx).attr("cy", iso.cy).attr("r", iso.r)
-        .style("stroke", color);
-    // Small marker dot at the nearest neighbour
-    ringGroup.append("circle")
-        .attr("class", "isolation-ring-neighbour")
-        .attr("cx", iso.nx).attr("cy", iso.ny).attr("r", 4)
-        .style("fill", color);
-    // // "Loneliness Radius" label: place along the spoke, clamped inside the chart.
-    // const labelAngle = -Math.PI / 4; // 45° top-right
-    // const lx = Math.min(Math.max(iso.cx + iso.r * Math.cos(labelAngle), 4), plotW - 4);
-    // const ly = Math.min(Math.max(iso.cy + iso.r * Math.sin(labelAngle), 14), plotH - 4);
-    // ringGroup.append("text")
-    //     .attr("class", "isolation-ring-label")
-    //     .attr("x", lx).attr("y", ly)
-    //     .style("fill", color)
-    //     .text("Loneliness Radius");
 }
 
 function escapeHtml(s) {
@@ -3166,6 +7151,129 @@ function layoutFrontierLabels(frontier, xScale, yScale, plotW, plotH, pointR, is
     svgNode.removeChild(measurer);
     recordOverlaps(placed);
     return out;
+}
+
+// G3/G6e (GPU text): turn this refresh's axis tick labels, frontier player labels AND axis
+// titles into glyph instances for the GPU atlas pipeline (webgpu-graph.js). Tick generation
+// (d3 .ticks()/.tickFormat() — exactly what d3.axisBottom/Left use) and label layout
+// (layoutFrontierLabels, reused verbatim) stay CPU; this only lays the resulting strings
+// into atlas-metric glyph quads. Variant 0 = ticks (--text-muted), 1/2 = frontier labels
+// (--mlb-blue, with a white halo), 3 = axis titles (--text; the Y rotated -90° via the
+// per-glyph (cos,sin) in the record). Returns the packed Float32Array + verify metadata.
+function buildTextInstances(renderer, { xScale, yScale, margin, plotW, plotH, labels, isSmall, xDim, yDim, xSign, ySign }) {
+    const root = getComputedStyle(document.documentElement);
+    const tickColor = packColorRGBA((root.getPropertyValue("--text-muted") || "#5a6478").trim(), 1);
+    const labelColor = packColorRGBA((root.getPropertyValue("--mlb-blue") || "#002d72").trim(), 1);
+    const titleColor = packColorRGBA((root.getPropertyValue("--text") || "#0a0f1c").trim(), 1);
+    const haloColor = packColorRGBA("#ffffff", 1);
+
+    // d3-axis default tick values + format (same n as the SVG axes use).
+    const nx = Math.max(4, Math.floor(plotW / 80)), ny = Math.max(4, Math.floor(plotH / 50));
+    const xFmt = xScale.tickFormat(nx), yFmt = yScale.tickFormat(ny);
+    const xTicks = xScale.ticks(nx), yTicks = yScale.ticks(ny);
+    const tickStrings = { x: xTicks.map(xFmt), y: yTicks.map(yFmt) };
+    window.__bl2d_liveScales = { xScale, yScale, nx, ny };   // for the headless tick verify
+
+    // Items: { text, x, y (baseline, full px), anchor, variant, color, halo }.
+    const items = [];
+    // X ticks: centered, baseline below the axis (d3 dy:0.71em ≈ +8px past tickSize+pad=9).
+    for (let i = 0; i < xTicks.length; i++)
+        items.push({ text: tickStrings.x[i], x: margin.left + xScale(xTicks[i]),
+            y: margin.top + plotH + 17, anchor: "middle", variant: 0, color: tickColor, halo: false });
+    // Y ticks: right-aligned at x=-9 (tickSize+pad), baseline at +3.5 (dy:0.32em) to center.
+    for (let i = 0; i < yTicks.length; i++)
+        items.push({ text: tickStrings.y[i], x: margin.left - 9,
+            y: margin.top + yScale(yTicks[i]) + 3.5, anchor: "end", variant: 0, color: tickColor, halo: false });
+    // Frontier labels (layout x/y are plot-local; y is the baseline). Halo + fill.
+    const labelVariant = isSmall ? 2 : 1;
+    for (const L of labels)
+        items.push({ text: L.text, x: margin.left + L.x, y: margin.top + L.y,
+            anchor: L.anchor, variant: labelVariant, color: labelColor, halo: true });
+
+    // G6e — axis titles (the last chart text to leave SVG → the chart is now 100% GPU
+    // text). Each title is laid out in a LOCAL frame centred at its origin, then placed by
+    // a per-glyph affine (cos/sin/tx/ty) the glyph shader replays on every quad corner: the
+    // X-title flat (cos 1, sin 0), the Y-title rotated -90° (cos 0, sin -1) to match the
+    // SVG's rotate(-90). The "  ▾" caret renders muted, the name in --text — same paint as
+    // the SVG titles, whose <text> nodes survive (invisible) as the click/glossary target.
+    const titleVariant = 3;
+    const titles = (xDim && yDim) ? [
+        {   // X-axis title — centred under the axis (SVG: x=plotW/2, y=plotH+36).
+            runs: [{ text: xSign === -1 ? `${xDim} ↓` : xDim, color: titleColor },
+                   { text: "  ▾", color: tickColor }],
+            cos: 1, sin: 0, tx: margin.left + plotW / 2, ty: margin.top + plotH + 36 },
+        {   // Y-axis title — rotated -90° about a centre 38px left of the y-axis
+            //   (SVG: rotate(-90) then x=-plotH/2, y=-38 → page (left-38, top+plotH/2)).
+            runs: [{ text: ySign === -1 ? `${yDim} ↓` : yDim, color: titleColor },
+                   { text: "  ▾", color: tickColor }],
+            cos: 0, sin: -1, tx: margin.left - 38, ty: margin.top + plotH / 2 },
+    ] : [];
+
+    // Charset union → ensure the atlas covers it, then read its metrics.
+    let charset = "";
+    for (const it of items) charset += it.text;
+    for (const T of titles) for (const r of T.runs) charset += r.text;
+    const metrics = renderer.ensureGlyphAtlas(Array.from(new Set(Array.from(charset))).join(""));
+
+    // Lay each string into glyph quads. Two instances per halo glyph (halo then fill).
+    const recs = [];   // each: [x,y,w,h,u0,v0,u1,v1,colorBits,cos,sin]
+    const push = (m, penX, baseY, uv, color) => recs.push([
+        penX - m.padCss, baseY - m.ascCss - m.padCss, m.w, m.h, uv[0], uv[1], uv[2], uv[3], color, 1, 0]);
+    const strings = [];
+    let expected = 0;   // ideal glyph count: every codepoint a fill, +1 for halo'd glyphs
+    for (const it of items) {
+        strings.push(it.text);
+        const chars = Array.from(it.text);
+        expected += chars.length * (it.halo ? 2 : 1);
+        let total = 0;
+        for (const ch of chars) { const m = metrics.get(it.variant * 0x10000 + ch.codePointAt(0)); if (m) total += m.advance; }
+        let penX = it.anchor === "middle" ? it.x - total / 2 : it.anchor === "end" ? it.x - total : it.x;
+        for (const ch of chars) {
+            const m = metrics.get(it.variant * 0x10000 + ch.codePointAt(0));
+            if (!m) continue;
+            if (it.halo) push(m, penX, it.y, [m.hu0, m.hv0, m.hu1, m.hv1], haloColor);
+            push(m, penX, it.y, [m.u0, m.v0, m.u1, m.v1], it.color);
+            penX += m.advance;
+        }
+    }
+    // Axis titles (variant 3): centre each across all its runs at local x=0, baseline at
+    // local y=0, then place each glyph's local top-left through the title's affine. The
+    // SAME (cos,sin) rides into the record so the shader rotates the quad-corner offsets
+    // identically. No halo — titles sit over the plain margin.
+    for (const T of titles) {
+        let W = 0;
+        for (const r of T.runs) for (const ch of Array.from(r.text)) {
+            const m = metrics.get(titleVariant * 0x10000 + ch.codePointAt(0)); if (m) W += m.advance;
+        }
+        let penX = -W / 2;
+        for (const r of T.runs) {
+            strings.push(r.text);
+            const chars = Array.from(r.text);
+            expected += chars.length;   // one fill instance per glyph (no halo)
+            for (const ch of chars) {
+                const m = metrics.get(titleVariant * 0x10000 + ch.codePointAt(0));
+                if (!m) continue;
+                const gx = penX - m.padCss, gy = -m.ascCss - m.padCss;   // local top-left corner
+                const sx = T.tx + gx * T.cos - gy * T.sin;               // affine place (matches shader)
+                const sy = T.ty + gx * T.sin + gy * T.cos;
+                recs.push([sx, sy, m.w, m.h, m.u0, m.v0, m.u1, m.v1, r.color, T.cos, T.sin]);
+                penX += m.advance;
+            }
+        }
+    }
+    // Pack to the 3·vec4 (12 float) record layout; colour bits go in float slot 8,
+    // the rotation (cos,sin) in slots 9,10 (slot 11 unused).
+    const count = recs.length;
+    const f32 = new Float32Array(count * 12);
+    const u32 = new Uint32Array(f32.buffer);
+    for (let i = 0; i < count; i++) {
+        const r = recs[i], b = i * 12;
+        f32[b] = r[0]; f32[b + 1] = r[1]; f32[b + 2] = r[2]; f32[b + 3] = r[3];
+        f32[b + 4] = r[4]; f32[b + 5] = r[5]; f32[b + 6] = r[6]; f32[b + 7] = r[7];
+        u32[b + 8] = r[8];
+        f32[b + 9] = r[9]; f32[b + 10] = r[10];
+    }
+    return { instances: f32, count, strings, charset, tickStrings, expected };
 }
 
 
@@ -3359,6 +7467,15 @@ function enableSpotlightDrag(card, handle, pid) {
 // For each frontier point, re-sweeps `unique` excluding that point to find
 // the actual replacement frontier (cloud points may fill in), then takes
 // ΔHV = totalHv − altHv. O(F × N), F = frontier length, N = unique points.
+// Hypervolume (HV) and per-point HV CONTRIBUTION — the numbers that size the frontier
+// dots and rank the leaderboard. HV is the area of the region dominated by the frontier,
+// measured from a reference point R just below-left of the whole cloud: a frontier that
+// pushes further out (more HR AND more SB) dominates more area, so HV is a single scalar
+// for "how good is this frontier overall". A point's CONTRIBUTION is how much HV would be
+// LOST if it were removed (HV(frontier) − HV(frontier without it)) — i.e. the area only
+// IT dominates. That's the principled way to say which frontier members are most
+// singular (a lopsided record-holder contributes a lot; a point hugging its neighbours
+// contributes little). All math is in canonical (sign-folded) space so "more is better".
 function computeHvContributions(frontier, xSign, ySign, unique) {
     if (!frontier || frontier.length === 0) {
         return { refPoint: { x: 0, y: 0 }, totalHv: 0, items: [] };
@@ -3372,18 +7489,24 @@ function computeHvContributions(frontier, xSign, ySign, unique) {
         if (sx > xMaxS) xMaxS = sx;
         if (sy > yMaxS) yMaxS = sy;
     }
+    // Reference point R: nudged just BELOW-LEFT of the universe's min corner (by a tiny
+    // epsilon) so even the lowest frontier point encloses a sliver of positive area —
+    // otherwise a point sitting exactly on the min edge would contribute 0 and vanish.
     const epsX = Math.max(1e-9, (xMaxS - xMinS) * 1e-6);
     const epsY = Math.max(1e-9, (yMaxS - yMinS) * 1e-6);
     const Rx = xMinS - epsX;
     const Ry = yMinS - epsY;
     const refPoint = { x: Rx * xSign, y: Ry * ySign };
 
-    // 2D hypervolume via vertical strip decomposition.
-    // fr must be sorted by x*xSign ascending, y*ySign non-increasing.
+    // 2D hypervolume via vertical-strip decomposition. With the frontier sorted by
+    // canonical X ascending (Y therefore descending), each point owns a strip from the
+    // previous point's X to its own, of height (its Y − R.y). Summing the strips gives the
+    // total dominated area in one O(frontier) pass — no overlap, no double-counting,
+    // because the staircase is monotone. (fr must be in canonical-X-ascending order.)
     function hvOf(fr) {
         let hv = 0, xPrev = Rx;
         for (const p of fr) {
-            hv += (p.x * xSign - xPrev) * (p.y * ySign - Ry);
+            hv += (p.x * xSign - xPrev) * (p.y * ySign - Ry);   // strip width × height
             xPrev = p.x * xSign;
         }
         return hv;

@@ -1,0 +1,2500 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// webgpu-graph.js — the G-track: full-GPU rendering of the STATIC chart.
+// Phase G0: a retained-scene dot renderer (docs/rendering.md).
+//
+// WHY A SECOND FILE. script.js already carries the streaming WebGPU engine
+// (Phases 1–5: accumulate → spring → skyline → staircase) and is ~6,900 lines.
+// The G-track adds a *general* GPU path for every static season/career view, and
+// it grows through G6 (frontier compute, HV, glyph-atlas text, overlays). Keeping
+// it in its own file keeps script.js reviewable and keeps the G-track's blast
+// radius visible: script.js only gains tiny optional-chained hooks
+// (`this._drawGraphScene?.(rp)` etc.) that are no-ops when this file is absent.
+// The bundler inlines this file exactly like tour.js (scripts/build_bundle.py).
+//
+// THE BIG IDEA — A RETAINED SCENE IN DATA SPACE. The shipped Phase-3 point path
+// re-flattens every visible point into a PIXEL-space instance buffer on every
+// refresh (`_uploadPoints`: px = margin.left + xScale(d.x) on the CPU, 24 bytes
+// per point, re-uploaded each time). That couples the upload to the current
+// scale: any zoom, pan, or resize must re-upload the whole cloud. The G-track
+// inverts the contract:
+//
+//   • the point set is uploaded ONCE per *identity* change (filters/mode/axes/
+//     colors changed → different points → re-upload), in DATA units — a season's
+//     (HR, SB) goes up as (73.0, 138.0), not as pixels;
+//   • the data→pixel mapping lives in a tiny uniform (`uScene`, 64 bytes) written
+//     every refresh: px = slopeX·x + interceptX (the affine form of the D3 linear
+//     scale, margin folded into the intercept — same trick as gpuScaleUniform);
+//   • so a zoom/resize/pan is a 64-byte uniform write + re-present. The position
+//     buffer never crosses the bus again.
+//
+// This is also the unification seam with the streaming engine: the spring engine
+// already keeps its positions in data space on the GPU (`bPos`, written by the
+// spring integrator). A "scene" is just {pos, color, size, n} + uScene — whether
+// pos was UPLOADED (static, this file) or COMPUTED (streaming, script.js) is a
+// detail the downstream passes don't care about. The G5 convergence makes that
+// literal; until then the two paths share zero code on purpose (the design's
+// "never edits the streaming present() before G5" guarantee).
+//
+// BUFFER LAYOUT — SoA (structure-of-arrays), not interleaved. Three parallel
+// buffers instead of one 24-byte record stream:
+//     bPos  : array<vec2<f32>>  data-space (x, y)        8 B/point
+//     bCol  : array<u32>        packed RGBA8 fill        4 B/point
+//     bSize : array<f32>        dot radius in CSS px     4 B/point
+// Why SoA: the G1 skyline pass will read ONLY positions (a dominance compare
+// touches no colors — SoA keeps it cache-dense and lets the same bPos feed both
+// compute and render); a re-color (theme/encoding change) rewrites 4 B/point
+// without touching positions; and it matches the streaming engine's layout so
+// the G5 aliasing (spring bPos ⇒ scene bPos) is a bind-group swap, not a repack.
+//
+// WHAT G0 COVERS. The static background cloud (the non-frontier points) under
+// ?renderer=webgpu&gpugraph=1. Frontier dots, highlight heads, axes, labels,
+// staircase, shade all stay on their current (Phase-3 instances + SVG) paths —
+// they migrate in G1–G4. The visual output must be indistinguishable from the
+// Phase-3 path; what changes is WHERE the positions live and WHEN they upload.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// WGSL: the scene cloud. Vertex-pulled instanced quads like WEBGPU_POINTS_WGSL,
+// but positions arrive in DATA units and are mapped to pixels HERE, per vertex,
+// from the uScene uniform — the GPU-side half of the retained-scene contract.
+//
+// uScene layout (64 B = 4 × vec4<f32>; uniform buffers round to 16-byte rows):
+//   ab   = (slopeX, interceptX, slopeY, interceptY)   data → CSS px, margin folded in
+//   vp   = (vpW, vpH, dpr, 0)                         CSS-px viewport (dpr is texture-
+//                                                     resolution only; NDC math is CSS px,
+//                                                     matching uViewport in script.js)
+//   sgn  = (xSign, ySign, 0, 0)                       reserved for G1's sign-aware skyline
+//   corn = (antiX, antiY, idealX, idealY)             reserved for G2's HV shade corners
+// G0 writes ab+vp and zeroes the reserved rows; declaring the full 64 B NOW means
+// G1/G2 only ADD fields the shaders start reading — no layout migration later.
+const WEBGPU_SCENECLOUD_WGSL = `
+struct Scene {
+  ab:   vec4<f32>,
+  vp:   vec4<f32>,
+  sgn:  vec4<f32>,
+  corn: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> pos:  array<vec2<f32>>;  // DATA space
+@group(0) @binding(2) var<storage, read> col:  array<u32>;        // packed RGBA8
+@group(0) @binding(3) var<storage, read> size: array<f32>;        // radius, CSS px
+@group(0) @binding(4) var<storage, read> onFront: array<u32>;     // G1: skyline verdicts
+
+struct VSOut {
+  @builtin(position) clip: vec4<f32>,
+  @location(0) off: vec2<f32>,                    // px offset from dot centre
+  @location(1) @interpolate(flat) fill: u32,
+  @location(2) @interpolate(flat) radius: f32,
+};
+// Two CCW triangles covering the [-1,1]² quad (same table as the points shader).
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(-1.0,1.0),
+  vec2<f32>(-1.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>( 1.0,1.0));
+fn unpack(c: u32) -> vec4<f32> {
+  return vec4<f32>(f32(c & 0xffu), f32((c >> 8u) & 0xffu),
+                   f32((c >> 16u) & 0xffu), f32((c >> 24u) & 0xffu)) / 255.0;
+}
+// A degenerate (off-clip, zero-area) vertex: the rasterizer culls the whole quad.
+// The same trick the streaming spring-cloud uses for its two-pass front/non-front
+// split: skipping instances in the SHADER keeps one draw call and one buffer —
+// no CPU-side partitioning, no index buffer, no second upload.
+fn degenerate() -> VSOut {
+  var o: VSOut;
+  o.clip = vec4<f32>(2.0, 2.0, 0.0, 1.0);
+  o.off = vec2<f32>(0.0, 0.0);
+  o.fill = 0u;
+  o.radius = 0.0;
+  return o;
+}
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  // G1: the scene now holds the FULL deduped cloud (frontier included) so the
+  // skyline pass can judge every point, but visually the frontier dots are still
+  // drawn by the CPU path (drawFrontierDots) until G2 — so on-front instances
+  // degenerate here and the visible output stays exactly G0's non-front cloud.
+  if (onFront[ii] != 0u) { return degenerate(); }
+  let p = pos[ii];
+  // DATA → CSS px, the affine map the CPU used to do per point per refresh.
+  // This one multiply-add is why zoom/resize no longer re-uploads the cloud.
+  let px = sc.ab.x * p.x + sc.ab.y;
+  let py = sc.ab.z * p.y + sc.ab.w;
+  let r = size[ii];
+  let corner = C[vi];
+  // CSS px → NDC: x/vp*2-1, and a Y flip (pixel y grows DOWN, NDC y grows UP).
+  let cx = px / sc.vp.x * 2.0 - 1.0;
+  let cy = 1.0 - py / sc.vp.y * 2.0;
+  var o: VSOut;
+  o.clip = vec4<f32>(cx + corner.x * r / sc.vp.x * 2.0,
+                     cy + corner.y * r / sc.vp.y * 2.0, 0.0, 1.0);
+  o.off = corner * r;
+  o.fill = col[ii];
+  o.radius = r;
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  // Round-disc test with a ~1px anti-aliased edge — identical look to the
+  // Phase-3 cloud (no ring here: the background cloud has no stroke; ringed
+  // frontier dots arrive on this pipeline in G2 with HV-derived radii).
+  let dist = length(i.off);
+  let aa = 1.0 - smoothstep(i.radius - 0.75, i.radius + 0.75, dist);
+  if (aa <= 0.0) { discard; }
+  let c = unpack(i.fill);
+  return vec4<f32>(c.rgb, c.a * aa);
+}`;
+
+// ── G1: the scene skyline ────────────────────────────────────────────────────
+// Frontier-size bound for the compact pass + readback staging. Same value as the
+// streaming engine's WEBGPU_MAX_FRONT but a SEPARATE constant on purpose — the
+// G-track shares no code with the streaming path until G5. Real frontiers in this
+// dataset are ≤ ~30 points; the verify hook asserts we never approach the bound.
+const WEBGPU_GRAPH_MAX_FRONT = 2048;
+
+// WGSL (compute): sign-aware GPU Pareto frontier over the retained scene, plus a
+// compaction pass that shrinks the result to "count + indices" for readback.
+//
+// WHY BRUTE FORCE O(n²). Identical rationale to the streaming skyline
+// (script.js WEBGPU_SKYLINE_WGSL): spatial tiling's "influence is local" premise
+// is FALSE for Pareto domination — one extreme point dominates an entire quadrant
+// spanning arbitrarily many tiles. At n≈4–20k that is ≤ ~400M f32 compares in one
+// dispatch, sub-ms on real hardware; sort+prefix-max is the documented ≥10⁵
+// scale-up (docs/rendering.md §"Shared GPU foundations").
+//
+// WHY THIS EQUALS THE CPU SWEEP. The CPU frontier (sweepFrontier, script.js) is a
+// stack sweep over the SIGNED, exact-(x,y)-DEDUPED cloud: sort by x·xSign asc and
+// pop anything with a smaller signed y (or equal y, smaller signed x). On a set
+// with no duplicate coordinates those pop rules remove exactly the points that
+// are STRICTLY dominated in signed space (∃j: Xj≥Xi ∧ Yj≥Yi with one strict), so
+// per-point strict-dominance brute force reproduces the sweep's survivor set
+// point-for-point. The dedup precondition is load-bearing: with duplicates, the
+// sweep keeps one survivor per coordinate while dominance logic would keep all —
+// script.js guarantees it by uploading the `unique` array.
+//
+// SIGN-AWARENESS. Multiplying by xSign/ySign ∈ {±1} maps "lower is better" axes
+// (ERA, WHIP…) and the worst-frontier toggle into one canonical "higher is
+// better" space — the same trick the CPU uses (X = x·xSign). The multiply is
+// EXACT in f32 (sign-bit flip), so GPU compares see bit-identical magnitudes to
+// the uploaded values and the only CPU/GPU divergence risk is the f64→f32
+// narrowing at upload (the verify hook's reference therefore compares against the
+// f32 cpuPos copy, not the f64 originals).
+//
+// originDrop: the streaming skyline force-drops (0,0) ("no events yet" players,
+// matching its cloud's (0,0) cull). The STATIC scene has no such phantom points —
+// an uploaded (0,0) is a real season — so the branch is compiled in but gated off
+// by the uniform (0.0); the G5 convergence flips it to 1.0 on the streaming path.
+//
+// uSky is a SEPARATE uniform from uScene: signs are part of the scene IDENTITY
+// (they change which points survive), not the view, and the compute submit
+// happens inside uploadScene — a shared uniform would race writeSceneScale's
+// later per-refresh write.
+const WEBGPU_SCENESKYLINE_WGSL = `
+const MAX_FRONT : u32 = ${WEBGPU_GRAPH_MAX_FRONT}u;
+struct Sky { n: u32, xSign: f32, ySign: f32, originDrop: f32 };
+@group(0) @binding(0) var<uniform>             U:        Sky;
+@group(0) @binding(1) var<storage, read>       pos:      array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read_write> onFront:  array<u32>;
+@group(0) @binding(3) var<storage, read_write> frontIdx: array<u32>;
+@group(0) @binding(4) var<storage, read_write> count:    array<atomic<u32>>;
+
+// onFront[i] = 1 iff no j strictly dominates i in SIGNED space.
+@compute @workgroup_size(64)
+fn skyline(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= U.n) { return; }
+  let sgn = vec2<f32>(U.xSign, U.ySign);
+  let pi = pos[i] * sgn;
+  if (U.originDrop > 0.5 && pos[i].x == 0.0 && pos[i].y == 0.0) {
+    onFront[i] = 0u;                       // streaming-only: phantom (0,0) players
+    return;
+  }
+  var dom = 0u;
+  for (var j = 0u; j < U.n; j = j + 1u) {
+    let pj = pos[j] * sgn;
+    if (pj.x >= pi.x && pj.y >= pi.y && (pj.x > pi.x || pj.y > pi.y)) { dom = 1u; break; }
+  }
+  onFront[i] = select(1u, 0u, dom == 1u);
+}
+
+// Append on-front indices into frontIdx[0..K), K via atomicAdd — turns the n-word
+// verdict array into a tiny "count + ≤MAX_FRONT indices" payload so the readback
+// contract maps ~8 KB, not the whole cloud. Order is nondeterministic (atomic
+// append); the consumer treats it as a SET. Rank-sorting arrives with the G2
+// staircase, which is the first pass that needs x-order.
+@compute @workgroup_size(64)
+fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= U.n) { return; }
+  if (onFront[i] != 0u) {
+    let k = atomicAdd(&count[0], 1u);
+    if (k < MAX_FRONT) { frontIdx[k] = i; }
+  }
+}`;
+
+// ── G4: depth layers (Pareto onion-peeling) ──────────────────────────────────
+// Iterative skyline peeling on the GPU (docs/rendering.md §"G-track design":
+// "depth layers = iterative skyline peeling (≤5, dirty-frames only)"). Layer 0 is
+// the live frontier (already produced by the G1 skyline); each subsequent layer is
+// the frontier of the cloud with all shallower layers removed. The CPU oracle is
+// `paretoLayers`/`__bl2d_depthLayers` (script.js) — same peel, same sign rules.
+//
+// Mechanism: `peeled[]` marks already-claimed points, `layerOf[]` records each
+// point's layer index (BIG = deeper than the requested depth, or never on any
+// layer within it). One peel iteration = peelSky (this layer's frontier over the
+// non-peeled set, into onTmp) → peelMark (fold onTmp into layerOf + peeled). The
+// two-pass split is a read-after-write guard: every thread's dominance test in a
+// pass must see the SAME peeled[] snapshot, so the mark can't run inline. The CPU
+// encodes `peelInit` then `depth` (peelSky, peelMark) pairs in one serialized
+// encoder. Pure parallel re-sweep — the verify gate is the per-layer point count.
+const WEBGPU_GRAPH_MAX_DEPTH = 5;            // matches the CPU peelDepth clamp [1,5]
+const WEBGPU_DEPTH_BIG = 0xffffffff;
+const WEBGPU_DEPTH_WGSL = `
+const BIG : u32 = ${WEBGPU_DEPTH_BIG}u;
+struct Dp { n: u32, xSign: f32, ySign: f32, layer: u32 };
+@group(0) @binding(0) var<uniform>             U:       Dp;
+@group(0) @binding(1) var<storage, read>       pos:     array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read_write> peeled:  array<u32>;
+@group(0) @binding(3) var<storage, read_write> layerOf: array<u32>;
+@group(0) @binding(4) var<storage, read_write> onTmp:   array<u32>;
+
+@compute @workgroup_size(64)
+fn peelInit(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= U.n) { return; }
+  peeled[i] = 0u;
+  layerOf[i] = BIG;
+  onTmp[i] = 0u;
+}
+
+// This layer's frontier: not yet peeled, and not strictly dominated (in SIGNED
+// space) by any other NON-peeled point. Identical compare to the WEBGPU_SCENESKYLINE
+// skyline pass, with the peel mask gating both the candidate and the dominators.
+@compute @workgroup_size(64)
+fn peelSky(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= U.n) { return; }
+  if (peeled[i] != 0u) { onTmp[i] = 0u; return; }
+  let sgn = vec2<f32>(U.xSign, U.ySign);
+  let pi = pos[i] * sgn;
+  var dom = 0u;
+  for (var j = 0u; j < U.n; j = j + 1u) {
+    if (peeled[j] != 0u) { continue; }
+    let pj = pos[j] * sgn;
+    if (pj.x >= pi.x && pj.y >= pi.y && (pj.x > pi.x || pj.y > pi.y)) { dom = 1u; break; }
+  }
+  onTmp[i] = select(1u, 0u, dom == 1u);
+}
+
+// Fold this layer's frontier (onTmp) into the running result: tag the layer index
+// and remove the points from the next iteration's pool.
+@compute @workgroup_size(64)
+fn peelMark(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= U.n) { return; }
+  if (onTmp[i] != 0u) { layerOf[i] = U.layer; peeled[i] = 1u; }
+}`;
+
+// G4 render: per-layer compact (gather a peel layer's members for the staircase) +
+// faded depth dots. compactLayer mirrors the G1 `compact`, but selects by layerOf==L
+// (the peel output) instead of onFront — feeding the SHARED ranksort/emit pipelines
+// per layer (via per-layer bind groups) so each deeper layer gets a sorted, capped
+// staircase in data space. The dots pass draws one instanced quad per cloud point on a
+// peel layer 1..depth-1, faded per layer (max(0.3, 0.9·0.72^L), matching the SVG).
+const WEBGPU_DEPTHCOMPACT_WGSL = `
+const MAX_FRONT : u32 = ${WEBGPU_GRAPH_MAX_FRONT}u;
+struct Dp { n: u32, xSign: f32, ySign: f32, layer: u32 };
+@group(0) @binding(0) var<uniform>             U:       Dp;
+@group(0) @binding(1) var<storage, read>       layerOf: array<u32>;
+@group(0) @binding(2) var<storage, read_write> idx:     array<u32>;
+@group(0) @binding(3) var<storage, read_write> count:   array<atomic<u32>>;
+@compute @workgroup_size(64)
+fn compactLayer(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= U.n) { return; }
+  if (layerOf[i] == U.layer) {
+    let k = atomicAdd(&count[0], 1u);
+    if (k < MAX_FRONT) { idx[k] = i; }
+  }
+}`;
+
+const WEBGPU_DEPTHDOTS_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+// dd.x = depth (cap), .y = radius px, .z = ring px; fill = frontier rgb, ring = panel rgb.
+struct DD { p: vec4<f32>, fill: vec4<f32>, ring: vec4<f32> };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> pos: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> layerOf: array<u32>;
+@group(0) @binding(3) var<uniform> dd: DD;
+struct VSOut {
+  @builtin(position) clip: vec4<f32>,
+  @location(0) off: vec2<f32>,
+  @location(1) @interpolate(flat) radius: f32,
+  @location(2) @interpolate(flat) ring: f32,
+  @location(3) @interpolate(flat) fade: f32,
+};
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(-1.0,1.0),
+  vec2<f32>(-1.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>( 1.0,1.0));
+fn degenerate() -> VSOut {
+  var o: VSOut; o.clip = vec4<f32>(2.0, 2.0, 0.0, 1.0);
+  o.off = vec2<f32>(0.0); o.radius = 0.0; o.ring = 0.0; o.fade = 0.0; return o;
+}
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  let L = layerOf[ii];
+  if (L == 0u || L >= u32(dd.p.x)) { return degenerate(); }   // layer 0 = the live frontier (drawn elsewhere)
+  let p = pos[ii];
+  let r = dd.p.y; let ring = dd.p.z;
+  let ext = r + ring;
+  let px = sc.ab.x * p.x + sc.ab.y;
+  let py = sc.ab.z * p.y + sc.ab.w;
+  let cx = px / sc.vp.x * 2.0 - 1.0;
+  let cy = 1.0 - py / sc.vp.y * 2.0;
+  let corner = C[vi];
+  var o: VSOut;
+  o.clip = vec4<f32>(cx + corner.x * ext / sc.vp.x * 2.0, cy + corner.y * ext / sc.vp.y * 2.0, 0.0, 1.0);
+  o.off = corner * ext;
+  o.radius = r; o.ring = ring;
+  o.fade = max(0.3, 0.9 * pow(0.72, f32(L)));
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let dist = length(i.off);
+  let outer = i.radius + i.ring * 0.5;
+  let aa = 1.0 - smoothstep(outer - 0.75, outer + 0.75, dist);
+  if (aa <= 0.0) { discard; }
+  var col: vec3<f32>;
+  if (dist > i.radius - i.ring * 0.5) { col = dd.ring.rgb; }   // panel-coloured ring
+  else { col = dd.fill.rgb; }
+  return vec4<f32>(col, aa * i.fade);
+}`;
+
+// G4c depth SHADE: the faint nested dominated-region fills (SVG .depth-shade, 0.06
+// fill-opacity, stacked so nested layers darken). Geometry is identical to the G2 HV
+// shade — a triangle fan from the anti-ideal apex over a layer's staircase — but the
+// fragment is FLAT (one colour+alpha from gc.shade), not the gradient. Drawn per deeper
+// layer at 0.06 alpha; src-over stacking reproduces the SVG's darkening toward the core.
+const WEBGPU_DEPTHSHADE_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+struct Col { stair: vec4<f32>, shade: vec4<f32>, front: vec4<f32> };
+struct Stair { n: u32, xSign: f32, ySign: f32, antiX: f32, antiY: f32 };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> staircase: array<vec2<f32>>;
+@group(0) @binding(2) var<uniform> gc: Col;
+@group(0) @binding(3) var<uniform> st: Stair;
+fn toPx(p: vec2<f32>) -> vec2<f32> { return vec2<f32>(sc.ab.x * p.x + sc.ab.y, sc.ab.z * p.y + sc.ab.w); }
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+  let t = vi / 3u;
+  let c = vi % 3u;
+  let antiData = vec2<f32>(st.antiX * st.xSign, st.antiY * st.ySign);
+  var p: vec2<f32>;
+  if (c == 0u) { p = antiData; }
+  else if (c == 1u) { p = staircase[t]; }
+  else { p = staircase[t + 1u]; }
+  let px = toPx(p);
+  return vec4<f32>(px.x / sc.vp.x * 2.0 - 1.0, 1.0 - px.y / sc.vp.y * 2.0, 0.0, 1.0);
+}
+@fragment
+fn fs() -> @location(0) vec4<f32> { return vec4<f32>(gc.shade.rgb, gc.shade.a); }`;
+
+// G4d era-B + ghost overlays. Both reuse the CPU frontier oracles (eraB.frontier /
+// globalResult.frontier, script.js) laid out in DATA space and drawn via uScene — the
+// G3-text pattern, NOT a second GPU skyline (the design's "second frontier run" wording;
+// running O(n²) over a large unfiltered cloud per refresh isn't worth it when the CPU
+// already has the frontier). era-B = solid staircase (reuse pSceneStairLine) + flat shade
+// (reuse pDepthShade) + dots; ghost = dashed staircase + faint dots.
+
+// Plain instanced dots from a data-space position buffer (era-B + ghost frontier dots).
+// dd.x = radius, .y = ring px; fill rgba + ring rgb from the uniform. No per-instance
+// fade (unlike the depth dots) — every uploaded position draws.
+const WEBGPU_PLAINDOTS_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+struct DD { p: vec4<f32>, fill: vec4<f32>, ring: vec4<f32> };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> pos: array<vec2<f32>>;
+@group(0) @binding(2) var<uniform> dd: DD;
+struct VSOut {
+  @builtin(position) clip: vec4<f32>,
+  @location(0) off: vec2<f32>,
+  @location(1) @interpolate(flat) radius: f32,
+  @location(2) @interpolate(flat) ring: f32,
+};
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(-1.0,1.0),
+  vec2<f32>(-1.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>( 1.0,1.0));
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  let p = pos[ii];
+  let r = dd.p.x; let ring = dd.p.y; let ext = r + ring;
+  let px = sc.ab.x * p.x + sc.ab.y;
+  let py = sc.ab.z * p.y + sc.ab.w;
+  let cx = px / sc.vp.x * 2.0 - 1.0;
+  let cy = 1.0 - py / sc.vp.y * 2.0;
+  let corner = C[vi];
+  var o: VSOut;
+  o.clip = vec4<f32>(cx + corner.x * ext / sc.vp.x * 2.0, cy + corner.y * ext / sc.vp.y * 2.0, 0.0, 1.0);
+  o.off = corner * ext; o.radius = r; o.ring = ring;
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let dist = length(i.off);
+  let outer = i.radius + i.ring * 0.5;
+  let aa = 1.0 - smoothstep(outer - 0.75, outer + 0.75, dist);
+  if (aa <= 0.0) { discard; }
+  var rgb: vec3<f32>;
+  var a = dd.fill.a;
+  if (i.ring > 0.0 && dist > i.radius - i.ring * 0.5) { rgb = dd.ring.rgb; a = dd.ring.a; }
+  else { rgb = dd.fill.rgb; }
+  return vec4<f32>(rgb, aa * a);
+}`;
+
+// Dashed staircase line for the ghost. Vertex-pulls data-space staircase[] + a per-vertex
+// SCREEN-space cumulative arc length (CPU-computed from the live scales, so the dash stays
+// a constant pixel length under zoom — it re-derives on each re-upload). The varying arc
+// interpolates linearly between vertices = true screen distance (segments are straight),
+// so the fragment dashes by fract(arc/period).
+const WEBGPU_DASHLINE_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+struct Dash { period: f32, dashFrac: f32, _a: f32, _b: f32, color: vec4<f32> };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> staircase: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> arc: array<f32>;
+@group(0) @binding(3) var<uniform> u: Dash;
+struct VSOut { @builtin(position) clip: vec4<f32>, @location(0) a: f32 };
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
+  let p = staircase[vi];
+  let px = sc.ab.x * p.x + sc.ab.y;
+  let py = sc.ab.z * p.y + sc.ab.w;
+  var o: VSOut;
+  o.clip = vec4<f32>(px / sc.vp.x * 2.0 - 1.0, 1.0 - py / sc.vp.y * 2.0, 0.0, 1.0);
+  o.a = arc[vi];
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  if (fract(i.a / u.period) > u.dashFrac) { discard; }
+  return vec4<f32>(u.color.rgb, u.color.a);
+}`;
+
+// ── G5b: non-frontier "regret" hover overlay (dashed line + dashed ring) ──────
+// When the cursor is over a point that is NOT on the frontier, the chart draws a dashed
+// leader from that point to its nearest spot ON the frontier staircase (how far it falls
+// short of the limit), plus a dashed ring whose radius is the pixel distance to the
+// nearest frontier DOT. This shader reproduces the SVG `.regret-line` / `.regret-ring`
+// (stroke #5a6478, width 1.5px, dasharray "4 3", opacity 0.6 / 0.35) entirely on the GPU.
+//
+// ONE pipeline, ONE uniform, drawn as draw(6, 2): a single 2-triangle quad, billboarded
+// two ways by instance_index — instance 0 is the line (a thin screen-space ribbon so the
+// 1.5px width and the dash are exact), instance 1 is the ring (a square billboard, dashed
+// in the fragment by arc-angle). The endpoints live in DATA space and ride uScene.ab just
+// like every other G-track buffer, so a pan/zoom is a 64-byte uniform write — the overlay
+// never recomputes its geometry. An absent line/ring (hasLine/hasRing == 0) collapses its
+// instance off-screen. Screen-space dashing matches stroke-dasharray exactly: the dash
+// repeats every `period` px of arc length (4px on + 3px off ⇒ period 7, dashFrac 4/7).
+const WEBGPU_REGRET_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+// a    = (srcX, srcY, tgtX, tgtY)        — DATA-space endpoints (src = the hovered point)
+// b    = (ringRpx, lineWpx, hasLine, hasRing)
+// dash = (periodPx, dashFrac, _, _)
+// lineCol / ringCol = straight-alpha RGBA (the pipeline's src-over blend multiplies by a)
+struct Regret { a: vec4<f32>, b: vec4<f32>, dash: vec4<f32>, lineCol: vec4<f32>, ringCol: vec4<f32> };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<uniform> u: Regret;
+struct VSOut {
+  @builtin(position) clip: vec4<f32>,
+  @location(0) @interpolate(flat) kind: f32,   // 0 = line, 1 = ring
+  @location(1) v: vec2<f32>,                    // line: (alongPx, perpPx); ring: offset px
+  @location(2) @interpolate(flat) ext: f32,     // line: halfWidth px; ring: radius px
+};
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(-1.0,1.0),
+  vec2<f32>(-1.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>( 1.0,1.0));
+fn toPx(p: vec2<f32>) -> vec2<f32> { return vec2<f32>(sc.ab.x * p.x + sc.ab.y, sc.ab.z * p.y + sc.ab.w); }
+fn toClip(px: vec2<f32>) -> vec4<f32> { return vec4<f32>(px.x / sc.vp.x * 2.0 - 1.0, 1.0 - px.y / sc.vp.y * 2.0, 0.0, 1.0); }
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  let corner = C[vi];
+  var o: VSOut;                                  // zero-initialized; an off-screen clip hides unused instances
+  let srcPx = toPx(u.a.xy);
+  if (ii == 0u) {
+    if (u.b.z < 0.5) { o.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0); return o; }   // hasLine == 0
+    let tgtPx = toPx(u.a.zw);
+    let d = tgtPx - srcPx;
+    let len = max(length(d), 1e-4);
+    let dir = d / len;
+    let nrm = vec2<f32>(-dir.y, dir.x);
+    let halfW = u.b.y * 0.5;
+    let t = corner.x * 0.5 + 0.5;                 // 0 at src, 1 at tgt
+    let along = t * len;
+    let perp = corner.y * halfW;
+    o.clip = toClip(srcPx + dir * along + nrm * perp);
+    o.kind = 0.0; o.v = vec2<f32>(along, perp); o.ext = halfW;
+  } else {
+    if (u.b.w < 0.5) { o.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0); return o; }   // hasRing == 0
+    let r = u.b.x; let halfW = u.b.y * 0.5; let ext = r + halfW + 1.0;
+    let off = corner * ext;
+    o.clip = toClip(srcPx + off);
+    o.kind = 1.0; o.v = off; o.ext = r;
+  }
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let period = max(u.dash.x, 1e-3);
+  if (i.kind < 0.5) {
+    // line: 1.5px-wide ribbon, AA across the perpendicular, dashed along its length
+    if (fract(i.v.x / period) > u.dash.y) { discard; }
+    let aa = 1.0 - smoothstep(i.ext - 0.75, i.ext + 0.75, abs(i.v.y));
+    if (aa <= 0.0) { discard; }
+    return vec4<f32>(u.lineCol.rgb, aa * u.lineCol.a);
+  }
+  // ring: AA band at radius ext (half-width = lineW/2), dashed by screen arc length
+  let dist = length(i.v);
+  let hw = u.b.y * 0.5;
+  let aa = 1.0 - smoothstep(hw - 0.75, hw + 0.75, abs(dist - i.ext));
+  if (aa <= 0.0) { discard; }
+  let ang = atan2(i.v.y, i.v.x);                  // (-pi, pi]
+  let arc = (ang + 3.14159265) * i.ext;           // angle → screen arc length at this radius
+  if (fract(arc / period) > u.dash.y) { discard; }
+  return vec4<f32>(u.ringCol.rgb, aa * u.ringCol.a);
+}`;
+
+// ── G5c: instanced dashed rings (isolation ring, regret distance ring, pinned rings) ──
+// One pipeline draws every dashed ring overlay the chart needs, vertex-pulling a storage
+// array of Ring records — so a hover (1 ring), a non-frontier hover (the regret distance
+// ring), or a pinned multi-point state (G5e) are all draw(6, ringCount). Each ring is a
+// billboard quad centred on a DATA-space point (rides uScene.ab), with a PIXEL radius and
+// width, an independent straight-alpha colour, and a screen-space dash (period, dashFrac)
+// — matching SVG `.isolation-ring` (dasharray 5 4) and `.regret-ring` (dasharray 4 3).
+const WEBGPU_RINGS_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+// geo = (cxData, cyData, radiusPx, widthPx); col = straight RGBA; dash = (periodPx, dashFrac, _, _)
+struct Ring { geo: vec4<f32>, col: vec4<f32>, dash: vec4<f32> };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> rings: array<Ring>;
+struct VSOut {
+  @builtin(position) clip: vec4<f32>,
+  @location(0) off: vec2<f32>,
+  @location(1) @interpolate(flat) radius: f32,
+  @location(2) @interpolate(flat) width: f32,
+  @location(3) @interpolate(flat) col: vec4<f32>,
+  @location(4) @interpolate(flat) dash: vec2<f32>,
+};
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(-1.0,1.0),
+  vec2<f32>(-1.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>( 1.0,1.0));
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  let r = rings[ii];
+  let cpx = vec2<f32>(sc.ab.x * r.geo.x + sc.ab.y, sc.ab.z * r.geo.y + sc.ab.w);
+  let radius = r.geo.z; let width = r.geo.w; let ext = radius + width * 0.5 + 1.0;
+  let off = C[vi] * ext;
+  var o: VSOut;
+  o.clip = vec4<f32>((cpx.x + off.x) / sc.vp.x * 2.0 - 1.0, 1.0 - (cpx.y + off.y) / sc.vp.y * 2.0, 0.0, 1.0);
+  o.off = off; o.radius = radius; o.width = width; o.col = r.col; o.dash = r.dash.xy;
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let dist = length(i.off);
+  let hw = i.width * 0.5;
+  let aa = 1.0 - smoothstep(hw - 0.75, hw + 0.75, abs(dist - i.radius));
+  if (aa <= 0.0) { discard; }
+  let period = max(i.dash.x, 1e-3);
+  let ang = atan2(i.off.y, i.off.x);               // (-pi, pi]
+  let arc = (ang + 3.14159265) * i.radius;         // angle → screen arc length at this radius
+  if (fract(arc / period) > i.dash.y) { discard; }
+  return vec4<f32>(i.col.rgb, aa * i.col.a);
+}`;
+
+// ── G2: staircase, hypervolume contributions, shade ──────────────────────────
+// Frontier-dot radius range — the on-screen size encodes a point's HV contribution,
+// matching the CPU's radiusFor (script.js: FRONTIER_R_MIN/MAX + sqrt(contrib/max)).
+const WEBGPU_GRAPH_R_MIN = 4.0, WEBGPU_GRAPH_R_MAX = 11.0, WEBGPU_GRAPH_FRONT_RING = 1.5;
+
+// WGSL (compute): the sign-aware GPU staircase — ranksort + emit. G1's `compact`
+// already produced bFrontIdx[0..K)+bCount, so this module only SORTS that set by
+// canonical x and EMITS the step polyline. It is a port of the streaming staircase
+// (script.js WEBGPU_STAIRCASE_WGSL) with two sign-aware divergences:
+//   • rank by CANONICAL x (pos.x·xSign), and scatter the original index alongside
+//     the sorted position (frontSortedIdx) so the HV pass can skip-by-index;
+//   • the caps land on the canonical DOMAIN EDGES (XantiC, YantiC), not value 0 —
+//     reproducing the CPU staircaseScreen, whose left cap sits at screen-x 0
+//     (= the worst-x domain edge) and bottom cap at screen-y plotH (= worst-y edge).
+// frontSorted holds CANONICAL (X,Y); emit un-folds (·sgn) back to DATA space so the
+// staircase[] vertices ride the same affine uScene.ab map as the cloud — a zoom is a
+// uniform write, the staircase never recomputes. Vertex count = 1 + 2K (== 2K+1, the
+// CPU R sequence: left-cap + K points + K drops where the last drop is the bottom cap).
+const WEBGPU_SCENESTAIR_WGSL = `
+const MAX_FRONT : u32 = ${WEBGPU_GRAPH_MAX_FRONT}u;
+struct Stair { n: u32, xSign: f32, ySign: f32, antiX: f32, antiY: f32 };  // antiX/Y are CANONICAL
+struct DrawArgs { vertexCount: u32, instanceCount: u32, firstVertex: u32, firstInstance: u32 };
+@group(0) @binding(0) var<uniform>             U:           Stair;
+@group(0) @binding(1) var<storage, read>       pos:         array<vec2<f32>>;   // DATA space
+@group(0) @binding(2) var<storage, read>       frontIdx:    array<u32>;          // G1 compact output
+@group(0) @binding(3) var<storage, read_write> count:       array<atomic<u32>>;  // K (G1)
+@group(0) @binding(4) var<storage, read_write> frontSorted: array<vec2<f32>>;    // CANONICAL, x-asc
+@group(0) @binding(5) var<storage, read_write> frontSortedIdx: array<u32>;       // → original index
+@group(0) @binding(6) var<storage, read_write> staircase:   array<vec2<f32>>;    // DATA space
+@group(0) @binding(7) var<storage, read_write> indirect:    DrawArgs;            // stair line-strip
+@group(0) @binding(8) var<storage, read_write> shadeIndirect: DrawArgs;          // HV-shade fan
+
+@compute @workgroup_size(64)
+fn ranksort(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let kk = gid.x;
+  let K = atomicLoad(&count[0]);
+  if (kk >= K) { return; }
+  let sgn = vec2<f32>(U.xSign, U.ySign);
+  let p  = frontIdx[kk];
+  let pc = pos[p] * sgn;                                   // canonical
+  var rank = 0u;
+  for (var j = 0u; j < K; j = j + 1u) {
+    let q  = frontIdx[j];
+    let qx = pos[q].x * U.xSign;                           // canonical x
+    if (qx < pc.x || (qx == pc.x && q < p)) { rank = rank + 1u; }
+  }
+  frontSorted[rank] = pc;
+  frontSortedIdx[rank] = p;
+}
+
+@compute @workgroup_size(64)
+fn emit(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let r = gid.x;
+  let K = atomicLoad(&count[0]);
+  if (r >= K) { return; }
+  let sgn = vec2<f32>(U.xSign, U.ySign);
+  if (r == 0u) {
+    // Left cap: canonical (antiX, firstY), un-folded to data space.
+    staircase[0] = vec2<f32>(U.antiX, frontSorted[0].y) * sgn;
+    let M = 1u + 2u * K;
+    indirect.vertexCount = M;       indirect.instanceCount = 1u;
+    indirect.firstVertex = 0u;      indirect.firstInstance = 0u;
+    shadeIndirect.vertexCount = 3u * (M - 1u);  shadeIndirect.instanceCount = 1u;
+    shadeIndirect.firstVertex = 0u; shadeIndirect.firstInstance = 0u;
+  }
+  let here = frontSorted[r];                               // canonical
+  let next = r + 1u;
+  // Drop to the next point's y, or — for the last point — to the canonical worst-y
+  // domain edge (the CPU's plotH bottom cap), not value 0.
+  let dropY = select(U.antiY, frontSorted[next].y, next < K);
+  staircase[1u + 2u*r]      = here * sgn;
+  staircase[1u + 2u*r + 1u] = vec2<f32>(here.x, dropY) * sgn;
+}`;
+
+// WGSL (compute): hypervolume contributions — the EXACT leave-one-out-with-fill
+// oracle (script.js computeHvContributions) ported to the GPU, NOT the cheap
+// exclusive-corner formula. CPU sweepExcluding(p) re-sweeps ALL of `unique`, so
+// removing a frontier member lets cloud points behind it fill in; ΔHV = totalHv −
+// altHv is the real loss, and that is what sizes the visible dot radius. One thread
+// per frontier slot re-sweeps the whole cloud in canonical space with a per-thread
+// monotone stack — O(F·N), F≤~30, N≤~20k → sub-ms. All compares are canonical so the
+// four sign quadrants share one body. RxC/RyC are the canonical reference point
+// (universe min corner − eps), computed on the CPU to match the oracle's eps math.
+const WEBGPU_HVCONTRIB_WGSL = `
+const MAX_FRONT : u32 = ${WEBGPU_GRAPH_MAX_FRONT}u;
+const R_MIN : f32 = ${WEBGPU_GRAPH_R_MIN};
+const R_MAX : f32 = ${WEBGPU_GRAPH_R_MAX};
+const HV_STACK : u32 = 64u;                 // per-thread stack cap; real frontiers ≪ this
+struct Hv { n: u32, xSign: f32, ySign: f32, Rx: f32, Ry: f32 };   // Rx/Ry are CANONICAL
+@group(0) @binding(0) var<uniform>             U:           Hv;
+@group(0) @binding(1) var<storage, read>       pos:         array<vec2<f32>>;   // DATA space
+@group(0) @binding(2) var<storage, read>       frontSorted: array<vec2<f32>>;   // CANONICAL, x-asc
+@group(0) @binding(3) var<storage, read>       frontSortedIdx: array<u32>;
+@group(0) @binding(4) var<storage, read_write> count:       array<atomic<u32>>;
+@group(0) @binding(5) var<storage, read_write> hv:          array<f32>;         // contrib per rank
+@group(0) @binding(6) var<storage, read_write> frontRadius: array<f32>;         // radius per INSTANCE
+@group(0) @binding(7) var<storage, read_write> scalar:      array<f32>;         // [0]=totalHv [1]=maxContrib
+
+// hvOf over the canonical, x-ascending frontSorted[0..K): vertical-strip decomposition.
+fn hvTotal_(K: u32) -> f32 {
+  var acc = 0.0;
+  var xPrev = U.Rx;
+  for (var r = 0u; r < K; r = r + 1u) {
+    let p = frontSorted[r];
+    acc = acc + (p.x - xPrev) * (p.y - U.Ry);
+    xPrev = p.x;
+  }
+  return acc;
+}
+
+@compute @workgroup_size(1)
+fn hvTotal() {
+  let K = atomicLoad(&count[0]);
+  scalar[0] = hvTotal_(K);
+}
+
+@compute @workgroup_size(64)
+fn hvContrib(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let r = gid.x;
+  let K = atomicLoad(&count[0]);
+  if (r >= K) { return; }
+  let sgn = vec2<f32>(U.xSign, U.ySign);
+  let skip = frontSortedIdx[r];
+  // Re-sweep the whole cloud excluding 'skip', in CANONICAL space, with a monotone
+  // stack — identical pop rules to CPU sweepExcluding (pop while top.Y < pY; then the
+  // equal-Y / smaller-X tiebreak), walked in upload order so the survivor set matches.
+  var stk: array<vec2<f32>, 64>;
+  var top: i32 = -1;
+  for (var i = 0u; i < U.n; i = i + 1u) {
+    if (i == skip) { continue; }
+    let pc = pos[i] * sgn;
+    loop {
+      if (top < 0) { break; }
+      if (stk[top].y < pc.y) { top = top - 1; } else { break; }
+    }
+    if (top >= 0 && stk[top].y == pc.y && stk[top].x < pc.x) { top = top - 1; }
+    top = top + 1;
+    if (u32(top) < HV_STACK) { stk[top] = pc; }
+  }
+  var alt = 0.0;
+  var xPrev = U.Rx;
+  for (var s = 0; s <= top; s = s + 1) {
+    alt = alt + (stk[s].x - xPrev) * (stk[s].y - U.Ry);
+    xPrev = stk[s].x;
+  }
+  let contrib = scalar[0] - alt;
+  hv[r] = max(contrib, 0.0);
+}
+
+@compute @workgroup_size(1)
+fn hvMax() {
+  let K = atomicLoad(&count[0]);
+  var m = 0.0;
+  for (var r = 0u; r < K; r = r + 1u) { m = max(m, hv[r]); }
+  scalar[1] = select(m, 1.0, m <= 0.0);          // CPU's "maxContrib || 1"
+}
+
+@compute @workgroup_size(64)
+fn hvRadius(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let r = gid.x;
+  let K = atomicLoad(&count[0]);
+  if (r >= K) { return; }
+  let idx = frontSortedIdx[r];
+  let maxC = scalar[1];
+  frontRadius[idx] = R_MIN + (R_MAX - R_MIN) * sqrt(hv[r] / maxC);
+}`;
+
+// WGSL (render): the GPU staircase line. Vertex-pulls the DATA-space staircase[] the
+// emit pass wrote, maps with the same affine uScene.ab as the cloud, draws a line-
+// strip via drawIndirect (vertex count came from the GPU). Colour + opacity arrive in
+// uGraphCol[0] (the CPU --frontier-color / worst-mode purple, with its 0.55 opacity).
+const WEBGPU_STAIRLINE_GRAPH_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+struct Col { stair: vec4<f32>, shade: vec4<f32>, front: vec4<f32> };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> staircase: array<vec2<f32>>;
+@group(0) @binding(2) var<uniform> gc: Col;
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+  let p = staircase[vi];
+  let px = sc.ab.x * p.x + sc.ab.y;
+  let py = sc.ab.z * p.y + sc.ab.w;
+  return vec4<f32>(px / sc.vp.x * 2.0 - 1.0, 1.0 - py / sc.vp.y * 2.0, 0.0, 1.0);
+}
+@fragment
+fn fs() -> @location(0) vec4<f32> { return vec4<f32>(gc.stair.rgb, gc.stair.a); }`;
+
+// WGSL (render): the hypervolume SHADE — a gradient fill of the dominated region
+// under the staircase, fading from the ideal corner (opacity 0.10) toward the
+// anti-ideal corner (0.01), reproducing the SVG linearGradient (script.js #hv-shade-
+// grad). Geometry: a triangle FAN from the anti-ideal apex over the staircase
+// polyline (the dominated region is star-shaped from that corner). drawIndirect's
+// vertex count = 3·(M−1) was written by emit. The fragment projects its pixel position
+// onto the ideal→anti axis (uScene.corn = (antiX,antiY,idealX,idealY) in pixels) for t.
+const WEBGPU_HVSHADE_GRAPH_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+struct Col { stair: vec4<f32>, shade: vec4<f32>, front: vec4<f32> };
+struct Stair { n: u32, xSign: f32, ySign: f32, antiX: f32, antiY: f32 };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> staircase: array<vec2<f32>>;
+@group(0) @binding(2) var<uniform> gc: Col;
+@group(0) @binding(3) var<uniform> st: Stair;
+struct VSOut { @builtin(position) clip: vec4<f32>, @location(0) frag: vec2<f32> };
+fn toPx(p: vec2<f32>) -> vec2<f32> { return vec2<f32>(sc.ab.x * p.x + sc.ab.y, sc.ab.z * p.y + sc.ab.w); }
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
+  let t = vi / 3u;            // triangle index
+  let c = vi % 3u;            // corner within the fan triangle (anti, v[t], v[t+1])
+  let antiData = vec2<f32>(st.antiX * st.xSign, st.antiY * st.ySign);  // un-fold to data
+  var p: vec2<f32>;
+  if (c == 0u) { p = antiData; }
+  else if (c == 1u) { p = staircase[t]; }
+  else { p = staircase[t + 1u]; }
+  let px = toPx(p);
+  var o: VSOut;
+  o.clip = vec4<f32>(px.x / sc.vp.x * 2.0 - 1.0, 1.0 - px.y / sc.vp.y * 2.0, 0.0, 1.0);
+  o.frag = px;
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let ideal = sc.corn.zw;
+  let anti  = sc.corn.xy;
+  let axis  = anti - ideal;
+  let denom = max(dot(axis, axis), 1e-6);
+  let t = clamp(dot(i.frag - ideal, axis) / denom, 0.0, 1.0);
+  let a = mix(0.10, 0.01, t);
+  return vec4<f32>(gc.shade.rgb, a);
+}`;
+
+// WGSL (render): GPU frontier DOTS with HV-derived radii + white ring — a port of the
+// streaming spring-cloud's front pass (script.js WEBGPU_SPRINGCLOUD_WGSL). Degenerates
+// every non-front instance (one draw over the full cloud), pulls its radius from
+// frontRadius[ii] (written by hvRadius), and either keeps the era colour (col[ii], best
+// mode) or the worst-mode override (uGraphCol.front, .w = use-override). Drawn ON TOP.
+const WEBGPU_SCENEFRONT_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+struct Col { stair: vec4<f32>, shade: vec4<f32>, front: vec4<f32> };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> pos: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> col: array<u32>;
+@group(0) @binding(3) var<storage, read> onFront: array<u32>;
+@group(0) @binding(4) var<storage, read> frontRadius: array<f32>;
+@group(0) @binding(5) var<uniform> gc: Col;
+struct VSOut {
+  @builtin(position) clip: vec4<f32>,
+  @location(0) off: vec2<f32>,
+  @location(1) @interpolate(flat) fill: vec4<f32>,
+  @location(2) @interpolate(flat) radius: f32,
+  @location(3) @interpolate(flat) ring: f32,
+};
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(-1.0,1.0),
+  vec2<f32>(-1.0, 1.0), vec2<f32>(1.0,-1.0), vec2<f32>( 1.0,1.0));
+fn unpack(c: u32) -> vec4<f32> {
+  return vec4<f32>(f32(c & 0xffu), f32((c >> 8u) & 0xffu),
+                   f32((c >> 16u) & 0xffu), f32((c >> 24u) & 0xffu)) / 255.0;
+}
+fn degenerate() -> VSOut {
+  var o: VSOut; o.clip = vec4<f32>(2.0, 2.0, 0.0, 1.0);
+  o.off = vec2<f32>(0.0); o.fill = vec4<f32>(0.0); o.radius = 0.0; o.ring = 0.0; return o;
+}
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  if (onFront[ii] == 0u) { return degenerate(); }
+  let p = pos[ii];
+  let r = frontRadius[ii];
+  let ring = ${WEBGPU_GRAPH_FRONT_RING};
+  let ext = r + ring;
+  let px = sc.ab.x * p.x + sc.ab.y;
+  let py = sc.ab.z * p.y + sc.ab.w;
+  let cx = px / sc.vp.x * 2.0 - 1.0;
+  let cy = 1.0 - py / sc.vp.y * 2.0;
+  let corner = C[vi];
+  var o: VSOut;
+  o.clip = vec4<f32>(cx + corner.x * ext / sc.vp.x * 2.0, cy + corner.y * ext / sc.vp.y * 2.0, 0.0, 1.0);
+  o.off = corner * ext;
+  o.radius = r; o.ring = ring;
+  let era = unpack(col[ii]).rgb;
+  let fillrgb = select(era, gc.front.rgb, gc.front.w > 0.5);
+  o.fill = vec4<f32>(fillrgb, 1.0);                 // frontier dots are opaque
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let dist = length(i.off);
+  let outer = i.radius + i.ring * 0.5;
+  let aa = 1.0 - smoothstep(outer - 0.75, outer + 0.75, dist);
+  if (aa <= 0.0) { discard; }
+  var col: vec3<f32>;
+  if (dist > i.radius - i.ring * 0.5) { col = vec3<f32>(1.0, 1.0, 1.0); }  // white ring
+  else { col = i.fill.rgb; }
+  return vec4<f32>(col, aa);
+}`;
+
+// ── G3: glyph-atlas text ─────────────────────────────────────────────────────
+// The chart's axis tick labels + frontier player names render from a pre-rasterized
+// Canvas2D glyph atlas (NOT SDF — docs/rendering.md §"G-track design"): tick generation
+// (d3 .ticks()/.tickFormat()) and label collision layout (layoutFrontierLabels) stay
+// CPU; the GPU just draws the CPU-laid-out glyph quads. This is the renderer's first
+// sampled texture. Axis TITLES stay SVG (they keep click/glossary interaction, and the
+// rotated Y-title defers to G5) — the pragmatic G3 cut.
+
+// Base charset: digits, ASCII letters, the punctuation ticks/labels emit, and the whole
+// Latin-1 letter block (À–ÿ) so player-name diacritics (Martínez/Pérez/Peña) are covered
+// without enumerating 24k names. uploadText lazy-rebuilds if a string needs a codepoint
+// outside this set (e.g. an exotic name), so coverage is guaranteed, not guessed.
+const GRAPH_GLYPH_BASE_CHARSET = (() => {
+    let s = " .,-+%/()0123456789";
+    for (let c = 0x41; c <= 0x5a; c++) s += String.fromCharCode(c);   // A–Z
+    for (let c = 0x61; c <= 0x7a; c++) s += String.fromCharCode(c);   // a–z
+    for (let c = 0xc0; c <= 0xff; c++) s += String.fromCharCode(c);   // Latin-1 À–ÿ
+    return s;
+})();
+// Text variants: [id] = {px, weight}. 0 ticks, 1 labels-desktop, 2 labels-mobile, 3 titles.
+const GRAPH_GLYPH_VARIANTS = [
+    { px: 11, weight: 400 },   // 0: axis tick labels (.axis text)
+    { px: 11, weight: 600 },   // 1: frontier labels desktop (.frontier-label)
+    { px: 9,  weight: 600 },   // 2: frontier labels mobile (.frontier-label--mobile)
+    { px: 12, weight: 600 },   // 3: axis titles (.axis-title; the X flat, the Y rotated -90° — G6e)
+];
+const GRAPH_GLYPH_HALO_VARIANTS = new Set([1, 2]);   // label variants get a white halo cell
+                                                     // (titles sit over the margin → no halo)
+const GRAPH_GLYPH_ATLAS_MAX = 2048;
+
+// WGSL (render): instanced textured quads. Each instance is a glyph quad in PIXEL space
+// (margin already folded in by the CPU), vertex-pulled like WEBGPU_SCENEFRONT_WGSL; the
+// fragment samples the atlas's alpha coverage and tints by the per-instance colour. The
+// output is PREMULTIPLIED to match the G-track src-over blend, so the white halo and the
+// coloured fill (two instances per label glyph) composite exactly like SVG paint-order.
+const WEBGPU_GLYPH_WGSL = `
+struct Scene { ab: vec4<f32>, vp: vec4<f32>, sgn: vec4<f32>, corn: vec4<f32> };
+@group(0) @binding(0) var<uniform> sc: Scene;
+@group(0) @binding(1) var<storage, read> inst: array<vec4<f32>>;   // 3 vec4 per glyph (stride 48 B)
+@group(0) @binding(2) var atlas: texture_2d<f32>;
+@group(0) @binding(3) var samp: sampler;
+struct VSOut {
+  @builtin(position) clip: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+  @location(1) @interpolate(flat) rgba: u32,
+};
+// Glyph record = 48 B = 3 × vec4<f32>:
+//   [0] rect = (x, y, w, h)  CSS px (margin folded in); (x,y) = the rotation anchor
+//   [1] uv   = (u0, v0, u1, v1)  atlas UV
+//   [2] col  = (colourBits, cos, sin, _)  packed RGBA8 in float[0]'s bit pattern, plus
+//             the per-instance rotation (cos θ, sin θ). Axis-aligned glyphs pass (1, 0);
+//             the rotated Y-axis title (G6e) passes (0, -1) for SVG-equivalent rotate(-90).
+const C = array<vec2<f32>, 6>(
+  vec2<f32>(0.0,0.0), vec2<f32>(1.0,0.0), vec2<f32>(0.0,1.0),
+  vec2<f32>(0.0,1.0), vec2<f32>(1.0,0.0), vec2<f32>(1.0,1.0));
+fn unpack(c: u32) -> vec4<f32> {
+  return vec4<f32>(f32(c & 0xffu), f32((c >> 8u) & 0xffu),
+                   f32((c >> 16u) & 0xffu), f32((c >> 24u) & 0xffu)) / 255.0;
+}
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+  let rect = inst[ii * 3u];          // x, y, w, h  (CSS px); x,y = rotation anchor
+  let uvr  = inst[ii * 3u + 1u];     // u0, v0, u1, v1
+  let col  = inst[ii * 3u + 2u];     // .x=colourBits, .y=cos θ, .z=sin θ
+  let corner = C[vi];
+  // Quad-corner offset in the glyph's local frame, then rotate it by (cos,sin) about
+  // the anchor — the same affine the CPU used to place rect.xy, so the whole glyph
+  // (axis-aligned OR rotated -90° for the Y-title) lands consistently.
+  let lx = corner.x * rect.z;
+  let ly = corner.y * rect.w;
+  let px = rect.x + lx * col.y - ly * col.z;
+  let py = rect.y + lx * col.z + ly * col.y;
+  var o: VSOut;
+  o.clip = vec4<f32>(px / sc.vp.x * 2.0 - 1.0, 1.0 - py / sc.vp.y * 2.0, 0.0, 1.0);
+  o.uv = vec2<f32>(mix(uvr.x, uvr.z, corner.x), mix(uvr.y, uvr.w, corner.y));
+  o.rgba = bitcast<u32>(col.x);
+  return o;
+}
+@fragment
+fn fs(i: VSOut) -> @location(0) vec4<f32> {
+  let cov = textureSample(atlas, samp, i.uv).a;
+  if (cov <= 0.0) { discard; }
+  let c = unpack(i.rgba);
+  let a = c.a * cov;
+  return vec4<f32>(c.rgb * a, a);    // premultiplied
+}`;
+
+// ── GraphRenderer methods, attached to WebGPURenderer ────────────────────────
+// Deferred scripts run in document order, so WebGPURenderer (script.js) exists by
+// the time this file executes — and chooseRenderer() hasn't run yet (it waits on
+// DOMContentLoaded), so every instance ever constructed gets these methods.
+// Attaching to the prototype (rather than subclassing) keeps the renderer
+// selection ladder in script.js untouched: the same WebGPURenderer instance
+// serves Phase-3/4/5 AND the G-track, switched per frame by the gpuGraph gate.
+(function attachGraphEngine() {
+    if (typeof WebGPURenderer === "undefined") return;   // ultra-defensive: bundler reorder
+    const P = WebGPURenderer.prototype;
+
+    // Lazily build the scene pipeline on first use, so the G-track costs nothing
+    // (no shader compile, no layout) for everyone not running ?gpugraph=1.
+    P._initGraphPipelines = function () {
+        if (this.pSceneCloud) return;
+        const dev = this.device;
+        // Same premultiplied src-over blend as init() — duplicated by design: the
+        // G-track shares no objects with the streaming path until the G5
+        // convergence, so a G0–G4 change can't disturb the shipped pipelines.
+        const blend = {
+            color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+            alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+        };
+        this.sceneBgl = dev.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+            { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+            { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+            { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+            { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        ] });
+        const mod = dev.createShaderModule({ code: WEBGPU_SCENECLOUD_WGSL });
+        this.pSceneCloud = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.sceneBgl] }),
+            vertex: { module: mod, entryPoint: "vs" },
+            fragment: { module: mod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+
+        // G1: skyline + compact share one module and one (superset) layout —
+        // the same packaging as the streaming staircase module. Both entry
+        // points get their own compute pipeline.
+        this.skyBgl = dev.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+            { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+            { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+            { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        ] });
+        const skyMod = dev.createShaderModule({ code: WEBGPU_SCENESKYLINE_WGSL });
+        const skyLayout = dev.createPipelineLayout({ bindGroupLayouts: [this.skyBgl] });
+        this.pSceneSkyline = dev.createComputePipeline({
+            layout: skyLayout, compute: { module: skyMod, entryPoint: "skyline" } });
+        this.pSceneCompact = dev.createComputePipeline({
+            layout: skyLayout, compute: { module: skyMod, entryPoint: "compact" } });
+
+        // ── G4 compute: depth-layer peeling (peelInit/peelSky/peelMark) ──
+        this.depthBgl = dev.createBindGroupLayout({ entries: [
+            // Dynamic offset: one uDepth buffer holds a 256-aligned slot per peel layer
+            // (a shared uniform written between passes in one encoder would lose all but
+            // the last value — every pass in a submit reads the final queue write).
+            { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform", hasDynamicOffset: true } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+            { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+            { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+            { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        ] });
+        const depthMod = dev.createShaderModule({ code: WEBGPU_DEPTH_WGSL });
+        const depthLayout = dev.createPipelineLayout({ bindGroupLayouts: [this.depthBgl] });
+        this.pDepthInit = dev.createComputePipeline({ layout: depthLayout, compute: { module: depthMod, entryPoint: "peelInit" } });
+        this.pDepthSky  = dev.createComputePipeline({ layout: depthLayout, compute: { module: depthMod, entryPoint: "peelSky" } });
+        this.pDepthMark = dev.createComputePipeline({ layout: depthLayout, compute: { module: depthMod, entryPoint: "peelMark" } });
+        // G4 render: per-layer compact (selects layerOf==L into a per-layer idx buffer,
+        // feeding the shared ranksort/emit for each deeper layer's staircase).
+        this.depthCompactBgl = dev.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform", hasDynamicOffset: true } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+            { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+            { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        ] });
+        const depthCompactMod = dev.createShaderModule({ code: WEBGPU_DEPTHCOMPACT_WGSL });
+        this.pDepthCompact = dev.createComputePipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.depthCompactBgl] }),
+            compute: { module: depthCompactMod, entryPoint: "compactLayer" } });
+
+        // ── G2 compute: staircase (ranksort/emit) + HV (total/contrib/max/radius) ──
+        const un = (b) => ({ binding: b, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } });
+        const ro = (b) => ({ binding: b, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } });
+        const rw = (b) => ({ binding: b, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } });
+        // NOTE: distinct from the spring engine's this.stairBgl (script.js _initSpring,
+        // 8 entries). Both init paths share one renderer instance, so a shared name would
+        // clobber — the last writer's layout wins and the other path's bind groups go
+        // invalid (poisoning every submit they share an encoder with). Keep them separate.
+        this.sceneStairBgl = dev.createBindGroupLayout({ entries: [
+            un(0), ro(1), ro(2), rw(3), rw(4), rw(5), rw(6), rw(7), rw(8) ] });
+        const stairMod = dev.createShaderModule({ code: WEBGPU_SCENESTAIR_WGSL });
+        const stairLayout = dev.createPipelineLayout({ bindGroupLayouts: [this.sceneStairBgl] });
+        this.pSceneRanksort = dev.createComputePipeline({ layout: stairLayout, compute: { module: stairMod, entryPoint: "ranksort" } });
+        this.pSceneEmit     = dev.createComputePipeline({ layout: stairLayout, compute: { module: stairMod, entryPoint: "emit" } });
+
+        this.hvBgl = dev.createBindGroupLayout({ entries: [
+            un(0), ro(1), ro(2), ro(3), rw(4), rw(5), rw(6), rw(7) ] });
+        const hvMod = dev.createShaderModule({ code: WEBGPU_HVCONTRIB_WGSL });
+        const hvLayout = dev.createPipelineLayout({ bindGroupLayouts: [this.hvBgl] });
+        this.pSceneHvTotal   = dev.createComputePipeline({ layout: hvLayout, compute: { module: hvMod, entryPoint: "hvTotal" } });
+        this.pSceneHvContrib = dev.createComputePipeline({ layout: hvLayout, compute: { module: hvMod, entryPoint: "hvContrib" } });
+        this.pSceneHvMax     = dev.createComputePipeline({ layout: hvLayout, compute: { module: hvMod, entryPoint: "hvMax" } });
+        this.pSceneHvRadius  = dev.createComputePipeline({ layout: hvLayout, compute: { module: hvMod, entryPoint: "hvRadius" } });
+
+        // ── G2 render: stair line, HV shade, frontier dots ──
+        const uV = (b) => ({ binding: b, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } });
+        const sV = (b) => ({ binding: b, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } });
+        this.sceneStairLineBgl = dev.createBindGroupLayout({ entries: [ uV(0), sV(1), uV(2) ] });   // 3 entries (vs spring's 2) — distinct name avoids clobber
+        this.pSceneStairLine = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.sceneStairLineBgl] }),
+            vertex: { module: dev.createShaderModule({ code: WEBGPU_STAIRLINE_GRAPH_WGSL }), entryPoint: "vs" },
+            fragment: { module: dev.createShaderModule({ code: WEBGPU_STAIRLINE_GRAPH_WGSL }), entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "line-strip" } });
+
+        this.hvShadeBgl = dev.createBindGroupLayout({ entries: [ uV(0), sV(1), uV(2), uV(3) ] });
+        const shadeMod = dev.createShaderModule({ code: WEBGPU_HVSHADE_GRAPH_WGSL });
+        this.pSceneHvShade = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.hvShadeBgl] }),
+            vertex: { module: shadeMod, entryPoint: "vs" },
+            fragment: { module: shadeMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+
+        this.sceneFrontBgl = dev.createBindGroupLayout({ entries: [ uV(0), sV(1), sV(2), sV(3), sV(4), uV(5) ] });
+        const frontMod = dev.createShaderModule({ code: WEBGPU_SCENEFRONT_WGSL });
+        this.pSceneFront = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.sceneFrontBgl] }),
+            vertex: { module: frontMod, entryPoint: "vs" },
+            fragment: { module: frontMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+
+        // ── G3 render: glyph-atlas text (the first sampled texture) ──
+        this.glyphBgl = dev.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+            { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+            { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
+            { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
+        ] });
+        const glyphMod = dev.createShaderModule({ code: WEBGPU_GLYPH_WGSL });
+        this.pSceneGlyph = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.glyphBgl] }),
+            vertex: { module: glyphMod, entryPoint: "vs" },
+            fragment: { module: glyphMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+        this.glyphSampler = dev.createSampler({ magFilter: "linear", minFilter: "linear" });
+
+        // ── G4 render: faded depth dots (vertex-pull pos + layerOf, drawn under the
+        // live frontier). uDepthDots carries depth/radius/ring + the frontier & panel
+        // colours; the shader fades each layer by max(0.3, 0.9·0.72^L) to match the SVG.
+        this.depthDotsBgl = dev.createBindGroupLayout({ entries: [ uV(0), sV(1), sV(2), uV(3) ] });
+        const depthDotsMod = dev.createShaderModule({ code: WEBGPU_DEPTHDOTS_WGSL });
+        this.pDepthDots = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.depthDotsBgl] }),
+            vertex: { module: depthDotsMod, entryPoint: "vs" },
+            fragment: { module: depthDotsMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+        // G4c depth shade: flat per-layer dominated-region fan (reuses hvShadeBgl).
+        const depthShadeMod = dev.createShaderModule({ code: WEBGPU_DEPTHSHADE_WGSL });
+        this.pDepthShade = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.hvShadeBgl] }),
+            vertex: { module: depthShadeMod, entryPoint: "vs" },
+            fragment: { module: depthShadeMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+
+        // ── G4d render: era-B + ghost overlays (CPU-laid geometry, GPU draw) ──
+        this.plainDotsBgl = dev.createBindGroupLayout({ entries: [ uV(0), sV(1), uV(2) ] });
+        const plainDotsMod = dev.createShaderModule({ code: WEBGPU_PLAINDOTS_WGSL });
+        this.pPlainDots = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.plainDotsBgl] }),
+            vertex: { module: plainDotsMod, entryPoint: "vs" },
+            fragment: { module: plainDotsMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+        this.dashLineBgl = dev.createBindGroupLayout({ entries: [ uV(0), sV(1), sV(2), uV(3) ] });
+        const dashLineMod = dev.createShaderModule({ code: WEBGPU_DASHLINE_WGSL });
+        this.pDashLine = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.dashLineBgl] }),
+            vertex: { module: dashLineMod, entryPoint: "vs" },
+            fragment: { module: dashLineMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "line-strip" } });
+
+        // ── G5b render: the non-frontier "regret" hover overlay (line + ring). Two
+        // uniforms only (Scene + a tiny Regret block); no storage buffers — the whole
+        // overlay is two quads. Visible to the fragment too, since the colours/dash live
+        // in the Regret uniform. See WEBGPU_REGRET_WGSL for the geometry derivation.
+        this.regretBgl = dev.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+            { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+        ] });
+        const regretMod = dev.createShaderModule({ code: WEBGPU_REGRET_WGSL });
+        this.pRegret = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.regretBgl] }),
+            vertex: { module: regretMod, entryPoint: "vs" },
+            fragment: { module: regretMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+        // ── G5c render: instanced dashed rings (isolation / regret / pinned). Scene
+        // uniform + a rings storage array; draw(6, ringCount).
+        this.ringsBgl = dev.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+            { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        ] });
+        const ringsMod = dev.createShaderModule({ code: WEBGPU_RINGS_WGSL });
+        this.pRings = dev.createRenderPipeline({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [this.ringsBgl] }),
+            vertex: { module: ringsMod, entryPoint: "vs" },
+            fragment: { module: ringsMod, entryPoint: "fs", targets: [{ format: this.format, blend }] },
+            primitive: { topology: "triangle-list" } });
+    };
+
+    // Build (or rebuild) the Canvas2D glyph atlas at the given dpr covering `charset`.
+    // Rasterizes each (variant, char) cell white-on-transparent (alpha coverage; the
+    // fragment tints by instance colour); label variants additionally get a white
+    // STROKE cell for the halo (pixel-matching .frontier-label's paint-order:stroke).
+    // Returns nothing; populates this.glyph = { dpr, metrics, w, h, charset, uploadPath }
+    // and (re)creates this.glyphTex. metrics maps variant*0x10000+codepoint → cell info.
+    P._buildGlyphAtlas = function (dpr, charset) {
+        const family = (getComputedStyle(document.documentElement)
+            .getPropertyValue("--font-sans") || "sans-serif").trim() || "sans-serif";
+        const cv = document.createElement("canvas");
+        const ctx = cv.getContext("2d");
+        const pad = Math.ceil(3 * dpr) + 1;             // absorbs the 1.5·dpr halo stroke + 1px guard
+        const chars = Array.from(new Set(Array.from(charset)));
+        // ── Cell model (device px) ──────────────────────────────────────────────
+        // Advance-based: cell width = ceil(advance) + 2·pad; the pen origin sits at
+        // (pad, pad+asc) inside the cell. fill and halo are SEPARATE cells of the same
+        // footprint (pad covers the stroke overhang). Placement contract for the CPU:
+        //   rect.x = penX − padCss,  rect.y = baselineY − ascCss − padCss,
+        //   rect.w = wCss, rect.h = hCss; then penX += advanceCss.
+        const cells = [];
+        for (let v = 0; v < GRAPH_GLYPH_VARIANTS.length; v++) {
+            const { px, weight } = GRAPH_GLYPH_VARIANTS[v];
+            ctx.font = `${weight} ${Math.round(px * dpr)}px ${family}`;
+            ctx.textBaseline = "alphabetic";
+            for (const ch of chars) {
+                const m = ctx.measureText(ch);
+                const adv = m.width;
+                const asc = Math.ceil(m.actualBoundingBoxAscent || Math.round(px * dpr * 0.8));
+                const desc = Math.ceil(m.actualBoundingBoxDescent || Math.round(px * dpr * 0.25));
+                const right = Math.ceil(m.actualBoundingBoxRight || adv);
+                const cw = Math.max(Math.ceil(adv), right) + pad * 2;
+                const chh = asc + desc + pad * 2;
+                const base = { v, ch, cw, chh, advance: adv, asc };
+                cells.push({ ...base, halo: false });
+                if (GRAPH_GLYPH_HALO_VARIANTS.has(v)) cells.push({ ...base, halo: true });
+            }
+        }
+        // Shelf-pack.
+        let x = 0, y = 0, shelfH = 0, atlasW = 0;
+        for (const c of cells) {
+            if (x + c.cw > GRAPH_GLYPH_ATLAS_MAX) { x = 0; y += shelfH; shelfH = 0; }
+            c.x = x; c.y = y; x += c.cw; shelfH = Math.max(shelfH, c.chh);
+            atlasW = Math.max(atlasW, x);
+        }
+        cv.width = Math.min(GRAPH_GLYPH_ATLAS_MAX, atlasW);
+        cv.height = y + shelfH;
+        // Rasterize.
+        const metrics = new Map();
+        for (const c of cells) {
+            const { px, weight } = GRAPH_GLYPH_VARIANTS[c.v];
+            ctx.font = `${weight} ${Math.round(px * dpr)}px ${family}`;
+            ctx.textBaseline = "alphabetic";
+            const drawX = c.x + pad, drawY = c.y + pad + c.asc;   // pen origin in the cell
+            if (c.halo) {
+                ctx.strokeStyle = "#fff"; ctx.lineWidth = 3 * dpr; ctx.lineJoin = "round";
+                ctx.strokeText(c.ch, drawX, drawY);
+            } else {
+                ctx.fillStyle = "#fff"; ctx.fillText(c.ch, drawX, drawY);
+            }
+            const key = c.v * 0x10000 + c.ch.codePointAt(0);
+            const u0 = c.x / cv.width, v0 = c.y / cv.height;
+            const u1 = (c.x + c.cw) / cv.width, v1 = (c.y + c.chh) / cv.height;
+            const entry = metrics.get(key) || {
+                advance: c.advance / dpr, w: c.cw / dpr, h: c.chh / dpr,
+                padCss: pad / dpr, ascCss: c.asc / dpr };
+            if (c.halo) { entry.hu0 = u0; entry.hv0 = v0; entry.hu1 = u1; entry.hv1 = v1; }
+            else { entry.u0 = u0; entry.v0 = v0; entry.u1 = u1; entry.v1 = v1; }
+            metrics.set(key, entry);
+        }
+        // Upload to a GPUTexture. Prefer copyExternalImageToTexture; fall back to
+        // writeTexture(getImageData) under backends that reject the canvas source.
+        const dev = this.device;
+        this.glyphTex?.destroy();
+        this.glyphTex = dev.createTexture({
+            size: [cv.width, cv.height], format: "rgba8unorm",
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT });
+        // Upload via writeTexture(getImageData): reliable on every backend including
+        // headless SwiftShader, where copyExternalImageToTexture can silently produce a
+        // BLANK texture (it doesn't throw, so it can't be caught — only the missing text
+        // gives it away). The atlas is built rarely (once per dpr), so the getImageData
+        // copy is a non-issue. The canvas is in-process → not tainted → getImageData safe.
+        let uploadPath = "writeTexture";
+        const img = ctx.getImageData(0, 0, cv.width, cv.height);
+        dev.queue.writeTexture({ texture: this.glyphTex }, img.data, { bytesPerRow: cv.width * 4 }, [cv.width, cv.height, 1]);
+        this.glyph = { dpr, metrics, w: cv.width, h: cv.height, charset, uploadPath };
+    };
+
+    // Ensure the glyph atlas covers `charset` at the current dpr, building/rebuilding it
+    // if needed, and return its metrics map so the CPU can lay out glyph instances before
+    // uploadText. Idempotent — the common refresh (atlas already current) is a no-op.
+    P.ensureGlyphAtlas = function (charset) {
+        this._initGraphPipelines();
+        const covered = this.glyph && this.glyph.dpr === this.dpr &&
+            !Array.from(charset).some(c => !this.glyph.metrics.has(c.codePointAt(0)));
+        if (!covered) this._buildGlyphAtlas(this.dpr, GRAPH_GLYPH_BASE_CHARSET + charset);
+        return this.glyph.metrics;
+    };
+
+    // Upload this refresh's text as glyph instances. Unlike the scene cloud, text is NOT
+    // scale-retained — layout (tick positions, label collision) depends on the scales, so
+    // the CPU rebuilds the instances each refresh (counts are tiny, ≤ a few hundred). The
+    // atlas itself is cached and only rebuilt on a dpr change or a codepoint cache-miss.
+    // `instances` is a flat Float32Array already in the 3·vec4 (48 B) record layout;
+    // opts = { count, strings, charset }.
+    P.uploadText = function (instances, opts) {
+        this._initGraphPipelines();
+        const g = this.graph;
+        if (!g) return;
+        const dev = this.device;
+        // (Re)build the atlas if dpr changed or a requested codepoint isn't covered.
+        const needRebuild = !this.glyph || this.glyph.dpr !== this.dpr ||
+            (opts.charset && Array.from(opts.charset).some(c =>
+                !this.glyph.metrics.has(0 * 0x10000 + c.codePointAt(0))));
+        if (needRebuild) {
+            const charset = GRAPH_GLYPH_BASE_CHARSET + (opts.charset || "");
+            this._buildGlyphAtlas(this.dpr, charset);
+            g.glyphTexRef = null;             // force bind-group rebuild against the new texture
+        }
+        const count = opts.count | 0;
+        const bytes = Math.max(48, count * 48);
+        const grew = !g.bGlyph || g.bGlyph.size < ((bytes + 255) & ~255);
+        if (grew) {
+            g.bGlyph?.destroy();
+            g.bGlyph = dev.createBuffer({ size: Math.max(256, (bytes + 255) & ~255),
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+        }
+        if (count > 0) dev.queue.writeBuffer(g.bGlyph, 0, instances, 0, count * 12);
+        if (grew || g.glyphTexRef !== this.glyphTex || !g.glyphBindGroup) {
+            g.glyphBindGroup = dev.createBindGroup({ layout: this.glyphBgl, entries: [
+                { binding: 0, resource: { buffer: g.uScene } },
+                { binding: 1, resource: { buffer: g.bGlyph } },
+                { binding: 2, resource: this.glyphTex.createView() },
+                { binding: 3, resource: this.glyphSampler },
+            ] });
+            g.glyphTexRef = this.glyphTex;
+        }
+        g.glyphCount = count;
+        g.glyphStrings = opts.strings || null;
+        g.glyphCharset = opts.charset || "";
+    };
+
+    // G4d: upload the era-B + ghost overlay geometry (CPU-laid, data-space). Re-uploaded
+    // each refresh (the frontiers change with filters); counts are tiny so bind groups
+    // just rebuild. `opts.era`/`opts.ghost` are null when that overlay is off.
+    //   era   = { stair: Float32Array(vec2 data, staircase), dots: Float32Array(vec2 data),
+    //             line:[r,g,b,a], shade:[r,g,b,a], dotFill:[r,g,b,a], dotRing:[r,g,b,a] }
+    //   ghost = { stair, arc: Float32Array(screen px per vertex), dots,
+    //             period, dashFrac, line:[r,g,b,a], dotFill:[r,g,b,a] }
+    P.uploadOverlays = function (opts) {
+        this._initGraphPipelines();
+        const g = this.graph;
+        if (!g) return;
+        const dev = this.device;
+        const ST = GPUBufferUsage.STORAGE, CD = GPUBufferUsage.COPY_DST, UNI = GPUBufferUsage.UNIFORM;
+        const ensure = (buf, bytes) => {
+            const size = Math.max(256, (bytes + 255) & ~255);
+            if (buf && buf.size >= size) return buf;
+            buf?.destroy();
+            return dev.createBuffer({ size, usage: ST | CD });
+        };
+        const mkU = (buf, n) => buf || dev.createBuffer({ size: n, usage: UNI | CD });
+        const bg = (buf) => ({ buffer: buf });
+
+        // ── era-B (dashed teal staircase + flat shade + dots) ──
+        const e = opts.era;
+        if (e && e.stair && e.stair.length >= 4) {
+            g.bEraStair = ensure(g.bEraStair, e.stair.byteLength);
+            g.bEraArc   = ensure(g.bEraArc, e.arc.byteLength);
+            g.bEraDots  = ensure(g.bEraDots, Math.max(8, e.dots.byteLength));
+            g.uEraDash = mkU(g.uEraDash, 32); g.uEraShade = mkU(g.uEraShade, 48); g.uEraDot = mkU(g.uEraDot, 48);
+            dev.queue.writeBuffer(g.bEraStair, 0, e.stair);
+            dev.queue.writeBuffer(g.bEraArc, 0, e.arc);
+            if (e.dots.length) dev.queue.writeBuffer(g.bEraDots, 0, e.dots);
+            dev.queue.writeBuffer(g.uEraDash, 0, new Float32Array([
+                e.period, e.dashFrac, 0, 0, e.line[0], e.line[1], e.line[2], e.line[3] ]));
+            dev.queue.writeBuffer(g.uEraShade, 0, new Float32Array([   // Col: .shade is the flat fill
+                0, 0, 0, 0, e.shade[0], e.shade[1], e.shade[2], e.shade[3], 0, 0, 0, 0 ]));
+            dev.queue.writeBuffer(g.uEraDot, 0, new Float32Array([
+                3.5, 1.2, 0, 0, e.dotFill[0], e.dotFill[1], e.dotFill[2], e.dotFill[3],
+                e.dotRing[0], e.dotRing[1], e.dotRing[2], e.dotRing[3] ]));
+            g.eraLineBG = dev.createBindGroup({ layout: this.dashLineBgl, entries: [
+                { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bEraStair) },
+                { binding: 2, resource: bg(g.bEraArc) }, { binding: 3, resource: bg(g.uEraDash) } ] });
+            g.eraShadeBG = dev.createBindGroup({ layout: this.hvShadeBgl, entries: [
+                { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bEraStair) },
+                { binding: 2, resource: bg(g.uEraShade) }, { binding: 3, resource: bg(g.uStair) } ] });
+            g.eraDotsBG = dev.createBindGroup({ layout: this.plainDotsBgl, entries: [
+                { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bEraDots) }, { binding: 2, resource: bg(g.uEraDot) } ] });
+            g.eraStairN = e.stair.length / 2; g.eraDotN = e.dots.length / 2;
+        } else { g.eraStairN = 0; g.eraDotN = 0; }
+
+        // ── ghost ──
+        const gh = opts.ghost;
+        if (gh && gh.stair && gh.stair.length >= 4) {
+            g.bGhostStair = ensure(g.bGhostStair, gh.stair.byteLength);
+            g.bGhostArc   = ensure(g.bGhostArc, gh.arc.byteLength);
+            g.bGhostDots  = ensure(g.bGhostDots, Math.max(8, gh.dots.byteLength));
+            g.uGhostDash = mkU(g.uGhostDash, 32); g.uGhostDot = mkU(g.uGhostDot, 48);
+            dev.queue.writeBuffer(g.bGhostStair, 0, gh.stair);
+            dev.queue.writeBuffer(g.bGhostArc, 0, gh.arc);
+            if (gh.dots.length) dev.queue.writeBuffer(g.bGhostDots, 0, gh.dots);
+            dev.queue.writeBuffer(g.uGhostDash, 0, new Float32Array([
+                gh.period, gh.dashFrac, 0, 0, gh.line[0], gh.line[1], gh.line[2], gh.line[3] ]));
+            dev.queue.writeBuffer(g.uGhostDot, 0, new Float32Array([
+                2.5, 0.0, 0, 0, gh.dotFill[0], gh.dotFill[1], gh.dotFill[2], gh.dotFill[3], 0, 0, 0, 0 ]));
+            g.ghostLineBG = dev.createBindGroup({ layout: this.dashLineBgl, entries: [
+                { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bGhostStair) },
+                { binding: 2, resource: bg(g.bGhostArc) }, { binding: 3, resource: bg(g.uGhostDash) } ] });
+            g.ghostDotsBG = dev.createBindGroup({ layout: this.plainDotsBgl, entries: [
+                { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bGhostDots) }, { binding: 2, resource: bg(g.uGhostDot) } ] });
+            g.ghostStairN = gh.stair.length / 2; g.ghostDotN = gh.dots.length / 2;
+        } else { g.ghostStairN = 0; g.ghostDotN = 0; }
+    };
+
+    // ── G5b/c: interaction overlays (hover/pin), written per cursor event ─────────
+    // Unlike the scene/overlay uploads (keyed on identity, skipped when unchanged), the
+    // interaction overlays change on every mousemove, so this writes the small buffers and
+    // flips the draw counters. The render itself is coalesced to one frame by
+    // WebGPURenderer.presentInteraction(). Two independent overlay kinds:
+    //
+    //   state.line  = { srcX, srcY, tgtX, tgtY, hasLine, width?, color?, period?, dashFrac? }
+    //                 — the regret leader (DATA-space endpoints) — or null/hasLine:false to clear.
+    //   state.rings = [ { cx, cy, radiusPx, widthPx?, color?, period?, dashFrac? }, … ]
+    //                 — every dashed ring (DATA-space centre, PIXEL radius); [] clears them.
+    //
+    // A key present in `state` REPLACES that overlay; a key absent LEAVES it untouched (so a
+    // caller can update just the rings without disturbing the line). Colours default to the
+    // SVG `.regret-line` paint (#5a6478). last*/counts feed the verify hooks.
+    P.uploadInteraction = function (state) {
+        this._initGraphPipelines();
+        const g = this.graph;
+        if (!g || !state) return;
+        const dev = this.device;
+        if ("line" in state) {
+            const L = state.line;
+            if (!L || !L.hasLine) { g.interLineOn = false; g.lastLine = null; }
+            else {
+                if (!g.bRegretU) g.bRegretU = dev.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+                if (!g.regretBG || g._regretScene !== g.uScene) {
+                    g.regretBG = dev.createBindGroup({ layout: this.regretBgl, entries: [
+                        { binding: 0, resource: { buffer: g.uScene } },
+                        { binding: 1, resource: { buffer: g.bRegretU } } ] });
+                    g._regretScene = g.uScene;
+                }
+                const col = L.color || [0.353, 0.392, 0.471, 0.6];   // #5a6478 @ .6
+                const buf = new Float32Array(20);
+                buf.set([L.srcX, L.srcY, L.tgtX, L.tgtY], 0);                       // a = endpoints
+                buf.set([0, L.width || 1.5, 1, 0], 4);                              // b = (_, lineW, hasLine, _)
+                buf.set([L.period || 7, L.dashFrac != null ? L.dashFrac : 4 / 7, 0, 0], 8);
+                buf.set(col, 12); buf.set(col, 16);                                // lineCol (ringCol slot unused)
+                dev.queue.writeBuffer(g.bRegretU, 0, buf);
+                g.interLineOn = true; g.lastLine = L;
+            }
+        }
+        if ("rings" in state) {
+            const rs = state.rings || [];
+            g.ringCount = rs.length;
+            g.lastRings = rs;
+            if (rs.length) {
+                const need = rs.length * 48;                                       // 3·vec4 per Ring
+                if (!g.bRings || g.bRings.size < need) {
+                    g.bRings?.destroy();
+                    g.bRings = dev.createBuffer({ size: Math.max(256, (need + 255) & ~255),
+                        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+                    g.ringsBG = null;
+                }
+                if (!g.ringsBG || g._ringsScene !== g.uScene) {
+                    g.ringsBG = dev.createBindGroup({ layout: this.ringsBgl, entries: [
+                        { binding: 0, resource: { buffer: g.uScene } },
+                        { binding: 1, resource: { buffer: g.bRings } } ] });
+                    g._ringsScene = g.uScene;
+                }
+                const arr = new Float32Array(rs.length * 12);
+                rs.forEach((r, k) => {
+                    const o = k * 12;
+                    arr[o] = r.cx; arr[o + 1] = r.cy; arr[o + 2] = r.radiusPx; arr[o + 3] = r.widthPx || 1.5;
+                    const c = r.color || [0.353, 0.392, 0.471, 0.35];
+                    arr[o + 4] = c[0]; arr[o + 5] = c[1]; arr[o + 6] = c[2]; arr[o + 7] = c[3];
+                    arr[o + 8] = r.period || 7; arr[o + 9] = r.dashFrac != null ? r.dashFrac : 4 / 7;
+                });
+                dev.queue.writeBuffer(g.bRings, 0, arr);
+            }
+        }
+    };
+
+    // Draw the interaction overlays LAST in the frame (above text), so the hover/pin leader,
+    // rings, and HV polygon sit on top of the whole chart. No-op when nothing is set.
+    P._drawGraphInteraction = function (rp) {
+        if (!this.graphActive) return;       // suppress the retained scene during the animation
+        const g = this.graph;
+        if (!g) return;
+        if (g.ringCount > 0 && g.ringsBG) {
+            rp.setPipeline(this.pRings);
+            rp.setBindGroup(0, g.ringsBG);
+            rp.draw(6, g.ringCount);
+        }
+        if (g.interLineOn && g.regretBG) {
+            rp.setPipeline(this.pRegret);
+            rp.setBindGroup(0, g.regretBG);
+            rp.draw(6, 1);                       // instance 0 = the regret leader line
+        }
+    };
+
+    // Upload (or skip!) the scene. `key` is the SCALE-INDEPENDENT identity of the
+    // point set — filters/mode/axes/colors but NOT the scale domain, viewport, or
+    // dpr. Same key ⇒ the resident buffers are already correct ⇒ this returns
+    // without touching the bus. That skip IS the retained-scene win: on a
+    // zoom/resize-only refresh, only writeSceneScale()'s 64 bytes move.
+    P.uploadScene = function (points, opts) {
+        this._initGraphPipelines();
+        const g = this.graph || (this.graph = {
+            bPos: null, bCol: null, bSize: null, uScene: null, bindGroup: null,
+            count: 0, key: null, uploads: 0, cpuPos: null,
+            // G1 frontier state. bOnFront/bFrontIdx/bCount are the compute
+            // outputs; uSky the compute uniform; stage[] the double-buffered
+            // MAP_READ staging pair for the fire-and-forget readback contract.
+            bOnFront: null, bFrontIdx: null, bCount: null, uSky: null,
+            skyBindGroup: null,
+            stage: [null, null], stagePending: [false, false],
+            front: null,        // latest mapped result: { count, indices, key }
+            frontReads: 0,      // verify hook asserts retention (stays 1, like uploads)
+            cpuMeta: null,      // written-index → {x, y, playerID, year} for reconciliation
+            xSign: 1, ySign: 1,
+            // G2: staircase + HV state. bFrontSorted/bFrontSortedIdx hold the canonical
+            // x-sorted frontier; bStaircase/bStairIndirect the line-strip; bShadeIndirect
+            // the fan; bHv the per-rank contributions; bFrontRadius the per-instance dot
+            // radius; bHvScalar [totalHv, maxContrib]. uStair/uHv compute uniforms;
+            // uGraphCol the render colours (stair line / HV shade / worst-mode override).
+            bFrontSorted: null, bFrontSortedIdx: null, bStaircase: null,
+            bStairIndirect: null, bShadeIndirect: null, bHv: null, bFrontRadius: null,
+            bHvScalar: null, uStair: null, uHv: null, uGraphCol: null,
+            stairBindGroup: null, hvBindGroup: null,
+            stairLineBindGroup: null, hvShadeBindGroup: null, frontBindGroup: null,
+            // G3: glyph text. bGlyph = instance buffer (3·vec4 per glyph); glyphBindGroup
+            // binds uScene + bGlyph + the atlas texture + sampler; glyphCount drives the
+            // draw; glyphStrings/glyphCharset feed the verify hook.
+            bGlyph: null, glyphCount: 0, glyphBindGroup: null,
+            glyphTexRef: null, glyphStrings: null, glyphCharset: null,
+            // G4: depth-layer peeling. bPeeled/bLayerOf/bOnTmp are cloud-sized scratch
+            // (layerOf[i] = a point's onion-peel layer, BIG if deeper than `depth`);
+            // uDepth the per-iteration uniform; depth the requested peel count (1 = the
+            // frontier only = no peeling). depthBindGroup binds them all.
+            bPeeled: null, bLayerOf: null, bOnTmp: null, uDepth: null,
+            depthBindGroup: null, depth: 1,
+            // G4 render: per deeper-layer staircase scratch (indexed 1..depth-1) reusing
+            // the shared ranksort/emit; uDepthCol[L] the faded stair colour; uDepthDots
+            // + depthDotsBindGroup the single faded-dots pass; depthStairVerts[L] the
+            // verify hook's per-layer staircase vertex count.
+            bDepthIdx: [], bDepthCount: [], bDepthSorted: [], bDepthSortedIdx: [],
+            bDepthStair: [], bDepthIndirect: [], bDepthShadeIndirect: [], uDepthCol: [],
+            depthStairBG: [], depthCompactBG: [], depthStairLineBG: [], depthShadeBG: [],
+            uDepthDots: null, depthDotsBindGroup: null,
+            // G4d era-B + ghost overlays (CPU-laid data-space geometry, re-uploaded each
+            // refresh — small vertex counts). era* = solid staircase + flat shade + dots;
+            // ghost* = dashed staircase (per-vertex screen arc length) + faint dots.
+            bEraStair: null, bEraArc: null, bEraDots: null, uEraDash: null, uEraShade: null,
+            uEraDot: null, eraStairN: 0, eraDotN: 0, eraLineBG: null, eraShadeBG: null, eraDotsBG: null,
+            bGhostStair: null, bGhostArc: null, bGhostDots: null, uGhostDash: null, uGhostDot: null,
+            ghostStairN: 0, ghostDotN: 0, ghostLineBG: null, ghostDotsBG: null,
+            // G5b/c interaction overlays (transient, written per hover/pin — NOT keyed on the
+            // scene identity). The regret LINE rides bRegretU (80-byte uniform); every dashed
+            // RING (isolation, regret distance, pinned) rides bRings (storage array of Ring).
+            // *BG cache the bind group vs the uScene it was built against (rebuilt only if
+            // uScene is recreated). interLineOn/ringCount gate the draws; last* feed verify.
+            bRegretU: null, regretBG: null, interLineOn: false, _regretScene: null, lastLine: null,
+            bRings: null, ringsBG: null, ringCount: 0, _ringsScene: null, lastRings: null,
+        });
+        if (!g.uScene) {
+            g.uScene = this.device.createBuffer({
+                size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        }
+        if (g.key === opts.key) return;     // identity unchanged → buffers stay resident
+
+        const n = points ? points.length : 0;
+        // SoA flatten in data units. Non-finite values are COMPACTED out (not
+        // NaN-holed): count is the written length, so arrays and draw agree.
+        const posArr = new Float32Array(Math.max(1, n) * 2);
+        const colArr = new Uint32Array(Math.max(1, n));
+        const sizeArr = new Float32Array(Math.max(1, n));
+        const { fillFor, alpha, radius } = opts;
+        // G1: parallel JS-side metadata, indexed by the WRITTEN position (post
+        // compaction), so a frontIdx readback maps straight to player identity —
+        // the bridge between GPU indices and the CPU world (cards, verify).
+        const meta = new Array(n);
+        // Canonical (sign-folded) min/max of the cloud — the HV reference point R is the
+        // min corner − eps, exactly as computeHvContributions derives it (script.js).
+        const xSign = opts.xSign ?? 1, ySign = opts.ySign ?? 1;
+        let xMinS = Infinity, yMinS = Infinity, xMaxS = -Infinity, yMaxS = -Infinity;
+        let w = 0;
+        for (let k = 0; k < n; k++) {
+            const d = points[k];
+            const x = d.x, y = d.y;
+            if (!isFinite(x) || !isFinite(y)) continue;
+            posArr[w * 2] = x; posArr[w * 2 + 1] = y;
+            colArr[w] = packColorRGBA(fillFor(d), alpha);
+            sizeArr[w] = radius;
+            meta[w] = { x, y, playerID: d.playerID, year: d.year ?? d.yearID };
+            const sx = x * xSign, sy = y * ySign;
+            if (sx < xMinS) xMinS = sx; if (sx > xMaxS) xMaxS = sx;
+            if (sy < yMinS) yMinS = sy; if (sy > yMaxS) yMaxS = sy;
+            w++;
+        }
+        // Grow-on-demand with COPY_SRC so the verify hook can read positions back
+        // (the same flag the streaming engine sets on bPos for verifySpring).
+        const ensure = (buf, bytes) => {
+            const size = Math.max(256, (bytes + 255) & ~255);
+            if (buf && buf.size >= size) return buf;
+            buf?.destroy();
+            return this.device.createBuffer({ size,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+        };
+        const oldPos = g.bPos, oldCol = g.bCol, oldSize = g.bSize, oldFront = g.bOnFront,
+              oldRad = g.bFrontRadius, oldLayer = g.bLayerOf;
+        g.bPos = ensure(g.bPos, w * 8);
+        g.bCol = ensure(g.bCol, w * 4);
+        g.bSize = ensure(g.bSize, w * 4);
+        g.bOnFront = ensure(g.bOnFront, w * 4);
+        g.bFrontRadius = ensure(g.bFrontRadius, w * 4);   // G2: per-instance dot radius
+        g.bPeeled = ensure(g.bPeeled, w * 4);             // G4: peel mask + layer scratch
+        g.bLayerOf = ensure(g.bLayerOf, w * 4);
+        g.bOnTmp = ensure(g.bOnTmp, w * 4);
+        // G1 fixed-size frontier scratch + uniform, allocated once with the scene.
+        if (!g.bFrontIdx) {
+            g.bFrontIdx = this.device.createBuffer({
+                size: WEBGPU_GRAPH_MAX_FRONT * 4,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+            g.bCount = this.device.createBuffer({
+                size: 16,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+            g.uSky = this.device.createBuffer({
+                size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+            g.uDepth = this.device.createBuffer({   // G4 peel uniform {n, xSign, ySign, layer}
+                size: WEBGPU_GRAPH_MAX_DEPTH * 256,  // one 256-aligned slot per layer (dynamic offset)
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+            // G2 fixed-size scratch + uniforms.
+            const mk = (size, usage) => this.device.createBuffer({ size, usage });
+            const ST = GPUBufferUsage.STORAGE, CS = GPUBufferUsage.COPY_SRC, CD = GPUBufferUsage.COPY_DST;
+            g.bFrontSorted    = mk(WEBGPU_GRAPH_MAX_FRONT * 8, ST | CS);
+            g.bFrontSortedIdx = mk(WEBGPU_GRAPH_MAX_FRONT * 4, ST | CS);
+            g.bStaircase      = mk((2 * WEBGPU_GRAPH_MAX_FRONT + 2) * 8, ST | CS);
+            g.bStairIndirect  = mk(16, ST | GPUBufferUsage.INDIRECT | CD | CS);
+            g.bShadeIndirect  = mk(16, ST | GPUBufferUsage.INDIRECT | CD | CS);
+            g.bHv             = mk(WEBGPU_GRAPH_MAX_FRONT * 4, ST | CS);
+            g.bHvScalar       = mk(16, ST | CD | CS);
+            g.uStair    = mk(32, GPUBufferUsage.UNIFORM | CD);
+            g.uHv       = mk(32, GPUBufferUsage.UNIFORM | CD);
+            g.uGraphCol = mk(48, GPUBufferUsage.UNIFORM | CD);
+            // G4 per deeper-layer staircase scratch + faded colour (slots 1..MAX_DEPTH-1;
+            // slot 0 unused — layer 0 is the live frontier with its own G2 staircase).
+            const IND = GPUBufferUsage.INDIRECT;
+            for (let L = 1; L < WEBGPU_GRAPH_MAX_DEPTH; L++) {
+                g.bDepthIdx[L]           = mk(WEBGPU_GRAPH_MAX_FRONT * 4, ST | CS);
+                g.bDepthCount[L]         = mk(16, ST | CD | CS);
+                g.bDepthSorted[L]        = mk(WEBGPU_GRAPH_MAX_FRONT * 8, ST | CS);
+                g.bDepthSortedIdx[L]     = mk(WEBGPU_GRAPH_MAX_FRONT * 4, ST | CS);
+                g.bDepthStair[L]         = mk((2 * WEBGPU_GRAPH_MAX_FRONT + 2) * 8, ST | CS);
+                g.bDepthIndirect[L]      = mk(16, ST | IND | CD | CS);
+                g.bDepthShadeIndirect[L] = mk(16, ST | IND | CD | CS);
+                g.uDepthCol[L]           = mk(48, GPUBufferUsage.UNIFORM | CD);
+            }
+            g.uDepthDots = mk(48, GPUBufferUsage.UNIFORM | CD);
+            // Stair-line bind groups bind only fixed buffers (uScene/staircase/colour) →
+            // built once. Compute + dots bind groups touch growable pos/layerOf → rebuilt
+            // on grow below.
+            for (let L = 1; L < WEBGPU_GRAPH_MAX_DEPTH; L++) {
+                g.depthStairLineBG[L] = this.device.createBindGroup({ layout: this.sceneStairLineBgl, entries: [
+                    { binding: 0, resource: { buffer: g.uScene } },
+                    { binding: 1, resource: { buffer: g.bDepthStair[L] } },
+                    { binding: 2, resource: { buffer: g.uDepthCol[L] } },
+                ] });
+                g.depthShadeBG[L] = this.device.createBindGroup({ layout: this.hvShadeBgl, entries: [
+                    { binding: 0, resource: { buffer: g.uScene } },
+                    { binding: 1, resource: { buffer: g.bDepthStair[L] } },
+                    { binding: 2, resource: { buffer: g.uDepthCol[L] } },
+                    { binding: 3, resource: { buffer: g.uStair } },
+                ] });
+            }
+        }
+        const grew = g.bPos !== oldPos || g.bCol !== oldCol || g.bSize !== oldSize ||
+                     g.bOnFront !== oldFront || g.bFrontRadius !== oldRad || g.bLayerOf !== oldLayer;
+        if (w > 0) {
+            this.device.queue.writeBuffer(g.bPos, 0, posArr, 0, w * 2);
+            this.device.queue.writeBuffer(g.bCol, 0, colArr, 0, w);
+            this.device.queue.writeBuffer(g.bSize, 0, sizeArr, 0, w);
+        }
+        // Bind groups only rebuild when a buffer object was replaced (grew) —
+        // writeBuffer into an existing buffer keeps the old bind group valid.
+        if (grew || !g.bindGroup) {
+            g.bindGroup = this.device.createBindGroup({ layout: this.sceneBgl, entries: [
+                { binding: 0, resource: { buffer: g.uScene } },
+                { binding: 1, resource: { buffer: g.bPos } },
+                { binding: 2, resource: { buffer: g.bCol } },
+                { binding: 3, resource: { buffer: g.bSize } },
+                { binding: 4, resource: { buffer: g.bOnFront } },
+            ] });
+            g.skyBindGroup = this.device.createBindGroup({ layout: this.skyBgl, entries: [
+                { binding: 0, resource: { buffer: g.uSky } },
+                { binding: 1, resource: { buffer: g.bPos } },
+                { binding: 2, resource: { buffer: g.bOnFront } },
+                { binding: 3, resource: { buffer: g.bFrontIdx } },
+                { binding: 4, resource: { buffer: g.bCount } },
+            ] });
+            const bg = (buf) => ({ buffer: buf });
+            g.stairBindGroup = this.device.createBindGroup({ layout: this.sceneStairBgl, entries: [
+                { binding: 0, resource: bg(g.uStair) }, { binding: 1, resource: bg(g.bPos) },
+                { binding: 2, resource: bg(g.bFrontIdx) }, { binding: 3, resource: bg(g.bCount) },
+                { binding: 4, resource: bg(g.bFrontSorted) }, { binding: 5, resource: bg(g.bFrontSortedIdx) },
+                { binding: 6, resource: bg(g.bStaircase) }, { binding: 7, resource: bg(g.bStairIndirect) },
+                { binding: 8, resource: bg(g.bShadeIndirect) },
+            ] });
+            g.hvBindGroup = this.device.createBindGroup({ layout: this.hvBgl, entries: [
+                { binding: 0, resource: bg(g.uHv) }, { binding: 1, resource: bg(g.bPos) },
+                { binding: 2, resource: bg(g.bFrontSorted) }, { binding: 3, resource: bg(g.bFrontSortedIdx) },
+                { binding: 4, resource: bg(g.bCount) }, { binding: 5, resource: bg(g.bHv) },
+                { binding: 6, resource: bg(g.bFrontRadius) }, { binding: 7, resource: bg(g.bHvScalar) },
+            ] });
+            g.stairLineBindGroup = this.device.createBindGroup({ layout: this.sceneStairLineBgl, entries: [
+                { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bStaircase) },
+                { binding: 2, resource: bg(g.uGraphCol) },
+            ] });
+            g.hvShadeBindGroup = this.device.createBindGroup({ layout: this.hvShadeBgl, entries: [
+                { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bStaircase) },
+                { binding: 2, resource: bg(g.uGraphCol) }, { binding: 3, resource: bg(g.uStair) },
+            ] });
+            g.frontBindGroup = this.device.createBindGroup({ layout: this.sceneFrontBgl, entries: [
+                { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bPos) },
+                { binding: 2, resource: bg(g.bCol) }, { binding: 3, resource: bg(g.bOnFront) },
+                { binding: 4, resource: bg(g.bFrontRadius) }, { binding: 5, resource: bg(g.uGraphCol) },
+            ] });
+            g.depthBindGroup = this.device.createBindGroup({ layout: this.depthBgl, entries: [
+                { binding: 0, resource: { buffer: g.uDepth, offset: 0, size: 16 } },
+                { binding: 1, resource: bg(g.bPos) },
+                { binding: 2, resource: bg(g.bPeeled) }, { binding: 3, resource: bg(g.bLayerOf) },
+                { binding: 4, resource: bg(g.bOnTmp) },
+            ] });
+            g.depthDotsBindGroup = this.device.createBindGroup({ layout: this.depthDotsBgl, entries: [
+                { binding: 0, resource: bg(g.uScene) }, { binding: 1, resource: bg(g.bPos) },
+                { binding: 2, resource: bg(g.bLayerOf) }, { binding: 3, resource: bg(g.uDepthDots) },
+            ] });
+            // Per deeper-layer compute bind groups: compactLayer (layerOf→idx/count) and
+            // the shared ranksort/emit (idx→sorted→staircase) over per-layer buffers.
+            for (let L = 1; L < WEBGPU_GRAPH_MAX_DEPTH; L++) {
+                g.depthCompactBG[L] = this.device.createBindGroup({ layout: this.depthCompactBgl, entries: [
+                    { binding: 0, resource: { buffer: g.uDepth, offset: 0, size: 16 } },
+                    { binding: 1, resource: bg(g.bLayerOf) },
+                    { binding: 2, resource: bg(g.bDepthIdx[L]) }, { binding: 3, resource: bg(g.bDepthCount[L]) },
+                ] });
+                g.depthStairBG[L] = this.device.createBindGroup({ layout: this.sceneStairBgl, entries: [
+                    { binding: 0, resource: bg(g.uStair) }, { binding: 1, resource: bg(g.bPos) },
+                    { binding: 2, resource: bg(g.bDepthIdx[L]) }, { binding: 3, resource: bg(g.bDepthCount[L]) },
+                    { binding: 4, resource: bg(g.bDepthSorted[L]) }, { binding: 5, resource: bg(g.bDepthSortedIdx[L]) },
+                    { binding: 6, resource: bg(g.bDepthStair[L]) }, { binding: 7, resource: bg(g.bDepthIndirect[L]) },
+                    { binding: 8, resource: bg(g.bDepthShadeIndirect[L]) },
+                ] });
+            }
+        }
+        g.count = w;
+        g.key = opts.key;
+        g.uploads++;                          // verify hook asserts this stays put across re-renders
+        g.cpuPos = posArr.subarray(0, w * 2); // JS-side copy for the G0 readback invariant
+        g.cpuMeta = meta;
+        g.xSign = xSign;
+        g.ySign = ySign;
+        g.depth = Math.max(1, Math.min(WEBGPU_GRAPH_MAX_DEPTH, opts.depth | 0 || 1));   // G4 peel count
+        // G2 canonical geometry. Anti-ideal corner = the canonical-min DOMAIN edges
+        // (the CPU staircase caps at screen 0 / plotH = the worst-value edges). HV
+        // reference R = cloud canonical-min corner − eps (matches computeHvContributions).
+        const xd = opts.xDomain || [xMinS * xSign, xMaxS * xSign];
+        const yd = opts.yDomain || [yMinS * ySign, yMaxS * ySign];
+        const antiXC = Math.min(xd[0] * xSign, xd[1] * xSign);
+        const antiYC = Math.min(yd[0] * ySign, yd[1] * ySign);
+        const epsX = Math.max(1e-9, (xMaxS - xMinS) * 1e-6);
+        const epsY = Math.max(1e-9, (yMaxS - yMinS) * 1e-6);
+        g.RxC = (isFinite(xMinS) ? xMinS : 0) - epsX;
+        g.RyC = (isFinite(yMinS) ? yMinS : 0) - epsY;
+        g.antiXC = antiXC; g.antiYC = antiYC;
+        // uStair / uHv compute uniforms (n, signs, anti or ref corner).
+        const stU = new ArrayBuffer(32);
+        new Uint32Array(stU, 0, 1)[0] = w;
+        new Float32Array(stU, 4, 4).set([xSign, ySign, antiXC, antiYC]);
+        this.device.queue.writeBuffer(g.uStair, 0, stU);
+        const hvU = new ArrayBuffer(32);
+        new Uint32Array(hvU, 0, 1)[0] = w;
+        new Float32Array(hvU, 4, 4).set([xSign, ySign, g.RxC, g.RyC]);
+        this.device.queue.writeBuffer(g.uHv, 0, hvU);
+        // uGraphCol: stair line rgba, HV shade rgb, worst-mode front override (rgb, use).
+        const sc = opts.stairColor || [0.06, 0.09, 0.16, 0.55];
+        const hc = opts.hvColor || [0.0, 0.176, 0.447];
+        const fo = opts.frontOverride || [0, 0, 0, 0];
+        this.device.queue.writeBuffer(g.uGraphCol, 0, new Float32Array([
+            sc[0], sc[1], sc[2], sc[3] ?? 0.55,
+            hc[0], hc[1], hc[2], 0,
+            fo[0], fo[1], fo[2], fo[3] ?? 0,
+        ]));
+        // G4 depth render colours. The depth overlay always uses --frontier-color (not the
+        // worst-mode purple override), matching the SVG .depth-* CSS; the dot ring is --panel.
+        const dCol = opts.depthColor || [0.06, 0.09, 0.16];
+        const dPanel = opts.panelColor || [1, 1, 1];
+        this.device.queue.writeBuffer(g.uDepthDots, 0, new Float32Array([
+            g.depth, 3.0, 1.0, 0,            // depth cap, dot radius, ring px
+            dCol[0], dCol[1], dCol[2], 1,
+            dPanel[0], dPanel[1], dPanel[2], 1,
+        ]));
+        // Per deeper-layer stair colour = frontier rgb at the SVG's per-layer opacity
+        // max(0.3, 0.9·0.72^L). Only .stair (binding read by the stair-line shader) matters.
+        // .stair = line colour at the per-layer fade; .shade = the dominated-region fill
+        // (frontier rgb at 0.06, the SVG .depth-shade fill-opacity — stacked draws darken).
+        for (let L = 1; L < WEBGPU_GRAPH_MAX_DEPTH; L++) {
+            const op = Math.max(0.3, 0.9 * Math.pow(0.72, L));
+            this.device.queue.writeBuffer(g.uDepthCol[L], 0, new Float32Array([
+                dCol[0], dCol[1], dCol[2], op,  dCol[0], dCol[1], dCol[2], 0.06,  0, 0, 0, 0,
+            ]));
+        }
+        // The skyline runs HERE — i.e. only on scene-dirty frames, by
+        // construction (this point is only reached when the key changed). The
+        // submit lands on the queue BEFORE present()'s, so the same-frame cloud
+        // draw vertex-pulls a settled bOnFront — even right after a grow (a
+        // fresh zeroed buffer never reaches the rasterizer un-judged).
+        this._computeGraphFrontier();
+    };
+
+    // G1: one encoder — skyline (O(n²) verdicts) → compact (count + indices) →
+    // copy the compact result into a free staging buffer — then submit and hand
+    // the staging buffer to the fire-and-forget readback. Separate compute
+    // passes in one encoder serialize, so compact sees skyline's writes and the
+    // copy sees compact's.
+    P._computeGraphFrontier = function () {
+        const g = this.graph;
+        if (!g || !(g.count > 0)) return;
+        const dev = this.device;
+        // n as u32, signs as f32, originDrop pinned to 0 (static scene: an
+        // uploaded (0,0) is real data, unlike the streaming engine's phantoms).
+        const u = new ArrayBuffer(16);
+        new Uint32Array(u, 0, 1)[0] = g.count;
+        new Float32Array(u, 4, 3).set([g.xSign, g.ySign, 0]);
+        dev.queue.writeBuffer(g.uSky, 0, u);
+        dev.queue.writeBuffer(g.bCount, 0, new Uint32Array(4)); // K → 0
+        // G2: reset the GPU-written draw args (a frame with K==0 must draw nothing).
+        dev.queue.writeBuffer(g.bStairIndirect, 0, new Uint32Array([0, 1, 0, 0]));
+        dev.queue.writeBuffer(g.bShadeIndirect, 0, new Uint32Array([0, 1, 0, 0]));
+        dev.queue.writeBuffer(g.bHvScalar, 0, new Float32Array([0, 1]));
+        const enc = dev.createCommandEncoder();
+        const wg = Math.ceil(g.count / 64);
+        const wgF = Math.ceil(WEBGPU_GRAPH_MAX_FRONT / 64);   // frontier passes self-guard by K
+        for (const pipe of [this.pSceneSkyline, this.pSceneCompact]) {
+            const cp = enc.beginComputePass();
+            cp.setPipeline(pipe);
+            cp.setBindGroup(0, g.skyBindGroup);
+            cp.dispatchWorkgroups(wg);
+            cp.end();
+        }
+        // G2 chain (same encoder, serialized): sort the frontier by canonical x, emit
+        // the staircase + shade-fan draw args, then the HV passes — totalHv (1) →
+        // per-rank leave-one-out contributions (K) → maxContrib (1) → per-dot radius (K).
+        const pass = (pipe, bgKey, groups) => {
+            const cp = enc.beginComputePass();
+            cp.setPipeline(pipe); cp.setBindGroup(0, g[bgKey]); cp.dispatchWorkgroups(groups); cp.end();
+        };
+        pass(this.pSceneRanksort, "stairBindGroup", wgF);
+        pass(this.pSceneEmit,     "stairBindGroup", wgF);
+        pass(this.pSceneHvTotal,  "hvBindGroup", 1);
+        pass(this.pSceneHvContrib,"hvBindGroup", wgF);
+        pass(this.pSceneHvMax,    "hvBindGroup", 1);
+        pass(this.pSceneHvRadius, "hvBindGroup", wgF);
+        // G4: depth-layer peeling (only when requested). peelInit, then `depth`
+        // (peelSky, peelMark) pairs — each pass over the whole cloud, serialized so
+        // every dominance test sees the prior mark's settled peeled[]. layerOf[] is
+        // the result (read back by the verify hook; rendered in the next phase).
+        if (g.depth > 1) {
+            // Write every layer's uniform slot up front (one submit, so all queue
+            // writes precede the command buffer); pick the slot per pass via the
+            // dynamic offset. peelInit reads slot 0 (only n is meaningful there).
+            for (let L = 0; L < g.depth; L++) {
+                const du = new ArrayBuffer(16);
+                new Uint32Array(du, 0, 1)[0] = g.count;
+                new Float32Array(du, 4, 2).set([g.xSign, g.ySign]);
+                new Uint32Array(du, 12, 1)[0] = L;
+                dev.queue.writeBuffer(g.uDepth, L * 256, du);
+            }
+            const dpass = (pipe, slot) => {
+                const cp = enc.beginComputePass();
+                cp.setPipeline(pipe); cp.setBindGroup(0, g.depthBindGroup, [slot * 256]);
+                cp.dispatchWorkgroups(wg); cp.end();
+            };
+            dpass(this.pDepthInit, 0);
+            for (let L = 0; L < g.depth; L++) { dpass(this.pDepthSky, L); dpass(this.pDepthMark, L); }
+            // Per deeper layer: gather its members (compactLayer) then reuse the shared
+            // ranksort/emit to sort + emit its staircase into the per-layer buffer.
+            for (let L = 1; L < g.depth; L++) {
+                dev.queue.writeBuffer(g.bDepthCount[L], 0, new Uint32Array(4));
+                dev.queue.writeBuffer(g.bDepthIndirect[L], 0, new Uint32Array([0, 1, 0, 0]));
+                dev.queue.writeBuffer(g.bDepthShadeIndirect[L], 0, new Uint32Array([0, 1, 0, 0]));
+                { const cp = enc.beginComputePass(); cp.setPipeline(this.pDepthCompact);
+                  cp.setBindGroup(0, g.depthCompactBG[L], [L * 256]); cp.dispatchWorkgroups(wg); cp.end(); }
+                for (const pipe of [this.pSceneRanksort, this.pSceneEmit]) {
+                    const cp = enc.beginComputePass();
+                    cp.setPipeline(pipe); cp.setBindGroup(0, g.depthStairBG[L]); cp.dispatchWorkgroups(wgF); cp.end();
+                }
+            }
+        }
+        // Pick a free staging buffer (double-buffered: a still-mapped buffer
+        // from a previous scene-dirty frame must not be re-targeted). At
+        // scene-dirty cadence both being busy "can't happen" — latest-wins skip
+        // if it somehow does; the next dirty frame re-reads.
+        const si = !g.stagePending[0] ? 0 : !g.stagePending[1] ? 1 : -1;
+        if (si >= 0) {
+            if (!g.stage[si]) {
+                g.stage[si] = dev.createBuffer({
+                    size: 16 + WEBGPU_GRAPH_MAX_FRONT * 4,
+                    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+            }
+            enc.copyBufferToBuffer(g.bCount, 0, g.stage[si], 0, 16);
+            enc.copyBufferToBuffer(g.bFrontIdx, 0, g.stage[si], 16, WEBGPU_GRAPH_MAX_FRONT * 4);
+        }
+        dev.queue.submit([enc.finish()]);
+        if (si >= 0) this._readbackGraphFrontier(si, g.key);
+    };
+
+    // The readback contract (docs/rendering.md §G-track "Interaction"): a tiny
+    // fire-and-forget mapAsync on scene-dirty frames only — render NEVER waits
+    // on a map (per-frame mapAsync is the documented headless device-loss
+    // trigger; this is the same one-shot risk class as the verify hooks).
+    // In G1 the result only feeds state + verification (`g.front`); rewiring
+    // cards/tooltip/quadtree onto it is the G5 convergence.
+    P._readbackGraphFrontier = function (si, key) {
+        const g = this.graph;
+        g.stagePending[si] = true;
+        g.stage[si].mapAsync(GPUMapMode.READ).then(() => {
+            const buf = g.stage[si].getMappedRange();
+            const count = Math.min(new Uint32Array(buf, 0, 1)[0], WEBGPU_GRAPH_MAX_FRONT);
+            const indices = Array.from(new Uint32Array(buf, 16, count));
+            g.stage[si].unmap();
+            g.stagePending[si] = false;
+            // Latest-wins: a stale map resolving after a newer scene upload must
+            // not clobber it (keys are scene identities, so compare is exact).
+            if (this.graph === g && g.key === key) {
+                g.front = { count, indices, key };
+                g.frontReads++;
+            }
+        }).catch(() => { g.stagePending[si] = false; });
+    };
+
+    // The per-refresh half of the contract: the affine data→px map (the D3 linear
+    // scale collapsed to slope/intercept, margin folded in — see gpuScaleUniform)
+    // plus the CSS-px viewport. 64 bytes, every refresh, and nothing else.
+    P.writeSceneScale = function (xScale, yScale, margin, width, height, xSign, ySign) {
+        const g = this.graph;
+        if (!g || !g.uScene) return;
+        const u = new Float32Array(16);
+        u[0] = xScale(1) - xScale(0); u[1] = margin.left + xScale(0);
+        u[2] = yScale(1) - yScale(0); u[3] = margin.top + yScale(0);
+        u[4] = width; u[5] = height; u[6] = this.dpr; u[7] = 0;
+        // sgn row: filled since G1. The cloud shader doesn't read it (the
+        // skyline gets signs via its own uSky — they're scene identity, not
+        // view), but G2's HV shade orients its quadrant from here.
+        u[8] = xSign ?? 1; u[9] = ySign ?? 1;
+        // corn row = (antiX, antiY, idealX, idealY) in FULL pixel space (margin folded
+        // in, matching the affine output) — the HV shade fragment projects onto the
+        // ideal→anti axis for its gradient t. Plot edges from the D3 scale ranges:
+        // xScale.range() = [0, plotW], yScale.range() = [plotH, 0].
+        const sx = xSign ?? 1, sy = ySign ?? 1;
+        const plotW = xScale.range()[1] - xScale.range()[0];
+        const plotH = yScale.range()[0] - yScale.range()[1];
+        u[12] = margin.left + (sx > 0 ? 0 : plotW);      // antiX
+        u[13] = margin.top + (sy > 0 ? plotH : 0);       // antiY
+        u[14] = margin.left + (sx > 0 ? plotW : 0);      // idealX
+        u[15] = margin.top + (sy > 0 ? 0 : plotH);       // idealY
+        this.device.queue.writeBuffer(g.uScene, 0, u);
+    };
+
+    // Called from present() via the one-line optional-chained hook, right after
+    // the pixel-space bg instances draw — the scene cloud occupies the same
+    // background layer (under trails / heads / frontier dots). Restores pPoints
+    // because present()'s later drawPts calls assume it's still bound.
+    P._drawGraphScene = function (rp) {
+        if (!this.graphActive) return;       // suppress the retained scene during the animation
+        const g = this.graph;
+        if (!g || !(g.count > 0)) return;
+        rp.setPipeline(this.pSceneCloud);
+        rp.setBindGroup(0, g.bindGroup);
+        rp.draw(6, g.count);
+        rp.setPipeline(this.pPoints);
+    };
+
+    // G2: the HV shade — drawn BEFORE the scene cloud so the dominated-region fill
+    // sits UNDER the dots (matching the SVG order: shade, then cloud, then dots). The
+    // fan vertex count came from the GPU (bShadeIndirect), so a K==0 frame draws nothing.
+    P._drawGraphShade = function (rp) {
+        if (!this.graphActive) return;       // suppress the retained scene during the animation
+        const g = this.graph;
+        if (!g || !(g.count > 0) || !g.bShadeIndirect) return;
+        rp.setPipeline(this.pSceneHvShade);
+        rp.setBindGroup(0, g.hvShadeBindGroup);
+        rp.drawIndirect(g.bShadeIndirect, 0);
+        rp.setPipeline(this.pPoints);
+    };
+
+    // G2: the on-top overlays — the red/purple staircase line (drawIndirect, vertex
+    // count from emit) then the GPU frontier dots (HV-sized, white-ringed; non-front
+    // instances degenerate). Drawn AFTER the cloud + heads, mirroring drawFrontierDots.
+    P._drawGraphOverlays = function (rp) {
+        if (!this.graphActive) return;       // suppress the retained scene during the animation
+        const g = this.graph;
+        if (!g || !(g.count > 0)) return;
+        rp.setPipeline(this.pSceneStairLine);
+        rp.setBindGroup(0, g.stairLineBindGroup);
+        rp.drawIndirect(g.bStairIndirect, 0);
+        rp.setPipeline(this.pSceneFront);
+        rp.setBindGroup(0, g.frontBindGroup);
+        rp.draw(6, g.count);
+        rp.setPipeline(this.pPoints);
+    };
+
+    // G4: depth (onion-peel) layers. Deepest-first staircases (so shallower layers end
+    // up on top), then ONE faded-dots pass over the whole cloud (the shader degenerates
+    // every point not on a layer 1..depth-1). drawIndirect vertex counts came from emit,
+    // so a layer with no points (K==0) draws nothing. No-op at depth 1.
+    P._drawGraphDepth = function (rp) {
+        if (!this.graphActive) return;       // suppress the retained scene during the animation
+        const g = this.graph;
+        if (!g || !(g.count > 0) || !(g.depth > 1)) return;
+        // Shades first (deepest-first; flat 0.06 fans, src-over stacking darkens the core),
+        // then the staircase lines on top — same paint order as the SVG depth-layers group.
+        for (let L = g.depth - 1; L >= 1; L--) {
+            rp.setPipeline(this.pDepthShade);
+            rp.setBindGroup(0, g.depthShadeBG[L]);
+            rp.drawIndirect(g.bDepthShadeIndirect[L], 0);
+        }
+        for (let L = g.depth - 1; L >= 1; L--) {
+            rp.setPipeline(this.pSceneStairLine);
+            rp.setBindGroup(0, g.depthStairLineBG[L]);
+            rp.drawIndirect(g.bDepthIndirect[L], 0);
+        }
+        rp.setPipeline(this.pDepthDots);
+        rp.setBindGroup(0, g.depthDotsBindGroup);
+        rp.draw(6, g.count);
+        rp.setPipeline(this.pPoints);
+    };
+
+    // G4d: era-B + ghost overlays. Ghost first (faint dashed reference, under), then
+    // era-B (shade → solid staircase → dots). Drawn after the cloud/depth, under the
+    // live frontier — matching the SVG overlay layering. No-op when an overlay is off.
+    P._drawGraphAux = function (rp) {
+        if (!this.graphActive) return;       // suppress the retained scene during the animation
+        const g = this.graph;
+        if (!g || !(g.count > 0)) return;
+        if (g.ghostStairN > 1) {
+            rp.setPipeline(this.pDashLine); rp.setBindGroup(0, g.ghostLineBG); rp.draw(g.ghostStairN);
+        }
+        if (g.ghostDotN > 0) {
+            rp.setPipeline(this.pPlainDots); rp.setBindGroup(0, g.ghostDotsBG); rp.draw(6, g.ghostDotN);
+        }
+        if (g.eraStairN > 1) {
+            rp.setPipeline(this.pDepthShade); rp.setBindGroup(0, g.eraShadeBG); rp.draw(3 * (g.eraStairN - 1));
+            rp.setPipeline(this.pDashLine);   rp.setBindGroup(0, g.eraLineBG);  rp.draw(g.eraStairN);
+        }
+        if (g.eraDotN > 0) {
+            rp.setPipeline(this.pPlainDots); rp.setBindGroup(0, g.eraDotsBG); rp.draw(6, g.eraDotN);
+        }
+        rp.setPipeline(this.pPoints);
+    };
+
+    // G3: the glyph text — drawn LAST in present() (on top of everything). Tick labels
+    // + frontier names; halo+fill glyph instances composite via the premultiplied blend.
+    P._drawGraphText = function (rp) {
+        if (!this.graphActive) return;       // suppress the retained scene during the animation
+        const g = this.graph;
+        if (!g || !(g.glyphCount > 0) || !g.glyphBindGroup) return;
+        rp.setPipeline(this.pSceneGlyph);
+        rp.setBindGroup(0, g.glyphBindGroup);
+        rp.draw(6, g.glyphCount);
+        rp.setPipeline(this.pPoints);
+    };
+
+    // Drop the scene (clear() and any frame that leaves the gpuGraph path).
+    // Buffers stay allocated — only the count/key reset, so re-entering the path
+    // with the same identity still re-uploads (the key is gone) but without a
+    // re-allocation. Cheap and unconditionally safe to call.
+    P._clearGraphScene = function () {
+        const g = this.graph;
+        if (!g) return;
+        g.count = 0;
+        g.key = null;
+        g.front = null;   // a keyed readback result must not outlive its scene
+        g.glyphCount = 0; // text must vanish when leaving the path
+        g.eraStairN = 0; g.eraDotN = 0; g.ghostStairN = 0; g.ghostDotN = 0;   // G4d overlays off
+    };
+
+    // destroy() hook: free the GPU objects with the renderer (device swap /
+    // device loss). Mirrors _destroyEvt.
+    P._destroyGraph = function () {
+        const g = this.graph;
+        if (!g) return;
+        for (const k of ["bPos", "bCol", "bSize", "uScene",
+                         "bOnFront", "bFrontIdx", "bCount", "uSky",
+                         "bFrontSorted", "bFrontSortedIdx", "bStaircase", "bStairIndirect",
+                         "bShadeIndirect", "bHv", "bFrontRadius", "bHvScalar",
+                         "uStair", "uHv", "uGraphCol", "bGlyph",
+                         "bPeeled", "bLayerOf", "bOnTmp", "uDepth", "uDepthDots",
+                         "bEraStair", "bEraArc", "bEraDots", "uEraDash", "uEraShade", "uEraDot",
+                         "bGhostStair", "bGhostArc", "bGhostDots", "uGhostDash", "uGhostDot"]) g[k]?.destroy();
+        for (const arr of ["bDepthIdx", "bDepthCount", "bDepthSorted", "bDepthSortedIdx",
+                           "bDepthStair", "bDepthIndirect", "bDepthShadeIndirect", "uDepthCol"])
+            for (const b of g[arr] || []) b?.destroy();
+        for (const s of g.stage || []) s?.destroy();
+        this.glyphTex?.destroy(); this.glyphTex = null; this.glyph = null;
+        this.graph = null;
+    };
+
+    // ── G0 verification (one-shot, never in the render loop) ────────────────
+    // The invariant pair from the design doc's G0 gate:
+    //   dotCount   — instances the GPU will draw == finite points the CPU sent
+    //                (compared against window.__bl2d_gpuGraphN by the caller);
+    //   posMis     — GPU buffer readback != the JS-side copy at any float ⇒ the
+    //                upload path corrupted data (expects EXACT equality: the
+    //                bytes are copied, never transformed).
+    // `uploads` lets the harness assert retention: refresh twice with the same
+    // identity ⇒ uploads stays at 1 (the second refresh only wrote uScene).
+    // G1 adds three invariants on top:
+    //   skylineMis — GPU onFront[] vs a JS brute-force strict-dominance reference
+    //                computed over the SAME f32 data (cpuPos) with the same signs.
+    //                Expect 0; any mismatch means the shader or signs diverged.
+    //   frontMis   — the READBACK set (bCount+bFrontIdx via g.front) vs the CPU
+    //                sweep that feeds the sidebar cards (__bl2d_frontierXY),
+    //                compared as a frounded-(x,y) multiset. This is the phase
+    //                gate's "readback set == cards" — by provenance, frontierXY
+    //                comes from the very `frontier` array renderFrontierCards
+    //                received. -1 = readback not landed yet (mapAsync pending).
+    //   frontReads — retention: 1 after any number of identity-preserving
+    //                redraws (the skyline only ran on the scene-dirty frame).
+    window.__bl2d_verifyGraph = async () => {
+        if (!(pointRenderer instanceof WebGPURenderer)) return null;
+        const g = pointRenderer.graph;
+        if (!g || !(g.count > 0)) return null;
+        const gpuPos = await pointRenderer._readback(g.bPos, g.count * 8, Float32Array);
+        let posMis = 0, maxAbs = 0;
+        for (let i = 0; i < g.count * 2; i++) {
+            const d = Math.abs(gpuPos[i] - g.cpuPos[i]);
+            if (d > 0) { posMis++; if (d > maxAbs) maxAbs = d; }
+        }
+        // JS brute-force reference over the f32 copy — O(n²), one-shot only.
+        const gpuFront = await pointRenderer._readback(g.bOnFront, g.count * 4, Uint32Array);
+        const n = g.count, fp = g.cpuPos, sx = g.xSign, sy = g.ySign;
+        let skylineMis = 0, refFrontSize = 0;
+        for (let i = 0; i < n; i++) {
+            const xi = fp[i * 2] * sx, yi = fp[i * 2 + 1] * sy;
+            let dom = 0;
+            for (let j = 0; j < n; j++) {
+                const xj = fp[j * 2] * sx, yj = fp[j * 2 + 1] * sy;
+                if (xj >= xi && yj >= yi && (xj > xi || yj > yi)) { dom = 1; break; }
+            }
+            if (!dom) refFrontSize++;
+            if ((gpuFront[i] !== 0 ? 1 : 0) !== (dom ? 0 : 1)) skylineMis++;
+        }
+        // Readback set vs the cards' frontier, as a frounded-(x,y) multiset
+        // (fround both sides: the GPU saw f32, the cards hold f64).
+        let frontMis = -1, frontCount = null, cardPidsMatch = null;
+        if (g.front && g.front.key === g.key && window.__bl2d_frontierXY) {
+            frontCount = g.front.count;
+            const tally = (keys) => { const m = new Map(); for (const k of keys) m.set(k, (m.get(k) || 0) + 1); return m; };
+            const kOf = (x, y) => Math.fround(x) + "|" + Math.fround(y);
+            const gotM = tally(g.front.indices.map(i => kOf(g.cpuMeta[i].x, g.cpuMeta[i].y)));
+            const refM = tally(window.__bl2d_frontierXY.map(([x, y]) => kOf(x, y)));
+            frontMis = 0;
+            for (const [k, v] of refM) frontMis += Math.abs(v - (gotM.get(k) || 0));
+            for (const [k, v] of gotM) if (!refM.has(k)) frontMis += v;
+            // pid-level reconciliation (set compare: dedup may keep a different
+            // equal-(x,y) object than the sweep, but G1 uploads the same unique
+            // array the sweep ran on, so pids should agree exactly).
+            const gotPids = new Set(g.front.indices.map(i => g.cpuMeta[i].playerID));
+            const refPids = new Set(window.__bl2d_frontierPids || []);
+            cardPidsMatch = gotPids.size === refPids.size &&
+                [...refPids].every(p => gotPids.has(p));
+        }
+
+        // ── G2 invariants: staircase vertex count, HV contributions, dot radii, shade
+        // quadrant. The HV oracle is an f32 re-sweep over g.cpuPos (NOT the f64
+        // computeHvContributions) so it matches the GPU's f32 arithmetic exactly — the
+        // same provenance trick skylineMis uses; we also report the rel error vs the
+        // f64 sidebar numbers for sanity. Driven by the GPU's OWN rank order
+        // (bFrontSortedIdx) so rank r in bHv lines up with the JS oracle.
+        let stairVertMis = -1, hvMis = -1, hvMaxRel = -1, radiusMis = -1, shadeQuadrant = null;
+        if (g.front && g.front.key === g.key && g.count > 0) {
+            const K = g.front.count;
+            const stairCount = (await pointRenderer._readback(g.bStairIndirect, 16, Uint32Array))[0];
+            stairVertMis = Math.abs(stairCount - (1 + 2 * K));
+            const sortedIdx = await pointRenderer._readback(g.bFrontSortedIdx, K * 4, Uint32Array);
+            const gpuHv = await pointRenderer._readback(g.bHv, K * 4, Float32Array);
+            const gpuRad = await pointRenderer._readback(g.bFrontRadius, g.count * 4, Float32Array);
+            const fp = g.cpuPos, nn = g.count, sgx = g.xSign, sgy = g.ySign, RxC = g.RxC, RyC = g.RyC;
+            const hvOfStack = (st) => { let hv = 0, xp = RxC; for (const p of st) { hv += (p[0] - xp) * (p[1] - RyC); xp = p[0]; } return hv; };
+            const sweepExcl = (skip) => {
+                const st = [];
+                for (let i = 0; i < nn; i++) {
+                    if (i === skip) continue;
+                    const X = Math.fround(fp[i * 2] * sgx), Y = Math.fround(fp[i * 2 + 1] * sgy);
+                    while (st.length && st[st.length - 1][1] < Y) st.pop();
+                    if (st.length && st[st.length - 1][1] === Y && st[st.length - 1][0] < X) st.pop();
+                    st.push([X, Y]);
+                }
+                return st;
+            };
+            const totalJs = hvOfStack(sweepExcl(-1));
+            const contribJs = new Float64Array(K);
+            for (let r = 0; r < K; r++) contribJs[r] = totalJs - hvOfStack(sweepExcl(sortedIdx[r]));
+            let maxJs = 0; for (let r = 0; r < K; r++) maxJs = Math.max(maxJs, contribJs[r]);
+            if (maxJs <= 0) maxJs = 1;
+            hvMis = 0; hvMaxRel = 0; radiusMis = 0;
+            const R_MIN = WEBGPU_GRAPH_R_MIN, R_MAX = WEBGPU_GRAPH_R_MAX;
+            for (let r = 0; r < K; r++) {
+                const c = Math.max(contribJs[r], 0);
+                // Accuracy normalized by maxContrib — the quantity the dot radius actually
+                // consumes (radius = R_MIN + Δ·sqrt(contrib/max)). A RAW relative error is
+                // meaningless for near-zero contributions (radius is R_MIN either way), and
+                // a contribution is total−alt of two large HV areas, so f32 cancellation is
+                // unavoidable (the JS oracle accumulates in f64). 1e-3 of the dynamic range
+                // is the f32-realistic floor; radiusMis below is the authoritative visual gate.
+                const rel = Math.abs(gpuHv[r] - c) / maxJs;
+                if (rel > 1e-3) hvMis++;
+                if (rel > hvMaxRel) hvMaxRel = rel;
+                const cpuRad = R_MIN + (R_MAX - R_MIN) * Math.sqrt(c / maxJs);
+                if (Math.abs(gpuRad[sortedIdx[r]] - cpuRad) > 1e-3) radiusMis++;
+            }
+            // Shade quadrant: the anti-ideal corner must be the canonical MINIMUM corner
+            // (≤ every frontier point in canonical space) — flips correctly with signs.
+            shadeQuadrant = true;
+            for (const idx of g.front.indices) {
+                const X = g.cpuMeta[idx].x * sgx, Y = g.cpuMeta[idx].y * sgy;
+                if (g.antiXC > X + 1e-6 || g.antiYC > Y + 1e-6) shadeQuadrant = false;
+            }
+        }
+
+        // ── G3 invariants: glyph instances, tick strings, atlas coverage. All CPU-side
+        // (no GPU readback): the instance count vs the ideal Σ-codepoints (×2 for halo'd
+        // labels), the GPU tick strings vs d3's default format, and every requested
+        // codepoint present in the atlas (no .notdef).
+        let glyphMis = -1, tickMis = -1, atlasMissing = -1, glyphCount = g.glyphCount || 0;
+        let glyphUploadPath = pointRenderer.glyph?.uploadPath ?? null;
+        let atlasW = pointRenderer.glyph?.w ?? null, atlasH = pointRenderer.glyph?.h ?? null;
+        if (g.glyphCount > 0) {
+            const txt = window.__bl2d_gpuGraphText;
+            glyphMis = txt ? Math.abs(g.glyphCount - txt.expected) : -1;
+            // Tick strings: re-derive d3's default format over the live scales and compare.
+            const tk = window.__bl2d_gpuGraphTicks;
+            if (tk && window.__bl2d_liveScales) {
+                const { xScale, yScale, nx, ny } = window.__bl2d_liveScales;
+                const rx = xScale.ticks(nx).map(xScale.tickFormat(nx));
+                const ry = yScale.ticks(ny).map(yScale.tickFormat(ny));
+                tickMis = 0;
+                if (rx.length !== tk.x.length || ry.length !== tk.y.length) tickMis = 999;
+                else { for (let i = 0; i < rx.length; i++) if (rx[i] !== tk.x[i]) tickMis++;
+                       for (let i = 0; i < ry.length; i++) if (ry[i] !== tk.y[i]) tickMis++; }
+            }
+            // Atlas coverage: every codepoint in the uploaded charset has a (variant-0) cell.
+            const cs = g.glyphCharset || "";
+            atlasMissing = 0;
+            const met = pointRenderer.glyph?.metrics;
+            for (const ch of new Set(Array.from(cs)))
+                if (!met || !met.has(ch.codePointAt(0))) atlasMissing++;
+        }
+
+        // ── G4 invariant: GPU onion-peel layer sizes == the CPU oracle. Read layerOf[]
+        // back, tally points per layer 0..depth-1, and compare to __bl2d_depthLayers
+        // (script.js paretoLayers). depthMis -1 when depth==1 (no peeling requested).
+        let depthMis = -1, depthLayersGpu = null, depthStairMis = -1;
+        if (g.depth > 1) {
+            const lo = await pointRenderer._readback(g.bLayerOf, g.count * 4, Uint32Array);
+            depthLayersGpu = new Array(g.depth).fill(0);
+            for (let i = 0; i < g.count; i++) { const L = lo[i]; if (L < g.depth) depthLayersGpu[L]++; }
+            const cpu = window.__bl2d_depthLayers || [];
+            depthMis = Math.abs(depthLayersGpu.length - cpu.length);
+            for (let L = 0; L < g.depth; L++) depthMis += Math.abs((depthLayersGpu[L] || 0) - (cpu[L] || 0));
+            // Per deeper-layer staircase vertex count == 1 + 2·K_L (the CPU R sequence),
+            // read straight from each layer's emit-written indirect draw args.
+            depthStairMis = 0;
+            for (let L = 1; L < g.depth; L++) {
+                const ind = await pointRenderer._readback(g.bDepthIndirect[L], 16, Uint32Array);
+                const expect = 1 + 2 * (depthLayersGpu[L] || 0);
+                if (ind[0] !== expect) depthStairMis++;
+            }
+        }
+
+        return {
+            dotCount: g.count,
+            expectedN: window.__bl2d_gpuGraphN ?? null,
+            posMis, maxAbs,
+            skylineMis, refFrontSize,
+            frontMis, frontCount, cardPidsMatch,
+            stairVertMis, hvMis, hvMaxRel, radiusMis, shadeQuadrant,
+            glyphCount, glyphMis, tickMis, atlasMissing, glyphUploadPath, atlasW, atlasH,
+            depthMis, depthLayersGpu, depthStairMis, depth: g.depth,
+            // G4d: overlay staircase/dot counts == 2K+1 / K of the CPU oracle frontiers.
+            overlayMis: (() => {
+                const oe = window.__bl2d_overlayExpect || {};
+                let m = 0;
+                if (g.eraStairN)   m += Math.abs(g.eraStairN - (1 + 2 * (oe.eraFront || 0))) + Math.abs(g.eraDotN - (oe.eraFront || 0));
+                if (g.ghostStairN) m += Math.abs(g.ghostStairN - (1 + 2 * (oe.ghostFront || 0))) + Math.abs(g.ghostDotN - (oe.ghostFront || 0));
+                return m;
+            })(),
+            eraStairN: g.eraStairN, ghostStairN: g.ghostStairN,
+            // G5b: regret leader anchoring. After a non-frontier hover, the GPU regret line's
+            // source MUST equal the hovered point's DATA coords (anchored in data space,
+            // transformed by uScene.ab in the shader). regretMis = L1(src − hovered) [+ tgt if
+            // hasLine] — 0 ⇒ the GPU carries exactly the CPU regret geometry. Null until a hover.
+            regretMis: (() => {
+                const e = window.__bl2d_regretExpect;
+                if (!e || !g.lastLine) return null;
+                const r = g.lastLine;
+                let m = Math.abs(r.srcX - e.srcX) + Math.abs(r.srcY - e.srcY);
+                if (e.hasLine) m += Math.abs(r.tgtX - e.tgtX) + Math.abs(r.tgtY - e.tgtY);
+                if (!isFinite(r.tgtX) || !isFinite(r.tgtY)) m += 1e6;
+                return m;
+            })(),
+            // G5c: isolation ring. After a frontier hover, the first GPU ring's DATA-space
+            // centre MUST equal the hovered frontier point and its pixel radius the
+            // isolationMap distance (set on window.__bl2d_ringExpect by the sim hook). 0 ⇒ match.
+            ringMis: (() => {
+                const e = window.__bl2d_ringExpect;
+                if (!e || !g.lastRings || !g.lastRings.length) return null;
+                const r = g.lastRings[0];
+                let m = Math.abs(r.cx - e.cx) + Math.abs(r.cy - e.cy);
+                if (e.radiusPx != null) m += Math.abs(r.radiusPx - e.radiusPx);
+                return m;
+            })(),
+            interLineOn: g.interLineOn,
+            ringCount: g.ringCount,
+            frontReads: g.frontReads,
+            uploads: g.uploads,
+            key: g.key,
+        };
+    };
+    window.__bl2d_graphMode = () =>
+        pointRenderer instanceof WebGPURenderer && !!pointRenderer.graphMode;
+
+    // ── G6c: one-run full parity matrix ─────────────────────────────────────
+    // Replaces the ad-hoc per-phase gates with ONE headless sweep. It drives the
+    // REAL DOM selectors (dataset → mode → axes → depth → Best/Worst → era-B →
+    // ghost), so the change handlers + refreshChart fire exactly as a user would,
+    // awaits the rAF draw AND the async frontier readback to land, then folds
+    // __bl2d_verifyGraph's invariants into a PASS/FAIL row per combo. A green run
+    // means every G0–G4 invariant held across a representative cross-section.
+    // Negative control: ?matrixPerturb=1 (or {perturb:true}) corrupts one oracle
+    // (the expected glyph count) right before each verify, so a deliberately-broken
+    // run is PROVEN to FAIL — that's what makes a green run mean something.
+    // Vehicle: the file:// bundle (no stat layer → static, the only state the
+    // G-track engages in) under ?webgpuHeadless=1&gpugraph=1, driven by snap-gpu.js.
+    const _raf = () => new Promise(r => requestAnimationFrame(r));
+    const _delay = (ms) => new Promise(r => setTimeout(r, ms));
+    // Wait for the rAF-scheduled draw to run, then for the fire-and-forget frontier
+    // readback (g.front: double-buffered mapAsync on the scene-dirty frame) to land
+    // for the CURRENT scene key — frontMis/cardPidsMatch read null until it resolves.
+    const _settleGraph = async (awaitFront = true) => {
+        await _raf(); await _raf();           // let refreshChart's queued draw execute
+        if (!awaitFront) { await _raf(); return; }
+        const landed = () => { const g = pointRenderer.graph; return g && g.front && g.front.key === g.key; };
+        for (let i = 0; i < 80 && !landed(); i++) await _delay(25);   // poll up to ~2s
+        await _raf();
+    };
+    const _clickIfNeeded = (sel, isActive) => {
+        const el = document.querySelector(sel);
+        if (el && !isActive(el)) { el.click(); return true; }
+        return false;
+    };
+    window.__bl2d_verifyGraphMatrix = async (opts = {}) => {
+        if (!(pointRenderer instanceof WebGPURenderer)) {
+            console.log("MATRIX-SKIP not a WebGPURenderer (Canvas2D fallback?)");
+            return { rows: [], fails: ["not-webgpu"], allGreen: false };
+        }
+        const params = new URLSearchParams(location.search);
+        const perturb = opts.perturb ?? (params.get("matrixPerturb") === "1");
+        // ~15 representative combos (NOT the full cartesian product): the axis
+        // classes (counting / lower-is-better / rate / composite) × season&career ×
+        // Best/Worst × depth ∈ {1,3,5} × one ghost × one era-B, in batting & pitching.
+        const combos = opts.combos || [
+            { name: "bat HR×SB career",         ds: "batting",  x: "HR",   y: "SB", mode: "career" },
+            { name: "bat HR×SB season",         ds: "batting",  x: "HR",   y: "SB", mode: "season" },
+            { name: "bat OBP×SLG career rate",  ds: "batting",  x: "OBP",  y: "SLG", mode: "career" },
+            { name: "bat TB×PA career comp",    ds: "batting",  x: "TB",   y: "PA", mode: "career" },
+            { name: "bat HR×SB career worst",   ds: "batting",  x: "HR",   y: "SB", mode: "career", worst: true },
+            { name: "bat HR×SB career d3",      ds: "batting",  x: "HR",   y: "SB", mode: "career", depth: 3 },
+            { name: "bat HR×SB season d5",      ds: "batting",  x: "HR",   y: "SB", mode: "season", depth: 5 },
+            { name: "bat HR×SB career era-B",   ds: "batting",  x: "HR",   y: "SB", mode: "career", era: true },
+            { name: "bat HR×SB career ghost",   ds: "batting",  x: "HR",   y: "SB", mode: "career", bats: "R" },
+            { name: "pit ERA↓×SO career",       ds: "pitching", x: "ERA",  y: "SO", mode: "career" },
+            { name: "pit WHIP↓×SO career",      ds: "pitching", x: "WHIP", y: "SO", mode: "career" },
+            { name: "pit BB/9↓×SO season",      ds: "pitching", x: "BB/9", y: "SO", mode: "season" },
+            { name: "pit W×SO career",          ds: "pitching", x: "W",    y: "SO", mode: "career" },
+            { name: "pit ERA↓×SO career worst", ds: "pitching", x: "ERA",  y: "SO", mode: "career", worst: true },
+            { name: "pit ERA↓×SO career d3",    ds: "pitching", x: "ERA",  y: "SO", mode: "career", depth: 3 },
+        ];
+        const setSelectVal = (id, val) => {
+            const el = document.getElementById(id);
+            if (!el || el.value === val) return;       // no-op if already set (no spurious change)
+            el.value = val;
+            el.dispatchEvent(new Event("change"));      // → axisOrViewChanged → filterChanged (static path)
+        };
+        const drive = async (c) => {
+            // 1. dataset FIRST — its click handler rebuilds the axis <option>s synchronously.
+            _clickIfNeeded(`#stats-toggle .mode-btn[data-stats="${c.ds}"]`, el => el.classList.contains("active"));
+            // 2. mode
+            _clickIfNeeded(`#mode-toggle .mode-btn[data-mode="${c.mode}"]`, el => el.classList.contains("active"));
+            // 2b. threshold → the mode's qualifier default. applyModeConfig deliberately
+            //     KEEPS a still-valid prior value, so a career→season combo order would
+            //     otherwise leak a stale 0 (= no qualifier) and a rate-stat season combo
+            //     would test a 34k-point unqualified cloud instead of the ~7k qualified
+            //     frontier — a different, order-dependent universe. Pin it per combo so
+            //     the matrix is reproducible regardless of combo order.
+            if (typeof resetThresholdToDefault === "function") {
+                resetThresholdToDefault();
+                document.getElementById("pa-min-select")?.dispatchEvent(new Event("change"));
+            }
+            // 3. axes
+            setSelectVal("x-axis-select", c.x);
+            setSelectVal("y-axis-select", c.y);
+            // 4. Pareto depth
+            _clickIfNeeded(`#depth-seg .seg-btn[data-depth="${c.depth || 1}"]`, el => el.classList.contains("active"));
+            // 5. Best/Worst — NOT URL-persisted, so it must be clicked. The handler has
+            //    no "already active" guard, so re-clicking the current mode is a harmless refresh.
+            document.querySelector(`.frontier-btn[data-mode="${c.worst ? "worst" : "best"}"]`)?.click();
+            // 6. era-B compare (a toggle: click only to reach the desired state)
+            const eraBtn = document.getElementById("era-compare-toggle");
+            if (eraBtn && eraBtn.classList.contains("active") !== !!c.era) eraBtn.click();
+            // 7. ghost — any bats filter (≠ all) makes drawScatterPlot build the global ghost frontier.
+            _clickIfNeeded(`#bats-seg .seg-btn[data-bats="${c.bats || "all"}"]`, el => el.classList.contains("active"));
+            await _settleGraph();
+        };
+        const evalRow = (c, v) => {
+            const fails = [];
+            if (!v) { fails.push("no-verifyGraph"); return fails; }
+            const z = (n) => { if (v[n] > 0) fails.push(`${n}=${v[n]}`); };
+            // The "must be exactly 0" invariants. hvMis is intentionally NOT here:
+            // it rides a maxContrib-normalized f32 floor (see G2 decisions of record);
+            // radiusMis is the authoritative HV/visual gate.
+            ["posMis", "skylineMis", "stairVertMis", "radiusMis", "glyphMis", "tickMis", "atlasMissing", "overlayMis"].forEach(z);
+            if (v.frontMis !== 0) fails.push(`frontMis=${v.frontMis}`);          // -1 (readback never landed) or >0 both fail
+            if (v.cardPidsMatch !== true) fails.push(`cardPidsMatch=${v.cardPidsMatch}`);
+            if (v.shadeQuadrant !== true) fails.push(`shadeQuadrant=${v.shadeQuadrant}`);
+            if ((c.depth || 1) > 1) {
+                if (v.depthMis !== 0) fails.push(`depthMis=${v.depthMis}`);
+                if (v.depthStairMis !== 0) fails.push(`depthStairMis=${v.depthStairMis}`);
+            }
+            // Positive overlay-engaged checks: a combo that asked for era-B / ghost must
+            // actually have drawn it (overlayMis silently passes when the overlay is absent).
+            if (c.era && !(v.eraStairN > 0)) fails.push("eraStairN=0 (era-B overlay never drew)");
+            if (c.bats && c.bats !== "all" && !(v.ghostStairN > 0)) fails.push("ghostStairN=0 (ghost overlay never drew)");
+            if (v.regretMis != null && v.regretMis > 0) fails.push(`regretMis=${v.regretMis}`);
+            if (v.ringMis != null && v.ringMis > 0) fails.push(`ringMis=${v.ringMis}`);
+            return fails;
+        };
+        const rows = [];
+        for (const c of combos) {
+            await drive(c);
+            // Negative control: corrupt one oracle (expected glyph count) right before the
+            // verify. drawScatterPlot rewrites __bl2d_gpuGraphText every refresh, so this is
+            // transient/per-row; it forces glyphMis>0 ⇒ the row (and run) FAILS as designed.
+            if (perturb && window.__bl2d_gpuGraphText) window.__bl2d_gpuGraphText.expected += 7;
+            const v = await window.__bl2d_verifyGraph();
+            const fails = evalRow(c, v);
+            const pass = fails.length === 0;
+            rows.push({
+                name: c.name, pass, fails,
+                v: v && {
+                    dotCount: v.dotCount, posMis: v.posMis, skylineMis: v.skylineMis,
+                    frontMis: v.frontMis, cardPidsMatch: v.cardPidsMatch, stairVertMis: v.stairVertMis,
+                    radiusMis: v.radiusMis, hvMis: v.hvMis, hvMaxRel: v.hvMaxRel, shadeQuadrant: v.shadeQuadrant,
+                    glyphMis: v.glyphMis, tickMis: v.tickMis, atlasMissing: v.atlasMissing,
+                    depth: v.depth, depthMis: v.depthMis, depthStairMis: v.depthStairMis,
+                    overlayMis: v.overlayMis, eraStairN: v.eraStairN, ghostStairN: v.ghostStairN,
+                    uploads: v.uploads, frontReads: v.frontReads,
+                },
+            });
+            console.log(`MATRIX-ROW ${pass ? "PASS" : "FAIL"} ${c.name}${fails.length ? "  ::  " + fails.join(", ") : ""}`);
+        }
+        // Retention: an identity-preserving redraw must NOT re-upload the scene or
+        // re-run the skyline readback (uploads/frontReads stay put — G0/G1 invariant).
+        let retention = null;
+        {
+            const g = pointRenderer.graph;
+            if (g) {
+                const before = { uploads: g.uploads, frontReads: g.frontReads };
+                document.dispatchEvent(new Event("bl2d:refresh"));   // same scene identity
+                await _settleGraph(false);
+                const after = { uploads: g.uploads, frontReads: g.frontReads };
+                const ok = after.uploads === before.uploads && after.frontReads === before.frontReads;
+                retention = { ok, before, after };
+                if (!ok) rows.push({ name: "retention", pass: false, fails: [`uploads ${before.uploads}→${after.uploads}`, `frontReads ${before.frontReads}→${after.frontReads}`] });
+                console.log(`MATRIX-ROW ${ok ? "PASS" : "FAIL"} retention  uploads ${before.uploads}→${after.uploads} frontReads ${before.frontReads}→${after.frontReads}`);
+            }
+        }
+        const failRows = rows.filter(r => !r.pass);
+        const allGreen = failRows.length === 0 && (retention ? retention.ok : true);
+        const summary = { rows, fails: failRows.map(r => r.name), allGreen, perturb, retention, combos: combos.length };
+        window.__bl2d_matrix = summary;
+        console.log(`MATRIX-SUMMARY ${allGreen ? "ALL-GREEN" : "FAILED"} ${rows.filter(r => r.pass).length}/${rows.length} pass${perturb ? " (perturb/negative-control)" : ""}${failRows.length ? "  fails: " + failRows.map(r => r.name).join("; ") : ""}`);
+        return summary;
+    };
+})();
