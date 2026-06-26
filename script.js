@@ -1376,6 +1376,18 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
             // it never clears during the animation. In smooth mode the add never fires, so the
             // remove is just a harmless no-op each frame.
             loadingIndicator.classList.remove("active");
+            // A SETTLED/PAUSED GPU spring/season frame: the glide loop (springLoop) is otherwise
+            // only alive while playing (pbpRaf) or within the post-playback settle tail, so a
+            // paused frame — the initial load, a scrub-stop, a filter change — would freeze the
+            // spring at its single first-present step. Season's tiny targets still look settled,
+            // but career's large targets glide visibly from 0 and freeze compressed at the origin.
+            // Kick the same settle tail stopping playback uses (without springFinalPending, which
+            // would owe an extra refreshChart) so the spring glides to rest on any paused GPU frame.
+            if (lastGpuSpringFrame && !pbpRaf) {
+                const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
+                springLoopUntil = now + SPRING_SETTLE_MS;
+                startSpringLoop();
+            }
             writeUrlState({ xDim, yDim, sYear, eYear, minPa: thresholdValue, mode, league, bats, colorBy, depth, compareEras, sB, eB, country, franchise });
         });
     }
@@ -4695,6 +4707,16 @@ window.__bl2d_verifySpring = async (names = ["Barry Bonds", "Rickey Henderson"])
     return { springMis: r.springMis, skylineMis: r.skylineMis, frontierSize: r.frontierSize, maxX: r.maxX, maxY: r.maxY, players: r.players, records };
 };
 window.__bl2d_springMode = () => pointRenderer instanceof WebGPURenderer && !!pointRenderer.springMode;
+// Diagnostic: the renderer's retained per-buffer instance counts + the bg cache key, for
+// debugging cold-load / paused-frame cloud-draw issues (which buffers are populated).
+window.__bl2d_renderCounts = () => (pointRenderer && pointRenderer.count)
+    ? { ...pointRenderer.count, bgCacheKey: pointRenderer.bgCacheKey ?? null, presentCount: window.__bl2d_presentCount ?? 0,
+        evt: pointRenderer.evt ? {
+            hasPending: !!pointRenderer.evt.pending, failed: !!pointRenderer.evt.failed, hasSpring: !!pointRenderer.evt.spring,
+            pendingSeason: !!pointRenderer.evt.pending?.season, pendingSpring: !!pointRenderer.evt.pending?.spring,
+            pendingCount: pointRenderer.evt.pending?.count, instanceCount: pointRenderer.evt.pending?.instanceCount,
+        } : null }
+    : null;
 
 // S-track SA1 invariant probe (the GPU season-targeting oracle). Requires the spring engine
 // (?gpustream≠0) and a resident .evt model. Drives a cursor sequence that exercises every
@@ -6102,7 +6124,10 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
         (colorBy === "era" || colorBy === "bats" || colorBy === "league") &&
         xSign === 1 && ySign === 1 && !showWorstFrontier &&
         bats === "all" && country === "all" &&
-        filters.lite &&
+        // NOT conditioned on `filters.lite` — see the gpuSeason note below. The legacy
+        // CPU-points-on-GPU fallback doesn't render a settled/paused frame on a real GPU, so a
+        // `lite`-only gate left paused CAREER smooth blank too. Engaging on settled frames
+        // re-arms the glide loop; `lite` still gates the interaction work downstream.
         frontierResult.gpu &&
         pointRenderer.uploadEvtStream(pbpEvt, colorBy)
     );
@@ -6120,12 +6145,21 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // owns the open-season moving cloud (mode=1, baseline-subtracted, SA2) AND the hybrid union
     // frontier (open ∪ the CPU completed-season frontier phantoms, SA3); the CPU keeps only the
     // completed-season bg cloud. Every ineligible case below falls back to the proven CPU season
-    // cloud + CPU frontier: rate axes, a sign-flipped/worst frontier, a bats/country filter, a
-    // non-WebGPU renderer or ?gpustream=0, or a paused/non-lite frame.
+    // cloud + CPU frontier: rate axes, a sign-flipped/worst frontier, a bats/country filter, or a
+    // non-WebGPU renderer / ?gpustream=0.
+    //
+    // NOTE: this gate is intentionally NOT conditioned on `filters.lite`. The legacy
+    // CPU-points-on-GPU fallback (drawForeground/drawBackground → drawPts) does NOT render on a
+    // real GPU for a settled/paused frame (it only ever appeared via the glide loop's repeated
+    // presents during playback), so gating the GPU season path on `lite` left the default landing
+    // view — season smooth, paused — with a blank cloud (only the SVG frontier + HV area showed).
+    // Engaging on settled frames too re-arms the glide loop (lastGpuSpringFrame below), which
+    // settles the spring to the paused cursor and keeps the cloud drawn. `lite` still gates the
+    // expensive interaction work (cards / HV contributions / quadtree) on its own, downstream.
     const gpuSeason = !!(
         GPU_SEASON &&
         pointRenderer instanceof WebGPURenderer && pointRenderer.springMode &&
-        filters.smooth && filters.lite && !filters.evt && !filters.groupCareer && mode === "season" &&
+        filters.smooth && !filters.evt && !filters.groupCareer && mode === "season" &&
         pbpEvt && pbpEvt.xDim === xDim && pbpEvt.yDim === yDim &&
         !pbpEvt.xs.rate && !pbpEvt.ys.rate &&
         evtGpuMonotone(pbpEvt).ok &&
@@ -6147,37 +6181,48 @@ function drawScatterPlot(points, xDim, yDim, sYear, eYear, minPa, formatStat, mo
     // Group-career suppresses the staircase + HV shade: with only a handful of
     // career dots tracing trajectories, the Pareto envelope clutters more than it
     // clarifies — the focus is the trails + heads.
-    // Under gpuSpring the GPU owns BOTH the red staircase line (drawIndirect) AND the cloud,
-    // drawn from the spring-animated pos[] that lag the true values during a glide. The HV
-    // shade + SVG line here are built from the CPU frontier's *settled* values, so drawing
-    // them would put the shaded area (and a duplicate line) AHEAD of the gliding red line.
-    // Skip both while the GPU spring animates; a paused/idle frame is a CPU frame where the
-    // line and fill agree, so the shade returns the instant playback stops.
-    if (frontier.length > 0 && !filters.groupCareer && !gpuSpring && !gpuGraph && !gpuSeason) {
+    // Under gpuSpring/gpuSeason the GPU owns BOTH the red staircase line (drawIndirect) AND the
+    // cloud, drawn from the spring-animated pos[] that lag the true values during a glide. The HV
+    // shade + SVG line here are built from the CPU frontier's *settled* values, so drawing them
+    // mid-glide would put the shaded area (and a duplicate line) AHEAD of the gliding red line.
+    //
+    // So split the two:
+    //  • HV shade (gradient fill) — shown whenever the staircase the user sees is STATIC: every
+    //    CPU frame AND a SETTLED GPU frame (gpuSpring/gpuSeason but not a `lite` glide). Suppressed
+    //    only mid-glide (`lite`) and under gpuGraph (which draws its own GPU shade). This is what
+    //    keeps the "area" visible on the default paused view now that the GPU owns the settled cloud.
+    //  • SVG staircase LINE — only when the CPU owns the frontier (no GPU spring/season/graph);
+    //    otherwise the GPU draws the line and a second SVG path would duplicate it.
+    const gpuOwnsFrontier = gpuSpring || gpuSeason;   // GPU draws the staircase + frontier dots this frame
+    const drawSvgShade = frontier.length > 0 && !filters.groupCareer && !gpuGraph && !(gpuOwnsFrontier && lite);
+    const drawSvgStaircase = frontier.length > 0 && !filters.groupCareer && !gpuSpring && !gpuGraph && !gpuSeason;
+    if (drawSvgShade || drawSvgStaircase) {
         const line = staircaseScreen(frontier);
+        if (drawSvgShade) {
+            // Hypervolume shading: gradient fill of the dominated region beneath the
+            // staircase, fading from the ideal corner toward the anti-ideal corner.
+            const hvColor = showWorstFrontier ? "#8b5cf6" : "#002D72";
+            const defs = svg.select("defs").empty() ? svg.append("defs") : svg.select("defs");
+            defs.select("#hv-shade-grad").remove();
+            const grad = defs.append("linearGradient")
+                .attr("id", "hv-shade-grad")
+                .attr("gradientUnits", "userSpaceOnUse")
+                .attr("x1", idealCorner[0]).attr("y1", idealCorner[1])
+                .attr("x2", xAnti).attr("y2", yAnti);
+            grad.append("stop").attr("offset", "0%").attr("stop-color", hvColor).attr("stop-opacity", 0.10);
+            grad.append("stop").attr("offset", "100%").attr("stop-color", hvColor).attr("stop-opacity", 0.01);
 
-        // Hypervolume shading: gradient fill of the dominated region beneath the
-        // staircase, fading from the ideal corner toward the anti-ideal corner.
-        const hvColor = showWorstFrontier ? "#8b5cf6" : "#002D72";
-        const defs = svg.select("defs").empty() ? svg.append("defs") : svg.select("defs");
-        defs.select("#hv-shade-grad").remove();
-        const grad = defs.append("linearGradient")
-            .attr("id", "hv-shade-grad")
-            .attr("gradientUnits", "userSpaceOnUse")
-            .attr("x1", idealCorner[0]).attr("y1", idealCorner[1])
-            .attr("x2", xAnti).attr("y2", yAnti);
-        grad.append("stop").attr("offset", "0%").attr("stop-color", hvColor).attr("stop-opacity", 0.10);
-        grad.append("stop").attr("offset", "100%").attr("stop-color", hvColor).attr("stop-opacity", 0.01);
-
-        g.append("path")
-            .attr("class", "hv-shade")
-            .attr("d", "M " + xAnti + "," + yAnti + " L " + line.map(p => p.join(",")).join(" L ") + " Z")
-            .style("fill", "url(#hv-shade-grad)");
-
-        g.append("path")
-            .attr("class", "frontier-staircase")
-            .attr("d", "M " + line.map(p => p.join(",")).join(" L "))
-            .style("stroke", showWorstFrontier ? "#8b5cf6" : null);
+            g.append("path")
+                .attr("class", "hv-shade")
+                .attr("d", "M " + xAnti + "," + yAnti + " L " + line.map(p => p.join(",")).join(" L ") + " Z")
+                .style("fill", "url(#hv-shade-grad)");
+        }
+        if (drawSvgStaircase) {
+            g.append("path")
+                .attr("class", "frontier-staircase")
+                .attr("d", "M " + line.map(p => p.join(",")).join(" L "))
+                .style("stroke", showWorstFrontier ? "#8b5cf6" : null);
+        }
     }
 
     // Era-vs-era overlay: the comparison frontier (teal) + its dominated region,
