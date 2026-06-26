@@ -84,15 +84,20 @@ now finishes the in-flight render track, then returns to the (still-unstarted) d
 
 ### ▶ RESUME HERE (next session)
 
-> **⚠ OPEN BUG (2026-06-20) — season animation shows wrong names/values "here and there."**
-> Live season smooth (real GPU, `gpuseason` default-on since SA4) renders impossible/mislabeled
-> points — e.g. "Kent Hrbek, 76 HR, 0 SB" at Sep 9 1948 (Hrbek debuted 1981; 76 HR is over the
-> record), and a point above the SB axis max. **Ruled out:** the settled CPU model AND settled GPU
-> values are both correct at that cursor (Kiner 38→40 HR / 1948 leaders; `verifySeason` allGreen).
-> So it's a **live-glide / GPU↔CPU hit-test-labeling** bug that only repros on a real GPU. Full
-> investigation handoff (symptoms, evidence, hypotheses, repro commands, mitigation) in
-> **[`docs/BUG-season-wrong-names.md`](BUG-season-wrong-names.md)** — START THERE. Stopgap if needed:
-> `?gpuseason=0` (or revert the SA4 default-on flip) routes season to the proven CPU path.
+> **✅ SHIP READY (2026-06-26) — the branch is verified and ready to merge to `main`.** The
+> roadmap is, for practical purposes, complete: BL2S data migration (S3/S4), S2 Lahman complement,
+> the GPU season animation S-track (SA0–SA4, default-on), and the G-track (G0–G6 agent-doable
+> phases) are all shipped on `feat/event-level-pbp` — **98 commits ahead of `main` (0 behind)**,
+> so production currently shows none of it. The last blocker, the season "wrong-names" bug, is
+> **FIXED** (bind-group-layout property collision, `6869384`/`e31c2cd`; full writeup in
+> **[`docs/BUG-season-wrong-names.md`](BUG-season-wrong-names.md)**). Pre-merge verification (2026-06-26):
+> parity matrix ALL-GREEN 15/15; `verifySeason`/`verifySeasonFrontier`/`verifySpring` all green
+> (Bonds 762/514, Henderson 296/1406); bundle builds; desktop+mobile snaps clean. **Remaining to
+> ship:** one human real-GPU season smoke (headless can't run the GPU season path) → then a clean
+> fast-forward merge. The deploy keeps `LEGACY_PRESENT` default-on (proven present path); the
+> human-gated **G6a/G6b** `legacyPresent` flip is a *post-merge* step, not a merge blocker.
+>
+> _Prior (now resolved) OPEN-BUG note retained in `docs/BUG-season-wrong-names.md`._
 >
 > **Session handoff (2026-06-20, latest) — S2 (Lahman complement) shipped → the whole data
 > track + S-track are done; only the human-gated G6a/G6b remain.** `build_stat_files.py
