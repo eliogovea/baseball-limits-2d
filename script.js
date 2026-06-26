@@ -1368,7 +1368,14 @@ Promise.all([loadDataset("batting"), loadDataset("pitching")]).then(async ([batt
                 : evtSeason ? evtFilters
                 : { league, bats, colorBy, depth, compareEras, sB, eB, country, franchise, thresholdField: def.thresholdField, handField: def.handField, dataset: activeDatasetKey, pbpExtent, smooth: false, lite: false };
             drawScatterPlot(points, xDim, yDim, sY, eY, minThreshold, formatStat, drawMode, drawFilters);
-            if (showLoader) loadingIndicator.classList.remove("active");
+            // Remove unconditionally: a draw means we're no longer loading. Gating this on
+            // `showLoader` left the spinner stuck whenever line 1345's cancelAnimationFrame
+            // cancelled the rAF that would have removed it — e.g. at smooth startup, an early
+            // (!pbpEvt → showLoader) call adds .active, then once pbpEvt loads every subsequent
+            // (showLoader=false) frame cancels the pending remover without re-scheduling one, so
+            // it never clears during the animation. In smooth mode the add never fires, so the
+            // remove is just a harmless no-op each frame.
+            loadingIndicator.classList.remove("active");
             writeUrlState({ xDim, yDim, sYear, eYear, minPa: thresholdValue, mode, league, bats, colorBy, depth, compareEras, sB, eB, country, franchise });
         });
     }
